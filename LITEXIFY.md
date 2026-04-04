@@ -20,11 +20,13 @@ Replace TCL build system with `top.py` Python script. RTL stays 100% untouched -
 - Created `top.py` with Platform definition, source file list, and constraint injection.
 - `python3 top.py --build` produces equivalent bitstream to original TCL flow.
 
-### Step 2: Replace Main PLL with LiteX CRG
+### Step 2: Replace Main PLL with LiteX CRG ✅
 Replace `gowin_pll.v` (Gowin IP) with LiteX-managed `GW5APLL` clock generation.
-- Create custom CRG class producing fClk, pClk, hClk, gClk, xClk.
-- LiteX becomes the true top-level; original `top.v` becomes a submodule.
-- Port timing constraints to LiteX.
+- Created CRG class using `GW5APLL` producing fClk/pClk/hClk/gClk/xClk (same IDIV/FBDIV/MDIV/ODIV as original).
+- LiteX is now the true top-level (`chromatic` module); original `top.v` is a submodule via `Instance()`.
+- Switched to litex-boards platform (`modretro_chromatic.py`) for proper pin definitions.
+- All platform resources requested and mapped to `top.v` Instance ports.
+- LiteX auto-generates CST and base SDC; original SDC added for generated clock/timing constraints.
 
 ### Step 3: Absorb top.v Glue Logic into LiteX
 Move all glue logic (resets, LED FSM, timers, ESP32 boot delay, etc.) from `top.v` into Python. Existing RTL subsystems become `Instance()` black boxes.

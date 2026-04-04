@@ -31,9 +31,15 @@ module top #(parameter ISSIMU=0)
     input               CART_DET,
     input               CART_AUDIN,
 
-    input               CLK_FPGA,       // 33.55432MHz
-    input               CLK_27MHz,
     input               CLK_24MHz,
+
+    // Clocks from LiteX CRG.
+    input               fClk,           // ~134MHz
+    input               pClk,           // ~33.554MHz
+    input               hClk,           // ~16.777MHz
+    input               gClk,           // ~8.388MHz
+    input               xClk,           // ~67MHz
+    input               lock_o,         // PLL lock
 
     output reg          ESP32_EN,
 
@@ -121,25 +127,8 @@ module top #(parameter ISSIMU=0)
 
     assign FPGA_LED_EN = 1'd1;
 
-    wire lock_o;
-
-    wire fClk;
-    wire pClk;
-    wire hClk;
-    wire gClk;
-    wire xClk;
-
-    Gowin_PLL u_Gowin_PLL(
-        .reset(1'd0),//input reset
-        .clkout0(fClk), //output clkout0 ~150MHz
-        .clkout1(pClk), //output clkout1 ~33.554MHz
-        .clkout2(hClk), //output clkout2 ~16.777MHz
-        .clkout3(gClk), //output clkout3 ~8.388MHz
-        .clkout4(xClk), //output clkout4 ~75MHz
-//        .clkout5(hdmiclk), //output clkout4 ~75MHz
-        .lock(lock_o), //output lock
-        .clkin(CLK_FPGA) //input clkin
-    );
+    // PLL (Gowin_PLL) has been moved to LiteX CRG.
+    // fClk, pClk, hClk, gClk, xClk, lock_o are now input ports.
 
     reg [13:0] voltageSim = 14'd1500;
     reg voltageSimDir = 1'b0;
