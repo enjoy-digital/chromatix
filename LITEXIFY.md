@@ -40,11 +40,11 @@ Swap custom UART2 (uart.v + uart_rx.vhd + uart_tx.vhd + fixed_point_divider.v) f
 ### Step 5: Replace I2C with LiteI2C ✅
 Swap custom `i2c_master.sv` for `LiteI2CPHYCore` from LiteI2C library. Modified `aud_system_top.v` to expose I2C control interface (enable/busy/data) as ports instead of internal wiring. Bridge FSM in Migen translates aud_system_top's strobe/busy protocol to LiteI2C stream protocol.
 
-### Step 6: Replace Button Debouncers with LiteX GPIOIn
-Replace 8x `button_debouncer` instances with LiteX GPIO inputs.
+### Step 6: Replace Button Debouncers with Migen ✅
+Replace 8x `button_debouncer` Verilog instances with pure Migen debounce logic (3-stage sampling + 15-bit counter, identical algorithm). Removed `button_debounce.v`.
 
-### Step 7: Replace LED Control with LiteX GPIOOut
-Move LED state machine to LiteX.
+### Step 7: LED Control already in Migen ✅
+LED state machine was already moved to Migen in Step 3. No further changes needed.
 
 ### Future Steps
 - **Step 8**: LCD SPI Init → LiteX SPI master

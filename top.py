@@ -69,7 +69,7 @@ def add_sources(platform, base_path):
     add("rtl/BSP/ST7785_panel_master.v")
     add("rtl/BSP/adc_wrap.v")
     add("rtl/BSP/aud_system_top.v")
-    add("rtl/BSP/button_debounce.v")
+    # button_debounce.v removed (replaced by Migen debounce logic).
     add("rtl/BSP/gb_burst_write.v")
     # i2c_master.sv removed (replaced by LiteI2C).
     add("rtl/BSP/mem_system_top.sv")
@@ -410,12 +410,34 @@ class ChromaticTop(Module):
             ("SEL",   buttons.sel,        btn_sel_f),
             ("START", buttons.start,      btn_start_f),
         ]:
-            self.specials += Instance("button_debouncer",
-                name = f"debouncer_{name}",
-                i_clk    = ClockSignal("gclk"),
-                i_button = raw,
-                o_state  = filt,
-            )
+            # LiteX debouncer replacing Verilog button_debouncer module.
+            # 3-stage input sampling + 15-bit counter (HIGHBIT=14).
+            sampling = Signal(3, name=f"btn_{name}_samp")
+            count    = Signal(15, name=f"btn_{name}_cnt")
+            self.sync.gclk += [
+                sampling.eq(Cat(raw, sampling[:2])),
+                If(~filt,
+                    If(~sampling[2],
+                        count.eq(0),
+                    ).Elif(~count[14],
+                        count.eq(count + 1),
+                    ),
+                    If(count[14],
+                        filt.eq(1),
+                        count.eq(0),
+                    ),
+                ).Else(
+                    If(sampling[2],
+                        count.eq(0),
+                    ).Elif(~count[14],
+                        count.eq(count + 1),
+                    ),
+                    If(count[14],
+                        filt.eq(0),
+                        count.eq(0),
+                    ),
+                ),
+            ]
 
         # Button merge with MCU buttons.
         mcu_buttons   = Signal(9)
