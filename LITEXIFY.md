@@ -28,8 +28,11 @@ Replace `gowin_pll.v` (Gowin IP) with LiteX-managed `GW5APLL` clock generation.
 - All platform resources requested and mapped to `top.v` Instance ports.
 - LiteX auto-generates CST and base SDC; original SDC added for generated clock/timing constraints.
 
-### Step 3: Absorb top.v Glue Logic into LiteX
-Move all glue logic (resets, LED FSM, timers, ESP32 boot delay, etc.) from `top.v` into Python. Existing RTL subsystems become `Instance()` black boxes.
+### Step 3: Absorb top.v Glue Logic into LiteX ✅
+Move all glue logic from `top.v` into Python/Migen. `top.v` is no longer used.
+- Timer/counter logic, LED state machine, cart-detect reset, LCD enable sync, USB init delay, ESP32 boot delay, UART resync, button debouncer instantiation, HDMI debug routing -- all now in `top.py` as Migen sync/comb logic.
+- All 8 subsystems (vid/aud/mem/emu_system_top, usbuvcuart_top, adc_wrap, system_monitor, UART2) plus 8 button debouncers instantiated directly via `Instance()`.
+- PHY_CLKOUT clock domain created for USB-generated clock.
 
 ### Step 4: Replace UART with LiteX UART
 Swap custom UART2 + VHDL rx/tx for LiteX RS232PHY (115200 baud, 8N1).
