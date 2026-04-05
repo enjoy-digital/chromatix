@@ -19,8 +19,14 @@ module aud_system_top(
     output              AUD_RESET,
     output   reg        AUD_WCLK,
 
-    inout               SCL,
-    inout               SDA
+    // I2C control interface (exposed for LiteI2C master).
+    output              i2c_enable,
+    output              i2c_read_write,
+    output  [7:0]       i2c_mosi_data,
+    output  [7:0]       i2c_register_address,
+    output  [6:0]       i2c_device_address,
+    input   [7:0]       i2c_miso_data,
+    input               i2c_busy
 );
 
     reg [31:0] stereo_sr;
@@ -73,8 +79,9 @@ module aud_system_top(
     parameter REGISTER_WIDTH = 8;
     parameter ADDRESS_WIDTH = 7;
 
-    wire    [I2C_DATA_WIDTH-1:0]     i2c_miso_data;  // output
-    wire                             i2c_busy;       // output
+    // I2C master removed -- now using LiteI2C at top level.
+    // i2c_enable/i2c_read_write/i2c_mosi_data/i2c_register_address/i2c_device_address
+    // are now output ports. i2c_miso_data/i2c_busy are now input ports.
 
     wire                             tlv320_init_done;
     wire                             tlv320_i2c_enable;
@@ -89,11 +96,11 @@ module aud_system_top(
     wire     [REGISTER_WIDTH-1:0]    pol_i2c_register_address;
     wire     [ADDRESS_WIDTH-1:0]     pol_i2c_device_address;
 
-    wire                             i2c_enable = tlv320_init_done ? pol_i2c_enable : tlv320_i2c_enable;
-    wire                             i2c_read_write = tlv320_init_done ? pol_i2c_read_write : tlv320_i2c_read_write;
-    wire     [I2C_DATA_WIDTH-1:0]    i2c_mosi_data = tlv320_init_done ? pol_i2c_mosi_data : tlv320_i2c_mosi_data;
-    wire     [REGISTER_WIDTH-1:0]    i2c_register_address = tlv320_init_done ? pol_i2c_register_address : tlv320_i2c_register_address;
-    wire     [ADDRESS_WIDTH-1:0]     i2c_device_address = tlv320_init_done ? pol_i2c_device_address : tlv320_i2c_device_address;
+    assign i2c_enable           = tlv320_init_done ? pol_i2c_enable           : tlv320_i2c_enable;
+    assign i2c_read_write       = tlv320_init_done ? pol_i2c_read_write       : tlv320_i2c_read_write;
+    assign i2c_mosi_data        = tlv320_init_done ? pol_i2c_mosi_data        : tlv320_i2c_mosi_data;
+    assign i2c_register_address = tlv320_init_done ? pol_i2c_register_address : tlv320_i2c_register_address;
+    assign i2c_device_address   = tlv320_init_done ? pol_i2c_device_address   : tlv320_i2c_device_address;
 
     // Initializes the Audio codec
     tlv320_init u_tlv320_init(
@@ -128,27 +135,7 @@ module aud_system_top(
         .i2c_device_address(pol_i2c_device_address)
     );
 
-    i2c_master #(
-        .DATA_WIDTH(I2C_DATA_WIDTH),
-        .REGISTER_WIDTH(REGISTER_WIDTH),
-        .ADDRESS_WIDTH(ADDRESS_WIDTH)
-    )
-    i2c_master_inst(
-        .clock                  (hClk),
-        .reset_n                (reset_n),
-        .enable                 (i2c_enable),
-        .read_write             (i2c_read_write),
-        .mosi_data              (i2c_mosi_data),
-        .register_address       (i2c_register_address),
-        .device_address         (i2c_device_address),
-        .divider                (16'd20),
-
-        .miso_data              (i2c_miso_data),
-        .busy                   (i2c_busy),
-
-        .external_serial_data   (SDA),
-        .external_serial_clock  (SCL)
-    );
+    // i2c_master instance removed -- replaced by LiteI2C at top level.
 
 
 endmodule

@@ -19,6 +19,8 @@ from litex.build.generic_platform import *
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
 from litex.soc.cores.uart import RS232PHY
 
+from litei2c import LiteI2CPHYCore
+
 from litex_boards.platforms.modretro_chromatic import Platform
 
 # CRG (Clock Reset Generator) ---------------------------------------------------------------------
@@ -69,7 +71,7 @@ def add_sources(platform, base_path):
     add("rtl/BSP/aud_system_top.v")
     add("rtl/BSP/button_debounce.v")
     add("rtl/BSP/gb_burst_write.v")
-    add("rtl/BSP/i2c_master.sv")
+    # i2c_master.sv removed (replaced by LiteI2C).
     add("rtl/BSP/mem_system_top.sv")
     add("rtl/BSP/mm_burst_read_to_stream.v")
     add("rtl/BSP/mm_burst_write.v")
@@ -564,7 +566,15 @@ class ChromaticTop(Module):
             i_gb_lcd_data    = gb_lcd_data,
         )
 
-        # Audio System.
+        # Audio System (I2C now handled externally via LiteI2C).
+        i2c_enable           = Signal()
+        i2c_read_write       = Signal()
+        i2c_mosi_data        = Signal(8)
+        i2c_register_address = Signal(8)
+        i2c_device_address   = Signal(7)
+        i2c_miso_data        = Signal(8)
+        i2c_busy             = Signal()
+
         self.specials += Instance("aud_system_top",
             i_gClk     = ClockSignal("gclk"),
             i_hClk     = ClockSignal("hclk"),
@@ -583,8 +593,68 @@ class ChromaticTop(Module):
             o_pmic_sys_status  = pmic_sys_status,
             o_volume           = volume,
             o_hHeadphones      = h_headphones,
-            io_SCL             = i2c.scl,
-            io_SDA             = i2c.sda,
+
+            # I2C control interface (now external).
+            o_i2c_enable           = i2c_enable,
+            o_i2c_read_write       = i2c_read_write,
+            o_i2c_mosi_data        = i2c_mosi_data,
+            o_i2c_register_address = i2c_register_address,
+            o_i2c_device_address   = i2c_device_address,
+            i_i2c_miso_data        = i2c_miso_data,
+            i_i2c_busy             = i2c_busy,
+        )
+
+        # LiteI2C PHY + Bridge (replacing i2c_master.sv).
+        # Pass platform I2C pads directly (LiteI2C uses SDRTristate for open-drain).
+        # Rename "sys" domain to "hclk" (LiteI2C CSRStorage uses "sys" internally).
+        self.submodules.i2c_phy = i2c_phy = ClockDomainsRenamer({"sys": "hclk"})(
+            LiteI2CPHYCore(
+                pads         = i2c,
+                clock_domain = "hclk",
+                sys_clk_freq = int(33.55432e6 / 2),
+            )
+        )
+        self.comb += i2c_phy.active.eq(1)
+
+        # Bridge: aud_system_top's enable/busy interface -> LiteI2C stream protocol.
+        i2c_enable_d = Signal()
+        i2c_enable_re = Signal()
+        self.sync.hclk += i2c_enable_d.eq(i2c_enable)
+        self.comb += i2c_enable_re.eq(i2c_enable & ~i2c_enable_d)
+
+        self.submodules.i2c_bridge = i2c_bridge = ClockDomainsRenamer("hclk")(FSM(reset_state="IDLE"))
+        i2c_bridge.act("IDLE",
+            i2c_busy.eq(0),
+            If(i2c_enable_re,
+                NextState("SEND"),
+            ),
+        )
+        i2c_bridge.act("SEND",
+            i2c_busy.eq(1),
+            i2c_phy.sink.valid.eq(1),
+            i2c_phy.sink.addr.eq(i2c_device_address),
+            If(i2c_read_write,
+                # Read: send register address, then read 1 byte.
+                i2c_phy.sink.len_tx.eq(1),
+                i2c_phy.sink.len_rx.eq(1),
+                i2c_phy.sink.data.eq(i2c_register_address),
+            ).Else(
+                # Write: send register address + data.
+                i2c_phy.sink.len_tx.eq(2),
+                i2c_phy.sink.len_rx.eq(0),
+                i2c_phy.sink.data.eq(Cat(i2c_mosi_data, i2c_register_address)),
+            ),
+            If(i2c_phy.sink.ready,
+                NextState("WAIT"),
+            ),
+        )
+        i2c_bridge.act("WAIT",
+            i2c_busy.eq(1),
+            i2c_phy.source.ready.eq(1),
+            If(i2c_phy.source.valid,
+                NextValue(i2c_miso_data, i2c_phy.source.data[:8]),
+                NextState("IDLE"),
+            ),
         )
 
         # Memory System.

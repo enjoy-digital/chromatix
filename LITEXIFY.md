@@ -37,8 +37,8 @@ Move all glue logic from `top.v` into Python/Migen. `top.v` is no longer used.
 ### Step 4: Replace UART with LiteX RS232PHY ✅
 Swap custom UART2 (uart.v + uart_rx.vhd + uart_tx.vhd + fixed_point_divider.v) for LiteX `RS232PHY` (115200 baud, 8N1, gClk ~8.39MHz). Stream interface bridged to system_monitor's strobe/busy signals.
 
-### Step 5: Replace I2C with LiteX I2C
-Swap custom `i2c_master.sv` for LiteX I2CMaster.
+### Step 5: Replace I2C with LiteI2C ✅
+Swap custom `i2c_master.sv` for `LiteI2CPHYCore` from LiteI2C library. Modified `aud_system_top.v` to expose I2C control interface (enable/busy/data) as ports instead of internal wiring. Bridge FSM in Migen translates aud_system_top's strobe/busy protocol to LiteI2C stream protocol.
 
 ### Step 6: Replace Button Debouncers with LiteX GPIOIn
 Replace 8x `button_debouncer` instances with LiteX GPIO inputs.
