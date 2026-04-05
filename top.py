@@ -17,6 +17,7 @@ from litex.build.gowin.platform import GowinPlatform
 from litex.build.generic_platform import *
 
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
+from litex.soc.cores.uart import RS232PHY
 
 from litex_boards.platforms.modretro_chromatic import Platform
 
@@ -81,9 +82,7 @@ def add_sources(platform, base_path):
     add("rtl/BSP/vid_system_top.sv")
     add("rtl/BSP/vid_tpg.v")
 
-    # BSP - UART.
-    add("rtl/BSP/uart/fixed_point_divider/fixed_point_divider.v")
-    add("rtl/BSP/uart/uart.v")
+    # BSP - UART (UART2 replaced by LiteX RS232PHY, but packet wrappers still needed).
     add("rtl/BSP/uart_packet_wrapper_rx.sv")
     add("rtl/BSP/uart_packet_wrapper_tx.sv")
 
@@ -97,8 +96,7 @@ def add_sources(platform, base_path):
     add("rtl/BSP/overlayTimerBack.vhd",     language="vhdl")
     add("rtl/BSP/overlayTimerFront.vhd",    language="vhdl")
     add("rtl/BSP/overlayTimerNumber.vhd",   language="vhdl")
-    add("rtl/BSP/uart/uart_rx.vhd",         language="vhdl")
-    add("rtl/BSP/uart/uart_tx.vhd",         language="vhdl")
+    # uart_rx.vhd / uart_tx.vhd removed (UART2 replaced by LiteX RS232PHY).
 
     # BSP - Other.
     add("rtl/BSP/tlv320regs.hex")
@@ -778,30 +776,27 @@ class ChromaticTop(Module):
             o_uart_tx_val  = uart_tx_val,
         )
 
-        # UART (FPGA <-> ESP32 MCU).
-        self.specials += Instance("UART2",
-            p_CLK_FREQ  = 8388608,
-
-            i_CLK = ClockSignal("gclk"),
-            i_RST = ~crg.pll.locked,
-
-            o_UART_TXD = serial.tx,
-            i_UART_RXD = serial.rx,
-            o_UART_RTS = Signal(),
-            i_UART_CTS = 0,
-
-            i_BAUD_RATE  = 115200,
-            i_PARITY_BIT = 0,
-            i_STOP_BIT   = 0,
-            i_DATA_BITS  = 8,
-
-            i_TX_DATA     = Cat(uart_tx_data, Constant(0, 8)),
-            i_TX_DATA_VAL = uart_tx_val,
-            o_TX_BUSY     = uart_tx_busy,
-
-            o_RX_DATA     = uart_rx_data,
-            o_RX_DATA_VAL = uart_rx_val,
+        # UART (FPGA <-> ESP32 MCU) -- LiteX RS232PHY replacing UART2.
+        serial_pads = Record([("tx", 1), ("rx", 1)])
+        self.comb += [
+            serial.tx.eq(serial_pads.tx),
+            serial_pads.rx.eq(serial.rx),
+        ]
+        self.submodules.uart_phy = ClockDomainsRenamer("gclk")(
+            RS232PHY(serial_pads, clk_freq=int(33.55432e6 / 4), baudrate=115200)
         )
+        # TX: system_monitor -> UART PHY.
+        self.comb += [
+            self.uart_phy.sink.valid.eq(uart_tx_val),
+            self.uart_phy.sink.data.eq(uart_tx_data),
+            uart_tx_busy.eq(~self.uart_phy.sink.ready),
+        ]
+        # RX: UART PHY -> system_monitor.
+        self.comb += [
+            uart_rx_val.eq(self.uart_phy.source.valid),
+            uart_rx_data.eq(self.uart_phy.source.data),
+            self.uart_phy.source.ready.eq(1),
+        ]
 
         # LINK_SD output.
         self.comb += link.sd.eq(0)  # Directly driven by emu_system_top via CART signals.

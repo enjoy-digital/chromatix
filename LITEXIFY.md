@@ -34,8 +34,8 @@ Move all glue logic from `top.v` into Python/Migen. `top.v` is no longer used.
 - All 8 subsystems (vid/aud/mem/emu_system_top, usbuvcuart_top, adc_wrap, system_monitor, UART2) plus 8 button debouncers instantiated directly via `Instance()`.
 - PHY_CLKOUT clock domain created for USB-generated clock.
 
-### Step 4: Replace UART with LiteX UART
-Swap custom UART2 + VHDL rx/tx for LiteX RS232PHY (115200 baud, 8N1).
+### Step 4: Replace UART with LiteX RS232PHY ✅
+Swap custom UART2 (uart.v + uart_rx.vhd + uart_tx.vhd + fixed_point_divider.v) for LiteX `RS232PHY` (115200 baud, 8N1, gClk ~8.39MHz). Stream interface bridged to system_monitor's strobe/busy signals.
 
 ### Step 5: Replace I2C with LiteX I2C
 Swap custom `i2c_master.sv` for LiteX I2CMaster.
