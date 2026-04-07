@@ -1,71 +1,153 @@
 # LiteX-ification of Chromatic FPGA Design
 
-Progressive migration of the ModRetro Chromatic FPGA design from hand-crafted RTL + Gowin TCL build system to LiteX.
+Progressive migration of the [ModRetro Chromatic](https://modretro.com/products/chromatic) FPGA design from hand-crafted RTL + Gowin TCL build system to [LiteX](https://github.com/enjoy-digital/litex).
 
-## Goal
+## Overview
 
-Show the official developer the possibilities of the LiteX ecosystem by progressively simplifying the project. Each step produces a buildable, hardware-testable design -- small incremental changes to ease revalidation from a known-working baseline.
+The Chromatic is a Game Boy / Game Boy Color handheld built around a Gowin GW5A-25 FPGA. The original design uses ~80 Verilog/VHDL source files, a TCL-based build system, and Gowin-generated IP for clocks, FIFO, and ADC.
 
-## Current Architecture
+This project demonstrates how LiteX can progressively simplify and modernize an existing FPGA design:
+- Replace the build system with a single Python script.
+- Replace low-level IP (PLL, UART, I2C, button debouncers) with LiteX cores.
+- Move glue logic from Verilog to Python/Migen for easier maintenance.
+- Keep complex subsystems as Verilog `Instance()` black boxes for safe, incremental migration.
 
-- **FPGA**: Gowin GW5A-25 (GW5A-EV25UG256CC1/I0)
-- **Build**: TCL scripts → Gowin Synthesis + P&R
-- **Clocks**: Main PLL (33.554 MHz → fClk/pClk/hClk/gClk/xClk), USB PLL (24 MHz)
-- **Subsystems**: Video (LCD + HDMI), Audio (TLV320 codec), Memory (PSRAM + QSPI), Emulation (MiSTer GB core), USB (UVC + UART + UAC), System Monitor, ADC, Buttons, LEDs
+## Architecture
+
+```
+                            ┌──────────────────────────────────┐
+                            │         LiteX (top.py)           │
+                            │                                  │
+                            │  ┌────────┐   ┌──────────────┐  │
+  33.55MHz ──────────────►  │  │  CRG   │   │ Timer/Enable │  │
+                            │  │ GW5APLL│   │  gClk/xClk   │  │
+                            │  └─┬──┬──┬┘   └──────────────┘  │
+                            │    │  │  │                       │
+                            │  fClk pClk hClk gClk xClk       │
+                            │    │  │  │   │    │              │
+                            │    ▼  ▼  ▼   ▼    ▼              │
+                ┌───────────┼──────────────────────────────────┼───────────┐
+                │           │  Verilog Subsystem Instances     │           │
+                │           │                                  │           │
+  Cartridge ◄──►│  emu_system_top (MiSTer GB Core)             │◄──► IR    │
+                │           │                                  │           │
+  PSRAM/QSPI◄──►│  mem_system_top (Memory Arbiter + PSRAM)    │           │
+                │           │                                  │           │
+  LCD ◄─────────│  vid_system_top + ST7785_init (Video)        │           │
+                │           │                                  │           │
+  USB ◄─────────│  usbuvcuart_top (UVC + UART + UAC)          │──► ESP32  │
+                │           │                                  │           │
+                │           │  system_monitor (Menu/UI/OSD)    │           │
+                │           │  adc_wrap (Battery Voltage)      │           │
+                │           │  tlv320_init + polling_master    │           │
+                └───────────┼──────────────────────────────────┼───────────┘
+                            │                                  │
+                            │  ┌──────────────┐ ┌──────────┐  │
+  I2C (SCL/SDA)◄────────── │  │ LiteI2C PHY  │ │ RS232PHY │  │──► ESP32 UART
+                            │  └──────────────┘ └──────────┘  │
+                            │                                  │
+                            │  ┌──────────────┐ ┌──────────┐  │
+  Audio Codec ◄──────────── │  │ I2S (Migen)  │ │ Buttons  │  │◄── D-Pad/A/B
+                            │  └──────────────┘ │ (Migen)  │  │
+                            │                   └──────────┘  │
+                            └──────────────────────────────────┘
+```
+
+### Clock Domains
+
+| Domain | Frequency   | Source     | Usage                          |
+|--------|-------------|------------|--------------------------------|
+| fClk   | ~134.22 MHz | GW5APLL    | Memory system (PSRAM)          |
+| pClk   | ~33.55 MHz  | GW5APLL    | Emulation core, LCD SPI init   |
+| hClk   | ~16.78 MHz  | GW5APLL    | Video, I2C, emulation          |
+| gClk   | ~8.39 MHz   | GW5APLL    | Audio I2S, timers, UART, USB   |
+| xClk   | ~67.11 MHz  | GW5APLL    | Cart detect, LED control       |
+| phy    | ~60 MHz     | USB PLL    | USB UART resync, ESP32 boot    |
+
+### What's in LiteX (Python/Migen)
+
+- **CRG**: GW5APLL clock generation (5 domains).
+- **Glue logic**: Timers, cart-detect reset, LED FSM, LCD enable sync, USB init delay, ESP32 boot delay, UART resync, HDMI debug routing.
+- **I2S**: Audio serialization with mute, mono/stereo mixing, headphone routing.
+- **I2C**: LiteI2C PHY with bridge FSM for TLV320 codec and PMIC polling.
+- **UART**: LiteX RS232PHY (115200 baud, replaces custom UART2).
+- **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
+
+### What's in Verilog (Instance black boxes)
+
+- **vid_system_top**: LCD panel master, frame buffering, OSD overlays, color correction.
+- **ST7785_init**: LCD SPI initialization sequence (9-bit protocol).
+- **mem_system_top**: PSRAM controller, multi-port arbiter, QSPI slave.
+- **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
+- **usbuvcuart_top**: USB 2.0 soft PHY + UVC video + UART + UAC audio.
+- **system_monitor**: Menu UI, palette control, battery monitoring.
+- **tlv320_init**: Audio codec register initialization from ROM.
+- **polling_master**: Periodic codec/PMIC I2C polling.
+- **adc_wrap**: Gowin ADC for battery voltage measurement.
 
 ## Migration Steps
 
-### Step 1: LiteX Build Wrapper ✅
-Replace TCL build system with `top.py` Python script. RTL stays 100% untouched -- LiteX is purely a build system wrapper.
-- Created `top.py` with Platform definition, source file list, and constraint injection.
-- `python3 top.py --build` produces equivalent bitstream to original TCL flow.
+| Step | Description | RTL Eliminated |
+|------|-------------|----------------|
+| 1  | LiteX build wrapper (TCL replacement) | — |
+| 2  | PLL → LiteX GW5APLL CRG | `gowin_pll.v` |
+| 3  | top.v glue → Migen | `top.v` |
+| 4  | UART2 → LiteX RS232PHY | `uart.v`, `uart_rx.vhd`, `uart_tx.vhd`, `fixed_point_divider.v` |
+| 5  | I2C → LiteI2C PHY | `i2c_master.sv` |
+| 6  | Buttons → Migen debounce | `button_debounce.v` |
+| 7  | LEDs → Migen | (done in Step 3) |
+| 8  | LCD SPI init extracted to top level | (moved from vid_system_top) |
+| 9  | I2S → Migen | (part of aud_system_top) |
+| 10 | Audio system wrapper eliminated | `aud_system_top.v` |
 
-### Step 2: Replace Main PLL with LiteX CRG ✅
-Replace `gowin_pll.v` (Gowin IP) with LiteX-managed `GW5APLL` clock generation.
-- Created CRG class using `GW5APLL` producing fClk/pClk/hClk/gClk/xClk (same IDIV/FBDIV/MDIV/ODIV as original).
-- LiteX is now the true top-level (`chromatic` module); original `top.v` is a submodule via `Instance()`.
-- Switched to litex-boards platform (`modretro_chromatic.py`) for proper pin definitions.
-- All platform resources requested and mapped to `top.v` Instance ports.
-- LiteX auto-generates CST and base SDC; original SDC added for generated clock/timing constraints.
-
-### Step 3: Absorb top.v Glue Logic into LiteX ✅
-Move all glue logic from `top.v` into Python/Migen. `top.v` is no longer used.
-- Timer/counter logic, LED state machine, cart-detect reset, LCD enable sync, USB init delay, ESP32 boot delay, UART resync, button debouncer instantiation, HDMI debug routing -- all now in `top.py` as Migen sync/comb logic.
-- All 8 subsystems (vid/aud/mem/emu_system_top, usbuvcuart_top, adc_wrap, system_monitor, UART2) plus 8 button debouncers instantiated directly via `Instance()`.
-- PHY_CLKOUT clock domain created for USB-generated clock.
-
-### Step 4: Replace UART with LiteX RS232PHY ✅
-Swap custom UART2 (uart.v + uart_rx.vhd + uart_tx.vhd + fixed_point_divider.v) for LiteX `RS232PHY` (115200 baud, 8N1, gClk ~8.39MHz). Stream interface bridged to system_monitor's strobe/busy signals.
-
-### Step 5: Replace I2C with LiteI2C ✅
-Swap custom `i2c_master.sv` for `LiteI2CPHYCore` from LiteI2C library. Modified `aud_system_top.v` to expose I2C control interface (enable/busy/data) as ports instead of internal wiring. Bridge FSM in Migen translates aud_system_top's strobe/busy protocol to LiteI2C stream protocol.
-
-### Step 6: Replace Button Debouncers with Migen ✅
-Replace 8x `button_debouncer` Verilog instances with pure Migen debounce logic (3-stage sampling + 15-bit counter, identical algorithm). Removed `button_debounce.v`.
-
-### Step 7: LED Control already in Migen ✅
-LED state machine was already moved to Migen in Step 3. No further changes needed.
+**Total: 10 RTL files eliminated, 2 modified** (`vid_system_top.sv`, `aud_system_top.v`).
 
 ### Future Steps
-- **Step 8**: LCD SPI Init → LiteX SPI master
-- **Step 9**: Audio system → LiteX audio cores
-- **Step 10**: Memory system → LiteX memory infrastructure
-- **Step 11**: Video pipeline → LiteX video
-- **Step 12**: USB subsystem (complex due to encrypted soft PHY, likely stays as-is)
 
-The **emulation core** (MiSTer Game Boy) remains as Verilog permanently.
+- **Memory system**: Replace PSRAM controller + multi-port arbiter with LiteX memory infrastructure.
+- **Video pipeline**: Progressive LiteX-ification of frame buffering, color correction, OSD.
+- **USB subsystem**: Complex due to encrypted Gowin soft PHY; likely stays as Verilog.
+- **Emulation core**: MiSTer Game Boy core stays as Verilog permanently (well-tested third-party IP).
 
 ## Usage
 
-```
-python3 top.py --build                 # Full build (requires gw_sh in PATH)
-python3 top.py --build --no-compile    # Generate build files only
+```bash
+# Generate build files only (no Gowin toolchain required).
+python3 top.py --build --no-compile
+
+# Full build (requires gw_sh in PATH).
+python3 top.py --build
+
+# Use open-source Apicula toolchain.
+python3 top.py --build --toolchain apicula
 ```
 
-## Verification Strategy
+Output bitstream: `build/chromatic.fs`
 
-At each step:
-1. `python3 top.py --build` completes without errors.
-2. Compare resource utilization with previous step.
-3. Flash and verify changed functionality on hardware.
-4. Git tag each working step for easy rollback.
+## Programming
+
+The LiteX board definition uses `openFPGALoader` with the Chromatic's built-in USB/JTAG bridge (`--cable gwu2x`).
+
+```bash
+# Detect the powered-on board.
+openFPGALoader --detect --cable gwu2x
+
+# Load the bitstream temporarily.
+openFPGALoader --cable gwu2x --bitstream build/chromatic.fs
+
+# Program internal flash and reset.
+openFPGALoader --write-flash --cable gwu2x --reset build/chromatic.fs
+```
+
+Notes:
+- The console must be powered on for the FPGA to enumerate.
+- `openFPGALoader` must be built with GWU2X support.
+- The LiteX flow emits `build/chromatic.fs`, not the legacy `esp32t/impl/pnr/evt1_x2.fs`.
+
+## Dependencies
+
+- [LiteX](https://github.com/enjoy-digital/litex) (with Gowin backend)
+- [LiteX-Boards](https://github.com/litex-hub/litex-boards) (modretro_chromatic platform)
+- [LiteI2C](https://github.com/enjoy-digital/litei2c)
+- [Migen](https://github.com/m-labs/migen)
+- Gowin EDA (for synthesis/P&R) or [Apicula](https://github.com/YosysHQ/apicula) (open-source)

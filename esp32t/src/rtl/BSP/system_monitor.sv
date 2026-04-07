@@ -387,10 +387,10 @@ module system_monitor(
     };
 
     reg [13:0] version = {
-        1'd0,  // 1 bit reserved
-        1'd0,  // 1 bit debug,
-        6'd8,  // 6 bits minor version
-        6'd18  // 6 bits major version
+        1'd0,   // 1 bit reserved
+        1'd1,   // 1 bit debug / custom LiteX build marker
+        6'd42,  // 6 bits minor version
+        6'd63   // 6 bits major version
     };
 
     localparam  NUM_CH = 10;

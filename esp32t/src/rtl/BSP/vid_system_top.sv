@@ -16,10 +16,7 @@ module vid_system_top #(parameter ISSIMU=0)
     output              LCD_DOTCLK,
     output              LCD_ENABLE,
     output              LCD_HSYNC,
-    output              LCD_RESET,
-    output              LCD_SPI_CSX,
-    output              LCD_SPI_SCLK,
-    output              LCD_SPI_SDA,
+    // LCD_RESET, LCD_SPI_CSX, LCD_SPI_SCLK, LCD_SPI_SDA removed (driven by ST7785_init at top level).
     input               LCD_TE,
     input               LCD_EN,
     output              LCD_GENLOCK,
@@ -50,7 +47,7 @@ module vid_system_top #(parameter ISSIMU=0)
     input [15:0]        hWrBurstQ2,
     output  reg         hDrawOSD,
 
-    output              LCD_INIT_DONE,
+    input               LCD_INIT_DONE,  // Now driven externally by ST7785_init at top level.
     input               gb_lcd_clkena,
     input [14:0]        gb_lcd_data,
     input [1:0]         gb_lcd_mode,
@@ -69,16 +66,7 @@ module vid_system_top #(parameter ISSIMU=0)
     );
 
 
-    ST7785_init #(ISSIMU)
-    u_ST7785_init(
-        .clk(pClk),
-        .reset(reset),
-        .LCD_CS(LCD_SPI_CSX),
-        .LCD_SCK(LCD_SPI_SCLK),
-        .LCD_SDA_SDI(LCD_SPI_SDA),
-        .LCD_RST(LCD_RESET),
-        .LCD_INIT_DONE(LCD_INIT_DONE)
-    );
+    // ST7785_init moved to LiteX top level.
 
     wire [14:0] hColorPixel;
     assign hHsync = gb_lcd_mode[1];

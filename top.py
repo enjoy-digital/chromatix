@@ -8,6 +8,7 @@
 
 import os
 import argparse
+from types import MethodType
 
 from migen import *
 
@@ -23,15 +24,42 @@ from litei2c import LiteI2CPHYCore
 
 from litex_boards.platforms.modretro_chromatic import Platform
 
+"""
+Chromatic FPGA Top-Level.
+
+Provides the LiteX top-level module for the ModRetro Chromatic handheld, integrating clock
+generation, button debouncing, LCD/video pipeline, audio I2S, I2C codec control, memory system,
+Game Boy emulation core, USB UVC+UART, battery ADC, and system monitoring.
+
+Features:
+- Multi-clock PLL (fClk/pClk/hClk/gClk/xClk) from 33.55432 MHz crystal.
+- Game Boy emulation with cartridge interface.
+- LCD panel driver with SPI init and UVC passthrough for USB video.
+- I2S audio with TLV320 codec over LiteI2C.
+- ESP32 MCU communication via LiteX RS232PHY.
+- Button debouncing and system monitor with OSD/palette control.
+"""
+
 # CRG (Clock Reset Generator) ---------------------------------------------------------------------
 
 class CRG(LiteXModule):
+    """
+    Clock Reset Generator for the Chromatic FPGA.
+
+    Generates five clock domains from the 33.55432 MHz board crystal via a GW5A PLL:
+    fClk (~134 MHz), pClk (~33.5 MHz), hClk (~16.8 MHz), gClk (~8.4 MHz), xClk (~67 MHz).
+
+    Parameters:
+    - platform : GowinPlatform instance providing devicename, device, and clk_fpga pad.
+    """
     def __init__(self, platform):
         self.cd_fclk = ClockDomain("fclk", reset_less=True)
         self.cd_pclk = ClockDomain("pclk", reset_less=True)
         self.cd_hclk = ClockDomain("hclk", reset_less=True)
         self.cd_gclk = ClockDomain("gclk", reset_less=True)
         self.cd_xclk = ClockDomain("xclk", reset_less=True)
+
+        # # #
 
         # Main PLL: 33.55432MHz -> fClk/pClk/hClk/gClk/xClk.
         clk_fpga = platform.request("clk_fpga")
@@ -50,7 +78,16 @@ class CRG(LiteXModule):
 # Source Files -------------------------------------------------------------------------------------
 
 def add_sources(platform, base_path):
-    """Add all RTL source files (subsystems only -- top.v removed)."""
+    """
+    Add all RTL source files to the platform (subsystems only -- top.v removed).
+
+    Registers Verilog, SystemVerilog, and VHDL sources from the esp32t/src tree, organized into
+    Gowin IP, BSP (board support), EMU (emulation core), and USB subsystem groups.
+
+    Parameters:
+    - platform  : GowinPlatform instance to add sources to.
+    - base_path : Root path containing the src/ directory.
+    """
     src = os.path.join(base_path, "src")
 
     def add(path, language=None):
@@ -68,7 +105,7 @@ def add_sources(platform, base_path):
     add("rtl/BSP/ST7785_init.v")
     add("rtl/BSP/ST7785_panel_master.v")
     add("rtl/BSP/adc_wrap.v")
-    add("rtl/BSP/aud_system_top.v")
+    # aud_system_top.v removed (I2S ported to Migen, sub-instances kept).
     # button_debounce.v removed (replaced by Migen debounce logic).
     add("rtl/BSP/gb_burst_write.v")
     # i2c_master.sv removed (replaced by LiteI2C).
@@ -84,7 +121,8 @@ def add_sources(platform, base_path):
     add("rtl/BSP/vid_system_top.sv")
     add("rtl/BSP/vid_tpg.v")
 
-    # BSP - UART (UART2 replaced by LiteX RS232PHY, but packet wrappers still needed).
+    # BSP - UART.
+    add("rtl/BSP/uart/fixed_point_divider/fixed_point_divider.v")
     add("rtl/BSP/uart_packet_wrapper_rx.sv")
     add("rtl/BSP/uart_packet_wrapper_tx.sv")
 
@@ -98,7 +136,8 @@ def add_sources(platform, base_path):
     add("rtl/BSP/overlayTimerBack.vhd",     language="vhdl")
     add("rtl/BSP/overlayTimerFront.vhd",    language="vhdl")
     add("rtl/BSP/overlayTimerNumber.vhd",   language="vhdl")
-    # uart_rx.vhd / uart_tx.vhd removed (UART2 replaced by LiteX RS232PHY).
+    add("rtl/BSP/uart/uart_rx.vhd",          language="vhdl")
+    add("rtl/BSP/uart/uart_tx.vhd",          language="vhdl")
 
     # BSP - Other.
     add("rtl/BSP/tlv320regs.hex")
@@ -157,11 +196,127 @@ def add_sources(platform, base_path):
     add("rtl/USB/USBUVCUART/sync_fifo/sync_rx_pkt_fifo.v")
     add("rtl/USB/USBUVCUART/sync_fifo/sync_tx_pkt_fifo.v")
 
-# Top Module (LiteX) ------------------------------------------------------------------------------
+
+def install_toolchain_fixes(platform):
+    extra_sdc_commands = [
+        # Generated PLL clocks (main PLL, managed by LiteX).
+        'create_generated_clock -name xclk2 -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 1 -multiply_by 4 [get_pins {PLLA/CLKOUT0}]',
+        'create_generated_clock -name pclk  -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 1 -multiply_by 1 [get_pins {PLLA/CLKOUT1}]',
+        'create_generated_clock -name hclk  -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 2 -multiply_by 1 [get_pins {PLLA/CLKOUT2}]',
+        'create_generated_clock -name gclk  -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 4 -multiply_by 1 [get_pins {PLLA/CLKOUT3}]',
+        'create_generated_clock -name xclk  -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 1 -multiply_by 2 [get_pins {PLLA/CLKOUT4}]',
+        # QSPI clock.
+        'create_clock -name sclk -period 25 [get_ports {qspi_clk}]',
+        # Async clock groups.
+        'set_clock_groups -asynchronous -group [get_clocks {pclk}] -group [get_clocks {hclk}]',
+        'set_clock_groups -asynchronous -group [get_clocks {pclk}] -group [get_clocks {gclk}]',
+        'set_clock_groups -asynchronous -group [get_clocks {hclk}] -group [get_clocks {gclk}]',
+        # Cartridge bus timing constraints.
+        'set_max_delay -from [get_ports {cart_d[*]}] -to [get_clocks {hclk}] 13',
+        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_a[*]}] 14',
+        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_wr}] 14',
+        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_rd}] 14',
+        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_cs}] 14',
+        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {link_sd}] 14',
+        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_d[*]}] 14',
+        # USB clocks (inside usbuvcuart_top, paths updated for LiteX hierarchy).
+        'create_generated_clock -name PHY_CLKOUT -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 16 -multiply_by 40 [get_pins {usbuvcuart_top/u_Gowin_PLL_USB/PLLA_inst/CLKOUT1}]',
+        'create_generated_clock -name fclk_960M  -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 1  -multiply_by 40 [get_nets {usbuvcuart_top/fclk_960M}]',
+        'create_generated_clock -name clk24p     -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 1  -multiply_by 1  [get_pins {usbuvcuart_top/u_Gowin_PLL_USB/PLLA_inst/CLKOUT2}]',
+        'create_clock -name usbintsclk -period 8 -waveform {0 4} [get_nets {usbuvcuart_top/u_USB_SoftPHY_Top/usb2_0_softphy/u_usb_20_phy_utmi/u_usb2_0_softphy/u_usb_phy_hs/sclk}] -add',
+        'set_clock_groups -asynchronous -group [get_clocks {PHY_CLKOUT}] -group [get_clocks {fclk_960M}]',
+        'set_clock_groups -asynchronous -group [get_clocks {PHY_CLKOUT}] -group [get_clocks {usbintsclk}]',
+    ]
+
+    original_build_timing_constraints = platform.toolchain.build_timing_constraints
+
+    def build_timing_constraints(toolchain, vns):
+        sdc = original_build_timing_constraints(vns)
+        with open(sdc[0], "a") as f:
+            f.write("\n" + "\n".join(extra_sdc_commands) + "\n")
+        return sdc
+
+    def build_io_constraints(toolchain):
+        cst = []
+
+        flat_sc = []
+        for name, pins, other, resource in toolchain.named_sc:
+            if len(pins) > 1:
+                for i, p in enumerate(pins):
+                    flat_sc.append((f"{name}[{i}]", p, other))
+            else:
+                flat_sc.append((name, pins[0], other))
+
+        def search_pin_entry(pin_list, pin_name):
+            for entry_name, entry_pin, entry_other in pin_list:
+                if pin_name == entry_name:
+                    return (entry_name, entry_pin, entry_other)
+            return (None, None, None)
+
+        for name, pin, other in flat_sc:
+            if name in {"vbat_adc_p", "vbat_adc_n"}:
+                if pin != "X":
+                    cst.append(f'IO_LOC "{name}" {pin};')
+                continue
+
+            if pin != "X":
+                t_name = name.split('[')
+                tmp_name = t_name[0]
+                if tmp_name[-2:] == "_p":
+                    pn = tmp_name[:-2] + "_n"
+                    if len(t_name) > 1:
+                        pn += '[' + t_name[1]
+                    (_, n_pin, _) = search_pin_entry(flat_sc, pn)
+                    if n_pin is not None:
+                        pin = f"{pin},{n_pin}"
+                elif tmp_name[-2:] == "_n":
+                    pp = tmp_name[:-2] + "_p"
+                    if len(t_name) > 1:
+                        pp += '[' + t_name[1]
+                    (p_name, _, _) = search_pin_entry(flat_sc, pp)
+                    if p_name is not None:
+                        continue
+                cst.append(f'IO_LOC "{name}" {pin};')
+
+            if name == "usb_dxn":
+                continue
+
+            other_cst = []
+            for constraint in other:
+                if isinstance(constraint, IOStandard):
+                    other_cst.append(f"IO_TYPE={constraint.name}")
+                elif isinstance(constraint, Misc):
+                    other_cst.append(f"{constraint.misc}")
+            if other_cst:
+                cst.append(f'IO_PORT "{name}" {" ".join(other_cst)};')
+
+        if toolchain.named_pc:
+            cst.extend(toolchain.named_pc)
+
+        with open(toolchain._build_name + ".cst", "w") as f:
+            f.write("\n".join(cst))
+
+        return (f"{toolchain._build_name}.cst", "CST")
+
+    platform.toolchain.build_timing_constraints = MethodType(build_timing_constraints, platform.toolchain)
+    platform.toolchain.build_io_constraints     = MethodType(build_io_constraints, platform.toolchain)
+
+# Chromatic Top ------------------------------------------------------------------------------------
 
 class ChromaticTop(Module):
+    """
+    Chromatic FPGA LiteX Top-Level Module.
+
+    Integrates all subsystems of the ModRetro Chromatic handheld: clock generation, video/LCD
+    pipeline, audio I2S with TLV320 codec, Game Boy emulation core, memory controller, USB
+    UVC+UART, ESP32 MCU communication, battery ADC, button debouncing, and system monitoring.
+
+    Parameters:
+    - platform : GowinPlatform instance providing device pads and build infrastructure.
+    """
     def __init__(self, platform):
-        # CRG: PLL generating fClk/pClk/hClk/gClk/xClk from clk_fpga.
+
+        # CRG ------------------------------------------------------------------------------------
         self.submodules.crg = crg = CRG(platform)
 
         # PHY_CLKOUT clock domain (generated by USB subsystem).
@@ -170,7 +325,8 @@ class ChromaticTop(Module):
         phy_clkout = Signal()
         self.comb += self.cd_phy.clk.eq(phy_clkout)
 
-        # Request all platform resources.
+        # Platform Resources ----------------------------------------------------------------------
+
         clk_24    = platform.request("clk_24")
         clk_27    = platform.request("clk_27")  # Unused but required by platform constraints.
         buttons   = platform.request("buttons")
@@ -203,15 +359,15 @@ class ChromaticTop(Module):
         # FPGA_LED_EN = always on.
         self.comb += rgb_led.en.eq(1)
 
-        # -----------------------------------------------------------------------------------------
-        # Timer / Enable Logic (gClk domain, ~8.39 MHz)
-        # -----------------------------------------------------------------------------------------
+        # Timer / Enable Logic (gClk domain) ------------------------------------------------------
+
         second_counter  = Signal(23, reset=0)
         second_ena      = Signal()
         half_second_ena = Signal()
         percent_counter = Signal(17, reset=0)
         percent_ena     = Signal()
 
+        # 1% (~83886 cycles) and 1s/0.5s (~4M/8M cycles) enable pulses at ~8.39 MHz.
         self.sync.gclk += [
             percent_ena.eq(0),
             If(percent_counter == 83886,
@@ -236,12 +392,12 @@ class ChromaticTop(Module):
             ),
         ]
 
-        # -----------------------------------------------------------------------------------------
-        # Cart Detect Debounce & Memory Reset (xClk domain)
-        # -----------------------------------------------------------------------------------------
+        # Cart Detect Debounce & Memory Reset (xClk domain) ---------------------------------------
+
         cart_det_sr = Signal(18)
         memrst      = Signal(reset=1)
 
+        # 18-bit shift register sampling cart detect pin.
         self.sync.xclk += [
             cart_det_sr.eq(Cat(cart.det, cart_det_sr[:17])),
         ]
@@ -258,16 +414,36 @@ class ChromaticTop(Module):
             ),
         ]
 
-        # -----------------------------------------------------------------------------------------
-        # LED State Machine (xClk domain)
-        # -----------------------------------------------------------------------------------------
-        led_green  = Signal()
-        led_red    = Signal()
-        led_yellow = Signal()
-        led_white  = Signal()
+        # LED State Machine (xClk domain) ---------------------------------------------------------
 
+        led_green         = Signal()
+        led_red           = Signal()
+        led_yellow        = Signal()
+        led_white         = Signal()
+        boot_led_counter  = Signal(26)
+        boot_led_active   = Signal()
+        boot_led_white    = Signal()
+
+        # Flash white three times after configuration so a custom build is obvious on hardware.
         self.sync.xclk += [
-            If(led_white,
+            If(~crg.pll.locked,
+                boot_led_counter.eq(0),
+            ).Elif(boot_led_counter[23:26] != 6,
+                boot_led_counter.eq(boot_led_counter + 1),
+            )
+        ]
+        self.comb += [
+            boot_led_active.eq(boot_led_counter[23:26] < 6),
+            boot_led_white.eq(~boot_led_counter[23]),
+        ]
+
+        # Priority-encoded LED color selection (active-low RGB).
+        self.sync.xclk += [
+            If(boot_led_active & boot_led_white,
+                rgb_led.r.eq(0), rgb_led.b.eq(0), rgb_led.g.eq(0),
+            ).Elif(boot_led_active,
+                rgb_led.r.eq(1), rgb_led.b.eq(1), rgb_led.g.eq(1),
+            ).Elif(led_white,
                 rgb_led.r.eq(0), rgb_led.b.eq(0), rgb_led.g.eq(0),
             ).Elif(led_green,
                 rgb_led.r.eq(1), rgb_led.b.eq(1), rgb_led.g.eq(0),
@@ -280,9 +456,8 @@ class ChromaticTop(Module):
             ),
         ]
 
-        # -----------------------------------------------------------------------------------------
-        # LCD Enable Sync (gClk domain, async reset on memrst)
-        # -----------------------------------------------------------------------------------------
+        # LCD Enable Sync (gClk domain, async reset on memrst) ------------------------------------
+
         lcd_vsync_r1       = Signal()
         lcd_en0            = Signal()
         lcd_en1            = Signal()
@@ -291,6 +466,7 @@ class ChromaticTop(Module):
         lcd_backlight_init = Signal()
         q_menu_init        = Signal()
 
+        # Three-stage vsync-synchronized LCD enable with init gating.
         self.sync.gclk += lcd_vsync_r1.eq(lcd.vsync)
 
         self.sync.gclk += [
@@ -305,12 +481,12 @@ class ChromaticTop(Module):
             ),
         ]
 
-        # -----------------------------------------------------------------------------------------
-        # USB Init Delay (gClk domain)
-        # -----------------------------------------------------------------------------------------
+        # USB Init Delay (gClk domain) ------------------------------------------------------------
+
         usb_init_cnt = Signal(24, reset=0)
         usb_rst      = Signal(reset=1)
 
+        # Hold USB in reset until ~1s after PLL lock.
         self.sync.gclk += [
             If(~crg.pll.locked,
                 usb_init_cnt.eq(0),
@@ -323,9 +499,8 @@ class ChromaticTop(Module):
             ),
         ]
 
-        # -----------------------------------------------------------------------------------------
-        # UVC Pipeline Registers (gClk domain)
-        # -----------------------------------------------------------------------------------------
+        # UVC Pipeline Registers (gClk domain) ----------------------------------------------------
+
         lcd_enable_uvc = Signal()
         lcd_db_uvc     = Signal(18)
         hr1            = Signal()
@@ -333,6 +508,7 @@ class ChromaticTop(Module):
         he1            = Signal()
         d1             = Signal(18)
 
+        # One-stage pipeline delay for UVC video path, cleared on memrst.
         self.sync.gclk += [
             If(memrst,
                 hr1.eq(0), vr1.eq(0), he1.eq(0), d1.eq(0),
@@ -344,14 +520,13 @@ class ChromaticTop(Module):
             ),
         ]
 
-        # -----------------------------------------------------------------------------------------
-        # ESP32 UART Resync & Boot Control (PHY_CLKOUT & gClk domains)
-        # -----------------------------------------------------------------------------------------
-        usb_locked   = Signal()
-        uart_txd     = Signal(reset=1)
-        uart_rxd     = Signal()
-        uart_dtr     = Signal()
-        uart_rts     = Signal()
+        # ESP32 UART Resync & Boot Control (PHY_CLKOUT & gClk domains) ----------------------------
+
+        usb_locked    = Signal()
+        uart_txd      = Signal(reset=1)
+        uart_rxd      = Signal()
+        uart_dtr      = Signal()
+        uart_rts      = Signal()
 
         esp32_en_int  = Signal(reset=1)
         esp32_io0_int = Signal(reset=1)
@@ -367,11 +542,11 @@ class ChromaticTop(Module):
                 uart_txd.eq(esp_uart.tx),
                 esp_uart.rx.eq(uart_rxd),
                 esp32_en_int.eq(~uart_rts),
-                esp32_io0_int.eq(uart_dtr == 0),
+                esp32_io0_int.eq((uart_dtr == 0) & (uart_rts == 0)),
             ),
         ]
 
-        # gClk domain: ESP32 boot delay.
+        # gClk domain: ESP32 boot delay (shift register debounces EN toggle).
         esp_boot_delay_cnt   = Signal(12, reset=0)
         esp_boot_delay_shift = Signal(8, reset=0)
 
@@ -388,17 +563,16 @@ class ChromaticTop(Module):
             ),
         ]
 
-        # -----------------------------------------------------------------------------------------
-        # Button Debouncers
-        # -----------------------------------------------------------------------------------------
-        btn_a_f    = Signal()
-        btn_b_f    = Signal()
-        btn_down_f = Signal()
-        btn_left_f = Signal()
-        btn_right_f= Signal()
-        btn_up_f   = Signal()
-        btn_sel_f  = Signal()
-        btn_start_f= Signal()
+        # Button Debouncers (gClk domain) ---------------------------------------------------------
+
+        btn_a_f     = Signal()
+        btn_b_f     = Signal()
+        btn_down_f  = Signal()
+        btn_left_f  = Signal()
+        btn_right_f = Signal()
+        btn_up_f    = Signal()
+        btn_sel_f   = Signal()
+        btn_start_f = Signal()
 
         for name, raw, filt in [
             ("A",     buttons.a,          btn_a_f),
@@ -439,15 +613,17 @@ class ChromaticTop(Module):
                 ),
             ]
 
-        # Button merge with MCU buttons.
-        mcu_buttons   = Signal(9)
-        btn_menu_ored = Signal()
-        menu_disabled = Signal()
+        # Button Merge & Menu Gating ---------------------------------------------------------------
+
+        mcu_buttons      = Signal(9)
+        btn_menu_ored    = Signal()
+        menu_disabled    = Signal()
         slide_out_active = Signal()
 
+        # OR physical menu button with MCU menu bit.
         self.comb += btn_menu_ored.eq(buttons.menu & ~mcu_buttons[8])
 
-        # Menu gating.
+        # Gate menu button until cart is stable and menu init is complete.
         menu_gated = Signal()
         self.comb += [
             If(q_menu_init & (cart_det_sr[3:7] == 0xF),
@@ -457,12 +633,11 @@ class ChromaticTop(Module):
             ),
         ]
 
-        # -----------------------------------------------------------------------------------------
-        # Inter-module Signals
-        # -----------------------------------------------------------------------------------------
+        # Inter-Module Signals ---------------------------------------------------------------------
+
         # Video.
-        h_wr_burst_q  = Signal(16)
-        h_wr_burst_q2 = Signal(16)
+        h_wr_burst_q   = Signal(16)
+        h_wr_burst_q2  = Signal(16)
         gb_lcd_clkena  = Signal()
         gb_lcd_data    = Signal(15)
         gb_lcd_mode    = Signal(2)
@@ -475,18 +650,18 @@ class ChromaticTop(Module):
         h_draw_osd     = Signal()
 
         # Audio.
-        left  = Signal(16)
-        right = Signal(16)
-        volume = Signal(8)
+        left         = Signal(16)
+        right        = Signal(16)
+        volume       = Signal(8)
         h_headphones = Signal()
 
         # System.
-        debug_system   = Signal(32)
-        system_control = Signal(16)
-        low_battery    = Signal()
-        boot_rom_enabled = Signal()
-        pmic_sys_status  = Signal(8)
-        lcd_on_int       = Signal()
+        debug_system      = Signal(32)
+        system_control    = Signal(16)
+        low_battery       = Signal()
+        boot_rom_enabled  = Signal()
+        pmic_sys_status   = Signal(8)
+        lcd_on_int        = Signal()
         lcd_off_overwrite = Signal()
 
         # Palette.
@@ -508,9 +683,9 @@ class ChromaticTop(Module):
         uart_rx_data = Signal(16)
         uart_rx_val  = Signal()
 
-        # -----------------------------------------------------------------------------------------
-        # HDMI Debug Signals (directly routed internal signals)
-        # -----------------------------------------------------------------------------------------
+        # HDMI Debug Signals -----------------------------------------------------------------------
+
+        # Route internal status signals to HDMI pads for logic-analyzer probing.
         self.comb += [
             hdmi.d_p[2].eq(lcd_on_int),
             hdmi.d_n[2].eq(h_draw_osd),
@@ -525,36 +700,44 @@ class ChromaticTop(Module):
         # I2S_BCLK = menuDisabled.
         self.comb += i2s.bclk.eq(menu_disabled)
 
-        # -----------------------------------------------------------------------------------------
-        # Subsystem Instances
-        # -----------------------------------------------------------------------------------------
+        # LCD SPI Init -----------------------------------------------------------------------------
 
-        # Video System.
+        self.specials += Instance("ST7785_init",
+            p_ISSIMU        = 0,
+            i_clk           = ClockSignal("pclk"),
+            i_reset         = memrst,
+            o_LCD_CS        = lcd.spi_csx,
+            o_LCD_SCK       = lcd.spi_sclk,
+            o_LCD_SDA_SDI   = lcd.spi_sda,
+            o_LCD_RST       = lcd.reset,
+            o_LCD_INIT_DONE = lcd_init_done,
+        )
+
+        # Video System -----------------------------------------------------------------------------
+
+        # ST7785_init extracted; SPI/RESET now driven at top level.
         self.specials += Instance("vid_system_top",
-            p_ISSIMU = 0,
-            i_gClk   = ClockSignal("gclk"),
-            i_hClk   = ClockSignal("hclk"),
-            i_pClk   = ClockSignal("pclk"),
-            i_reset  = memrst,
-
-            i_BTN_MENU       = menu_disabled,
-            o_slideOutActive = slide_out_active,
-
-            o_LCD_DB         = lcd.db,
-            o_LCD_ENABLE_UVC = lcd_enable_uvc,
-            o_LCD_DB_UVC     = lcd_db_uvc,
-            o_LCD_DOTCLK     = lcd.dotclk,
-            o_LCD_ENABLE     = lcd.enable,
-            o_LCD_HSYNC      = lcd.hsync,
-            i_LCD_EN         = lcd_en,
-            o_LCD_RESET      = lcd.reset,
-            o_LCD_SPI_CSX    = lcd.spi_csx,
-            o_LCD_SPI_SCLK   = lcd.spi_sclk,
-            o_LCD_SPI_SDA    = lcd.spi_sda,
-            i_LCD_TE         = lcd.te,
-            o_LCD_VSYNC      = lcd.vsync,
-            o_LCD_GENLOCK    = Signal(),  # Unused.
-
+            p_ISSIMU                   = 0,
+            i_gClk                     = ClockSignal("gclk"),
+            i_hClk                     = ClockSignal("hclk"),
+            i_pClk                     = ClockSignal("pclk"),
+            i_reset                    = memrst,
+            # Menu.
+            i_BTN_MENU                 = menu_disabled,
+            o_slideOutActive           = slide_out_active,
+            # LCD.
+            o_LCD_DB                   = lcd.db,
+            o_LCD_ENABLE_UVC           = lcd_enable_uvc,
+            o_LCD_DB_UVC               = lcd_db_uvc,
+            o_LCD_DOTCLK               = lcd.dotclk,
+            o_LCD_ENABLE               = lcd.enable,
+            o_LCD_HSYNC                = lcd.hsync,
+            i_LCD_EN                   = lcd_en,
+            i_LCD_TE                   = lcd.te,
+            o_LCD_VSYNC                = lcd.vsync,
+            o_LCD_GENLOCK              = Signal(),
+            i_LCD_INIT_DONE            = lcd_init_done,
+            # Display Options.
             i_frameBlendEnable         = system_control[1],
             i_colorCorrectionEnableLCD = system_control[2],
             i_colorCorrectionEnableUVC = system_control[3],
@@ -567,28 +750,28 @@ class ChromaticTop(Module):
             i_gPercentEna              = percent_ena,
             i_debug_system             = debug_system,
             i_debug_system_on          = 0,
-
-            o_hDrawOSD    = h_draw_osd,
-            o_hGBNewLine  = h_gb_newline,
-            o_hGBAddress  = h_gb_address,
-            o_hGBWrite    = h_gb_write,
-            o_hGBData     = h_gb_data,
-
-            o_hValid      = Signal(),  # Connected elsewhere.
-            o_hHsync      = Signal(),
-            o_hVsync      = Signal(),
-            o_hWrBurstQ   = h_wr_burst_q,
-            o_hWrBurstQ2  = h_wr_burst_q2,
-
-            o_LCD_INIT_DONE  = lcd_init_done,
-            i_gb_lcd_clkena  = gb_lcd_clkena,
-            i_gb_lcd_mode    = gb_lcd_mode,
-            i_gb_lcd_on      = gb_lcd_on,
-            i_gb_lcd_vsync   = gb_lcd_vsync,
-            i_gb_lcd_data    = gb_lcd_data,
+            # OSD / Frame Buffer.
+            o_hDrawOSD                 = h_draw_osd,
+            o_hGBNewLine               = h_gb_newline,
+            o_hGBAddress               = h_gb_address,
+            o_hGBWrite                 = h_gb_write,
+            o_hGBData                  = h_gb_data,
+            o_hValid                   = Signal(),
+            o_hHsync                   = Signal(),
+            o_hVsync                   = Signal(),
+            o_hWrBurstQ                = h_wr_burst_q,
+            o_hWrBurstQ2               = h_wr_burst_q2,
+            # Game Boy LCD.
+            i_gb_lcd_clkena            = gb_lcd_clkena,
+            i_gb_lcd_mode              = gb_lcd_mode,
+            i_gb_lcd_on                = gb_lcd_on,
+            i_gb_lcd_vsync             = gb_lcd_vsync,
+            i_gb_lcd_data              = gb_lcd_data,
         )
 
-        # Audio System (I2C now handled externally via LiteI2C).
+        # Audio System (I2S + TLV320 Codec) --------------------------------------------------------
+
+        # I2C control signals (shared between tlv320_init and polling_master).
         i2c_enable           = Signal()
         i2c_read_write       = Signal()
         i2c_mosi_data        = Signal(8)
@@ -597,37 +780,146 @@ class ChromaticTop(Module):
         i2c_miso_data        = Signal(8)
         i2c_busy             = Signal()
 
-        self.specials += Instance("aud_system_top",
-            i_gClk     = ClockSignal("gclk"),
-            i_hClk     = ClockSignal("hclk"),
-            i_reset_n  = crg.pll.locked,
-            i_left     = left,
-            i_right    = right,
+        # I2S Serialization.
+        # ------------------
 
-            o_AUD_BCLK  = audio.bclk,
-            o_AUD_DIN   = audio.din,
-            o_AUD_DOUT  = Signal(),  # Unused.
-            o_AUD_MCLK  = audio.mclk,
-            o_AUD_RESET = audio.reset,
-            o_AUD_WCLK  = audio.wclk,
+        # Ported from aud_system_top.v; generates I2S bitstream for TLV320 codec.
+        gclk_half   = Signal()
+        stereo_sr   = Signal(32)
+        i2s_count   = Signal(5)
+        aud_wclk    = Signal()
+        hp_gpio     = Signal(8)
+        mute        = Signal()
+        left_m      = Signal(16)
+        right_m     = Signal(16)
+        g_mono_spk  = Signal(17)
 
-            i_software_mute    = system_control[0],
-            o_pmic_sys_status  = pmic_sys_status,
-            o_volume           = volume,
-            o_hHeadphones      = h_headphones,
+        self.comb += [
+            h_headphones.eq(hp_gpio[1]),
+            mute.eq(system_control[0] | (volume > 0x76)),
+            left_m.eq(Mux(mute, 0, -left)),
+            right_m.eq(Mux(mute, 0, -right)),
+        ]
 
-            # I2C control interface (now external).
-            o_i2c_enable           = i2c_enable,
-            o_i2c_read_write       = i2c_read_write,
-            o_i2c_mosi_data        = i2c_mosi_data,
-            o_i2c_register_address = i2c_register_address,
-            o_i2c_device_address   = i2c_device_address,
-            i_i2c_miso_data        = i2c_miso_data,
+        self.sync.gclk += [
+            gclk_half.eq(~gclk_half),
+            If(crg.pll.locked,
+                g_mono_spk.eq(left_m + right_m),
+            ),
+        ]
+
+        # I2S shift register (runs on gClkHalf -- we use gClk with enable on gclk_half edges).
+        gclk_half_d  = Signal()
+        gclk_half_re = Signal()
+        self.sync.gclk += gclk_half_d.eq(gclk_half)
+        self.comb += gclk_half_re.eq(gclk_half & ~gclk_half_d)  # Rising edge of gclk_half.
+
+        self.sync.gclk += [
+            If(~crg.pll.locked,
+                i2s_count.eq(0),
+            ).Elif(gclk_half_re,
+                If(i2s_count == 0,
+                    i2s_count.eq(31),
+                    aud_wclk.eq(1),
+                    If(~hp_gpio[1],
+                        stereo_sr.eq(Cat(g_mono_spk[1:17], Constant(0, 16))),
+                    ).Else(
+                        stereo_sr.eq(Cat(left_m, right_m)),
+                    ),
+                ).Else(
+                    i2s_count.eq(i2s_count - 1),
+                    If(i2s_count == 16,
+                        aud_wclk.eq(0),
+                    ),
+                    stereo_sr.eq(Cat(Constant(0, 1), stereo_sr[:31])),
+                ),
+            ),
+        ]
+
+        # Audio codec output signals.
+        self.comb += [
+            audio.mclk.eq(ClockSignal("gclk")),
+            audio.bclk.eq(~gclk_half),
+            audio.din.eq(stereo_sr[31]),
+            audio.reset.eq(crg.pll.locked),
+            audio.wclk.eq(aud_wclk),
+        ]
+
+        # TLV320 Codec Init.
+        # -------------------
+
+        # Sequences I2C register writes from ROM at power-up.
+        tlv320_init_done     = Signal()
+        tlv320_i2c_enable    = Signal()
+        tlv320_i2c_rw        = Signal()
+        tlv320_i2c_mosi      = Signal(8)
+        tlv320_i2c_reg_addr  = Signal(8)
+        tlv320_i2c_dev_addr  = Signal(7)
+
+        self.specials += Instance("tlv320_init",
+            i_pclk                 = ClockSignal("hclk"),
+            i_vb_rst               = ~crg.pll.locked,
             i_i2c_busy             = i2c_busy,
+            o_tlv320_init_done     = tlv320_init_done,
+            o_i2c_enable           = tlv320_i2c_enable,
+            o_i2c_read_write       = tlv320_i2c_rw,
+            o_i2c_mosi_data        = tlv320_i2c_mosi,
+            o_i2c_register_address = tlv320_i2c_reg_addr,
+            o_i2c_device_address   = tlv320_i2c_dev_addr,
         )
 
-        # LiteI2C PHY + Bridge (replacing i2c_master.sv).
-        # Pass platform I2C pads directly (LiteI2C uses SDRTristate for open-drain).
+        # I2C Polling Master.
+        # --------------------
+
+        # Periodic I2C reads/writes to codec + PMIC after init completes.
+        pol_i2c_enable    = Signal()
+        pol_i2c_rw        = Signal()
+        pol_i2c_mosi      = Signal(8)
+        pol_i2c_reg_addr  = Signal(8)
+        pol_i2c_dev_addr  = Signal(7)
+
+        self.specials += Instance("polling_master",
+            i_clk                  = ClockSignal("hclk"),
+            i_rst                  = ~crg.pll.locked,
+            i_i2c_busy             = i2c_busy,
+            i_enable               = tlv320_init_done,
+            i_mute                 = system_control[0],
+            # I2C Interface.
+            i_i2c_miso_data        = i2c_miso_data,
+            o_i2c_enable           = pol_i2c_enable,
+            o_i2c_read_write       = pol_i2c_rw,
+            o_i2c_mosi_data        = pol_i2c_mosi,
+            o_i2c_register_address = pol_i2c_reg_addr,
+            o_i2c_device_address   = pol_i2c_dev_addr,
+            # Status Outputs.
+            o_volume               = volume,
+            o_gpio                 = hp_gpio,
+            o_pmic_sys_status      = pmic_sys_status,
+        )
+
+        # I2C Mux.
+        # --------
+
+        # Use tlv320_init until done, then switch to polling_master.
+        self.comb += [
+            If(tlv320_init_done,
+                i2c_enable.eq(pol_i2c_enable),
+                i2c_read_write.eq(pol_i2c_rw),
+                i2c_mosi_data.eq(pol_i2c_mosi),
+                i2c_register_address.eq(pol_i2c_reg_addr),
+                i2c_device_address.eq(pol_i2c_dev_addr),
+            ).Else(
+                i2c_enable.eq(tlv320_i2c_enable),
+                i2c_read_write.eq(tlv320_i2c_rw),
+                i2c_mosi_data.eq(tlv320_i2c_mosi),
+                i2c_register_address.eq(tlv320_i2c_reg_addr),
+                i2c_device_address.eq(tlv320_i2c_dev_addr),
+            ),
+        ]
+
+        # LiteI2C PHY + Bridge --------------------------------------------------------------------
+
+        # Replacing i2c_master.sv; pass platform I2C pads directly (LiteI2C uses SDRTristate).
         # Rename "sys" domain to "hclk" (LiteI2C CSRStorage uses "sys" internally).
         self.submodules.i2c_phy = i2c_phy = ClockDomainsRenamer({"sys": "hclk"})(
             LiteI2CPHYCore(
@@ -639,11 +931,12 @@ class ChromaticTop(Module):
         self.comb += i2c_phy.active.eq(1)
 
         # Bridge: aud_system_top's enable/busy interface -> LiteI2C stream protocol.
-        i2c_enable_d = Signal()
+        i2c_enable_d  = Signal()
         i2c_enable_re = Signal()
         self.sync.hclk += i2c_enable_d.eq(i2c_enable)
         self.comb += i2c_enable_re.eq(i2c_enable & ~i2c_enable_d)
 
+        # I2C Bridge FSM.
         self.submodules.i2c_bridge = i2c_bridge = ClockDomainsRenamer("hclk")(FSM(reset_state="IDLE"))
         i2c_bridge.act("IDLE",
             i2c_busy.eq(0),
@@ -679,123 +972,126 @@ class ChromaticTop(Module):
             ),
         )
 
-        # Memory System.
+        # Memory System ----------------------------------------------------------------------------
+
         self.specials += Instance("mem_system_top",
-            p_ISSIMU = 0,
-            i_xClk  = ClockSignal("xclk"),
-            i_fClk  = ClockSignal("fclk"),
-            i_hClk  = ClockSignal("hclk"),
-            i_reset = memrst,
-
-            i_QSPI_CLK  = qspi.clk,
-            i_QSPI_MOSI = qspi.mosi,
-            i_QSPI_MISO = qspi.miso,
-            i_QSPI_CS   = qspi.cs_n,
-            i_QSPI_WP   = qspi.wp_n,
-            i_QSPI_HD   = qspi.hd,
-
-            o_PS_CE_N = ps.ce_n,
-            o_PS_CLK  = ps.clk,
-            io_PS_DQ  = ps.dq,
-            io_PS_DQS = ps.dqs,
-
-            o_BIST_failed   = Signal(),
+            p_ISSIMU        = 0,
+            i_xClk          = ClockSignal("xclk"),
+            i_fClk          = ClockSignal("fclk"),
+            i_hClk          = ClockSignal("hclk"),
+            i_reset         = memrst,
+            # QSPI.
+            i_QSPI_CLK     = qspi.clk,
+            i_QSPI_MOSI    = qspi.mosi,
+            i_QSPI_MISO    = qspi.miso,
+            i_QSPI_CS      = qspi.cs_n,
+            i_QSPI_WP      = qspi.wp_n,
+            i_QSPI_HD      = qspi.hd,
+            # PSRAM.
+            o_PS_CE_N      = ps.ce_n,
+            o_PS_CLK       = ps.clk,
+            io_PS_DQ       = ps.dq,
+            io_PS_DQS      = ps.dqs,
+            # BIST / Frame Buffer.
+            o_BIST_failed  = Signal(),
             o_BIST_finished = Signal(),
-            o_qMenuInit     = q_menu_init,
-            i_hGBNewLine    = h_gb_newline,
-            i_hGBAddress    = h_gb_address,
-            i_hGBWrite      = h_gb_write,
-            i_hGBData       = h_gb_data,
-
-            i_hValid      = gb_lcd_clkena,
-            i_hHsync      = gb_lcd_mode[1],
-            i_hVsync      = gb_lcd_vsync,
-            o_hWrBurstQ   = h_wr_burst_q,
-            o_hWrBurstQ2  = h_wr_burst_q2,
+            o_qMenuInit    = q_menu_init,
+            i_hGBNewLine   = h_gb_newline,
+            i_hGBAddress   = h_gb_address,
+            i_hGBWrite     = h_gb_write,
+            i_hGBData      = h_gb_data,
+            # Burst Read/Write.
+            i_hValid       = gb_lcd_clkena,
+            i_hHsync       = gb_lcd_mode[1],
+            i_hVsync       = gb_lcd_vsync,
+            o_hWrBurstQ    = h_wr_burst_q,
+            o_hWrBurstQ2   = h_wr_burst_q2,
         )
 
-        # Emulation System.
+        # Emulation System -------------------------------------------------------------------------
+
         self.specials += Instance("emu_system_top",
-            i_hclk      = ClockSignal("hclk"),
-            i_pclk      = ClockSignal("pclk"),
-            i_reset_n   = ~memrst,
-            i_POWER_GOOD = ~power.on_fpga,
-
-            i_customPaletteEna = palette_bg_in[63],
-            i_paletteOff       = system_control[12],
-            i_paletteBGIn      = palette_bg_in,
-            i_paletteOBJ0In    = palette_obj0_in,
-            i_paletteOBJ1In    = palette_obj1_in,
-            o_gbc_mode         = gbc_mode,
-            o_gpd              = gpd,
-
-            i_BTN_NODIAGONAL   = system_control[11],
-            i_BTN_A            = btn_a_f     | mcu_buttons[3],
-            i_BTN_B            = btn_b_f     | mcu_buttons[2],
-            i_BTN_DPAD_DOWN    = btn_down_f  | mcu_buttons[7],
-            i_BTN_DPAD_LEFT    = btn_left_f  | mcu_buttons[6],
-            i_BTN_DPAD_RIGHT   = btn_right_f | mcu_buttons[5],
-            i_BTN_DPAD_UP      = btn_up_f    | mcu_buttons[4],
-            i_BTN_MENU         = ~btn_menu_ored,
-            i_BTN_SEL          = btn_sel_f   | mcu_buttons[1],
-            i_BTN_START        = btn_start_f | mcu_buttons[0],
-            i_MENU_CLOSED      = menu_disabled & ~slide_out_active,
-
-            o_CART_A          = cart.a,
-            o_CART_CLK        = cart.clk,
-            o_CART_CS         = cart.cs,
-            io_CART_D         = cart.d,
-            o_CART_RD         = cart.rd,
-            io_CART_RST       = cart.rst,
-            o_CART_WR         = cart.wr,
-            o_CART_DATA_DIR_E = cart.data_dir_e,
-
-            i_IR_RX  = ir.rx,
-            o_IR_LED = ir.led,
-
-            io_LINK_CLK = link.clk,
-            i_LINK_IN   = getattr(link, "in"),
-            o_LINK_OUT  = link.out,
-
-            o_lcd_on_int       = lcd_on_int,
+            i_hclk              = ClockSignal("hclk"),
+            i_pclk              = ClockSignal("pclk"),
+            i_reset_n           = ~memrst,
+            i_POWER_GOOD        = ~power.on_fpga,
+            # Palette.
+            i_customPaletteEna  = palette_bg_in[63],
+            i_paletteOff        = system_control[12],
+            i_paletteBGIn       = palette_bg_in,
+            i_paletteOBJ0In     = palette_obj0_in,
+            i_paletteOBJ1In     = palette_obj1_in,
+            o_gbc_mode          = gbc_mode,
+            o_gpd               = gpd,
+            # Buttons.
+            i_BTN_NODIAGONAL    = system_control[11],
+            i_BTN_A             = btn_a_f     | mcu_buttons[3],
+            i_BTN_B             = btn_b_f     | mcu_buttons[2],
+            i_BTN_DPAD_DOWN     = btn_down_f  | mcu_buttons[7],
+            i_BTN_DPAD_LEFT     = btn_left_f  | mcu_buttons[6],
+            i_BTN_DPAD_RIGHT    = btn_right_f | mcu_buttons[5],
+            i_BTN_DPAD_UP       = btn_up_f    | mcu_buttons[4],
+            i_BTN_MENU          = ~btn_menu_ored,
+            i_BTN_SEL           = btn_sel_f   | mcu_buttons[1],
+            i_BTN_START         = btn_start_f | mcu_buttons[0],
+            i_MENU_CLOSED       = menu_disabled & ~slide_out_active,
+            # Cartridge.
+            o_CART_A            = cart.a,
+            o_CART_CLK          = cart.clk,
+            o_CART_CS           = cart.cs,
+            io_CART_D           = cart.d,
+            o_CART_RD           = cart.rd,
+            io_CART_RST         = cart.rst,
+            o_CART_WR           = cart.wr,
+            o_CART_DATA_DIR_E   = cart.data_dir_e,
+            # IR.
+            i_IR_RX             = ir.rx,
+            o_IR_LED            = ir.led,
+            # Link Cable.
+            io_LINK_CLK         = link.clk,
+            i_LINK_IN           = getattr(link, "in"),
+            o_LINK_OUT          = link.out,
+            # LCD Status.
+            o_lcd_on_int        = lcd_on_int,
             o_lcd_off_overwrite = lcd_off_overwrite,
-            o_boot_rom_enabled = boot_rom_enabled,
-
-            o_left  = left,
-            o_right = right,
-
-            i_LCD_INIT_DONE  = lcd_init_done,
-            o_gb_lcd_clkena  = gb_lcd_clkena,
-            o_gb_lcd_mode    = gb_lcd_mode,
-            o_gb_lcd_on      = gb_lcd_on,
-            o_gb_lcd_vsync   = gb_lcd_vsync,
-            o_gb_lcd_data    = gb_lcd_data,
+            o_boot_rom_enabled  = boot_rom_enabled,
+            # Audio.
+            o_left              = left,
+            o_right             = right,
+            # Game Boy LCD.
+            i_LCD_INIT_DONE     = lcd_init_done,
+            o_gb_lcd_clkena     = gb_lcd_clkena,
+            o_gb_lcd_mode       = gb_lcd_mode,
+            o_gb_lcd_on         = gb_lcd_on,
+            o_gb_lcd_vsync      = gb_lcd_vsync,
+            o_gb_lcd_data       = gb_lcd_data,
         )
 
-        # USB UVC+UART System.
+        # USB UVC+UART System ----------------------------------------------------------------------
+
         debugs = Signal(8)
         self.specials += Instance("usbuvcuart_top",
-            i_CLK_24MHz = clk_24,
-            i_ERST      = usb_rst,
-            o_pClk      = phy_clkout,
-            o_usblocked = usb_locked,
-            i_hClk      = ClockSignal("gclk"),
-
-            o_UART_TXD   = uart_rxd,
-            i_UART_RXD   = uart_txd,
-            o_E_UART_DTR = uart_dtr,
-            o_E_UART_RTS = uart_rts,
-
-            i_left  = left,
-            i_right = right,
-
-            i_hLineValid  = hr1,
-            i_hEnable     = he1,
-            i_hFrameValid = vr1,
-            i_hData       = d1,
-            o_debugs      = debugs,
-            i_playerNum   = Cat(system_control[4:8], Constant(0, 4)),
-
+            i_CLK_24MHz       = clk_24,
+            i_ERST            = usb_rst,
+            o_pClk            = phy_clkout,
+            o_usblocked       = usb_locked,
+            i_hClk            = ClockSignal("gclk"),
+            # UART.
+            o_UART_TXD        = uart_rxd,
+            i_UART_RXD        = uart_txd,
+            o_E_UART_DTR      = uart_dtr,
+            o_E_UART_RTS      = uart_rts,
+            # Audio.
+            i_left            = left,
+            i_right           = right,
+            # UVC Video.
+            i_hLineValid      = hr1,
+            i_hEnable         = he1,
+            i_hFrameValid     = vr1,
+            i_hData           = d1,
+            o_debugs          = debugs,
+            i_playerNum       = Cat(system_control[4:8], Constant(0, 4)),
+            # USB PHY.
             io_usb_dxp_io     = usb.dxp,
             io_usb_dxn_io     = usb.dxn,
             i_usb_rxdp_i      = usb.rxdp,
@@ -805,71 +1101,79 @@ class ChromaticTop(Module):
             io_usb_term_dn_io = usb.term_dn,
         )
 
-        # Battery ADC.
+        # Battery ADC ------------------------------------------------------------------------------
+
         self.specials += Instance("adc_wrap",
-            i_clk         = ClockSignal("gclk"),
-            i_reset_n     = crg.pll.locked,
-            o_hAdcReq_ext = h_adc_req_ext,
+            i_clk          = ClockSignal("gclk"),
+            i_reset_n      = crg.pll.locked,
+            o_hAdcReq_ext  = h_adc_req_ext,
             o_hAdcValue_r1 = h_adc_value_r1,
             o_hAdcReady_r1 = h_adc_ready_r1,
-            i_VBAT_ADC_P  = vbat_adc.p,
-            i_VBAT_ADC_N  = vbat_adc.n,
+            i_VBAT_ADC_P   = vbat_adc.p,
+            i_VBAT_ADC_N   = vbat_adc.n,
         )
 
-        # System Monitor.
+        # System Monitor --------------------------------------------------------------------------
+
         self.specials += Instance("system_monitor",
-            i_clk     = ClockSignal("gclk"),
-            i_reset   = ~crg.pll.locked,
-
-            i_BTN_A          = btn_a_f,
-            i_BTN_B          = btn_b_f,
-            i_BTN_DPAD_DOWN  = btn_down_f,
-            i_BTN_DPAD_LEFT  = btn_left_f,
-            i_BTN_DPAD_RIGHT = btn_right_f,
-            i_BTN_DPAD_UP    = btn_up_f,
-            i_BTN_MENU       = menu_gated,
-            i_BTN_SEL        = btn_sel_f,
-            i_BTN_START      = btn_start_f,
-
+            i_clk                = ClockSignal("gclk"),
+            i_reset              = ~crg.pll.locked,
+            # Buttons.
+            i_BTN_A              = btn_a_f,
+            i_BTN_B              = btn_b_f,
+            i_BTN_DPAD_DOWN      = btn_down_f,
+            i_BTN_DPAD_LEFT      = btn_left_f,
+            i_BTN_DPAD_RIGHT     = btn_right_f,
+            i_BTN_DPAD_UP        = btn_up_f,
+            i_BTN_MENU           = menu_gated,
+            i_BTN_SEL            = btn_sel_f,
+            i_BTN_START          = btn_start_f,
+            # LCD.
             o_menuDisabled       = menu_disabled,
             o_LCD_BACKLIGHT_INIT = lcd_backlight_init,
             i_LCD_INIT_DONE      = lcd_init_done & ~boot_rom_enabled,
             o_LCD_PWM            = lcd.pwm,
-
-            o_hAdcReq_ext  = h_adc_req_ext,
-            i_hAdcValue_r1 = h_adc_value_r1,
-            i_hAdcReady_r1 = h_adc_ready_r1,
-            o_ADC_SEL      = audio.adc_sel,
-
-            i_hButtons         = 0,
-            o_MCU_buttons      = mcu_buttons,
-            i_hVolume          = volume[:7],
-            o_pmic_sys_status  = pmic_sys_status,
-            i_hHeadphones      = h_headphones,
-            i_gSecondEna       = second_ena,
-            i_gHalfSecondEna   = half_second_ena,
-            o_debug_system     = debug_system,
-            o_low_battery      = low_battery,
-            o_LED_Green        = led_green,
-            o_LED_Red          = led_red,
-            o_LED_Yellow       = led_yellow,
-            o_LED_White        = led_white,
-            o_system_control   = system_control,
-            o_paletteBGIn      = palette_bg_in,
-            o_paletteOBJ0In    = palette_obj0_in,
-            o_paletteOBJ1In    = palette_obj1_in,
-            i_gbc_mode         = gbc_mode,
-            i_gpd              = gpd,
-
-            i_uart_rx_data = uart_rx_data[:8],
-            i_uart_rx_val  = uart_rx_val,
-            o_uart_tx_busy = uart_tx_busy,
-            o_uart_tx_data = uart_tx_data,
-            o_uart_tx_val  = uart_tx_val,
+            # ADC.
+            o_hAdcReq_ext        = h_adc_req_ext,
+            i_hAdcValue_r1       = h_adc_value_r1,
+            i_hAdcReady_r1       = h_adc_ready_r1,
+            o_ADC_SEL            = audio.adc_sel,
+            # System Status.
+            i_hButtons           = 0,
+            o_MCU_buttons        = mcu_buttons,
+            i_hVolume            = volume[:7],
+            o_pmic_sys_status    = pmic_sys_status,
+            i_hHeadphones        = h_headphones,
+            i_gSecondEna         = second_ena,
+            i_gHalfSecondEna     = half_second_ena,
+            o_debug_system       = debug_system,
+            o_low_battery        = low_battery,
+            # LED Control.
+            o_LED_Green          = led_green,
+            o_LED_Red            = led_red,
+            o_LED_Yellow         = led_yellow,
+            o_LED_White          = led_white,
+            # System Control / Palette.
+            o_system_control     = system_control,
+            o_paletteBGIn        = palette_bg_in,
+            o_paletteOBJ0In      = palette_obj0_in,
+            o_paletteOBJ1In      = palette_obj1_in,
+            i_gbc_mode           = gbc_mode,
+            i_gpd                = gpd,
+            # UART (to ESP32 MCU).
+            i_uart_rx_data       = uart_rx_data[:8],
+            i_uart_rx_val        = uart_rx_val,
+            o_uart_tx_busy       = uart_tx_busy,
+            o_uart_tx_data       = uart_tx_data,
+            o_uart_tx_val        = uart_tx_val,
         )
 
-        # UART (FPGA <-> ESP32 MCU) -- LiteX RS232PHY replacing UART2.
-        serial_pads = Record([("tx", 1), ("rx", 1)])
+        # UART (FPGA <-> ESP32 MCU) ---------------------------------------------------------------
+
+        # LiteX RS232PHY replacing UART2.
+        serial_pads     = Record([("tx", 1), ("rx", 1)])
+        uart_tx_active  = Signal()
+        uart_tx_data_l  = Signal(8)
         self.comb += [
             serial.tx.eq(serial_pads.tx),
             serial_pads.rx.eq(serial.rx),
@@ -877,11 +1181,21 @@ class ChromaticTop(Module):
         self.submodules.uart_phy = ClockDomainsRenamer("gclk")(
             RS232PHY(serial_pads, clk_freq=int(33.55432e6 / 4), baudrate=115200)
         )
-        # TX: system_monitor -> UART PHY.
+        self.sync.gclk += [
+            If(~crg.pll.locked,
+                uart_tx_active.eq(0),
+            ).Elif(~uart_tx_active & uart_tx_val,
+                uart_tx_active.eq(1),
+                uart_tx_data_l.eq(uart_tx_data),
+            ).Elif(uart_tx_active & self.uart_phy.sink.ready,
+                uart_tx_active.eq(0),
+            )
+        ]
+        # TX: system_monitor -> UART PHY. Keep BUSY asserted for the full byte time.
         self.comb += [
-            self.uart_phy.sink.valid.eq(uart_tx_val),
-            self.uart_phy.sink.data.eq(uart_tx_data),
-            uart_tx_busy.eq(~self.uart_phy.sink.ready),
+            self.uart_phy.sink.valid.eq(~uart_tx_active & uart_tx_val),
+            self.uart_phy.sink.data.eq(Mux(uart_tx_active, uart_tx_data_l, uart_tx_data)),
+            uart_tx_busy.eq(uart_tx_active),
         ]
         # RX: UART PHY -> system_monitor.
         self.comb += [
@@ -890,7 +1204,8 @@ class ChromaticTop(Module):
             self.uart_phy.source.ready.eq(1),
         ]
 
-        # LINK_SD output.
+        # Link Port --------------------------------------------------------------------------------
+
         self.comb += link.sd.eq(0)  # Directly driven by emu_system_top via CART signals.
         # Note: LINK_SD is driven by emu_system_top in the original, but it's in the top port list.
         # The emu_system_top instance doesn't have a LINK_SD port, so it defaults here.
@@ -898,6 +1213,12 @@ class ChromaticTop(Module):
 # Build --------------------------------------------------------------------------------------------
 
 def main():
+    """
+    Build entry point for the Chromatic FPGA LiteX design.
+
+    Parses command-line arguments, configures the Gowin platform and toolchain options, registers
+    RTL sources, applies timing constraints, and optionally runs the FPGA build flow.
+    """
     parser = argparse.ArgumentParser(description="Chromatic FPGA LiteX Build")
     parser.add_argument("--build",      action="store_true", help="Build bitstream.")
     parser.add_argument("--no-compile", action="store_true", help="Generate build files without running toolchain.")
@@ -909,6 +1230,7 @@ def main():
         toolchain = args.toolchain,
         device    = "GW5A-EV25UG256CC1/I0",
     )
+    platform.devicename = "GW5A-25A"
 
     # Gowin Build Options.
     platform.toolchain.options["verilog_std"]            = "sysv2017"
@@ -923,39 +1245,8 @@ def main():
     base_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "esp32t")
     add_sources(platform, base_path)
 
-    # Timing Constraints.
-    # Note: Base clocks (clk_fpga, clk_24, clk_27) are auto-generated by LiteX in the .sdc.
-    # The original evt1_x2.sdc referenced old signal/instance names -- we replace it with
-    # constraints using LiteX-generated names.
-    platform.toolchain.additional_cst_commands += [
-        # Generated PLL clocks (main PLL, managed by LiteX).
-        'create_generated_clock -name xclk2 -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 1 -multiply_by 4 [get_pins {PLLA/CLKOUT0}]',
-        'create_generated_clock -name pclk  -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 1 -multiply_by 1 [get_pins {PLLA/CLKOUT1}]',
-        'create_generated_clock -name hclk  -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 2 -multiply_by 1 [get_pins {PLLA/CLKOUT2}]',
-        'create_generated_clock -name gclk  -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 4 -multiply_by 1 [get_pins {PLLA/CLKOUT3}]',
-        'create_generated_clock -name xclk  -source [get_ports {clk_fpga}] -master_clock clk_fpga -divide_by 1 -multiply_by 2 [get_pins {PLLA/CLKOUT4}]',
-        # QSPI clock.
-        'create_clock -name sclk -period 25 [get_ports {qspi_clk}]',
-        # Async clock groups.
-        'set_clock_groups -asynchronous -group [get_clocks {pclk}] -group [get_clocks {hclk}]',
-        'set_clock_groups -asynchronous -group [get_clocks {pclk}] -group [get_clocks {gclk}]',
-        'set_clock_groups -asynchronous -group [get_clocks {hclk}] -group [get_clocks {gclk}]',
-        # Cartridge bus timing constraints.
-        'set_max_delay -from [get_ports {cart_d[*]}] -to [get_clocks {hclk}] 13',
-        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_a[*]}] 14',
-        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_wr}] 14',
-        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_rd}] 14',
-        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_cs}] 14',
-        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {link_sd}] 14',
-        'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_d[*]}] 14',
-        # USB clocks (inside usbuvcuart_top, paths updated for LiteX hierarchy).
-        'create_generated_clock -name PHY_CLKOUT -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 16 -multiply_by 40 [get_pins {usbuvcuart_top/u_Gowin_PLL_USB/PLLA_inst/CLKOUT1}]',
-        'create_generated_clock -name fclk_960M  -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 1  -multiply_by 40 [get_nets {usbuvcuart_top/fclk_960M}]',
-        'create_generated_clock -name clk24p     -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 1  -multiply_by 1  [get_pins {usbuvcuart_top/u_Gowin_PLL_USB/PLLA_inst/CLKOUT2}]',
-        'create_clock -name usbintsclk -period 8 -waveform {0 4} [get_nets {usbuvcuart_top/u_USB_SoftPHY_Top/usb2_0_softphy/u_usb_20_phy_utmi/u_usb2_0_softphy/u_usb_phy_hs/sclk}] -add',
-        'set_clock_groups -asynchronous -group [get_clocks {PHY_CLKOUT}] -group [get_clocks {fclk_960M}]',
-        'set_clock_groups -asynchronous -group [get_clocks {PHY_CLKOUT}] -group [get_clocks {usbintsclk}]',
-    ]
+    # Timing / constraint generation fixes for Gowin on the Chromatic board.
+    install_toolchain_fixes(platform)
 
     # Create Top Module & Build.
     top = ChromaticTop(platform)
