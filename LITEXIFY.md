@@ -33,7 +33,7 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
                 │           │                                  │           │
   PSRAM/QSPI◄──►│  mem_system_top (Memory Arbiter + PSRAM)    │           │
                 │           │                                  │           │
-  LCD ◄─────────│  vid_system_top + ST7785_init (Video)        │           │
+  LCD ◄─────────│  vid_system_top + LiteX LCD init (Video)     │           │
                 │           │                                  │           │
   USB ◄─────────│  usbuvcuart_top (UVC + UART + UAC)          │──► ESP32  │
                 │           │                                  │           │
@@ -67,7 +67,7 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 ### What's in LiteX (Python/Migen)
 
 - **CRG**: GW5APLL clock generation (5 domains).
-- **Glue logic**: Timers, cart-detect reset, LED FSM, LCD enable sync, USB init delay, ESP32 boot delay, UART resync, HDMI debug routing.
+- **Glue logic**: Timers, cart-detect reset, LED FSM, LCD init, LCD enable sync, USB init delay, ESP32 boot delay, UART resync, HDMI debug routing.
 - **I2S**: Audio serialization with mute, mono/stereo mixing, headphone routing.
 - **I2C**: LiteI2C PHY with LiteX/Migen codec-init and codec/PMIC polling FSMs.
 - **UART**: LiteX RS232PHY (115200 baud, replaces custom UART2).
@@ -76,7 +76,6 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 ### What's in Verilog (Instance black boxes)
 
 - **vid_system_top**: LCD panel master, frame buffering, OSD overlays, color correction.
-- **ST7785_init**: LCD SPI initialization sequence (9-bit protocol).
 - **mem_system_top**: PSRAM controller, multi-port arbiter, QSPI slave.
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
 - **usbuvcuart_top**: USB 2.0 soft PHY + UVC video + UART + UAC audio.
@@ -99,10 +98,11 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 | 10 | Audio system wrapper eliminated | `aud_system_top.v` |
 | 11 | TLV320 init → LiteX/Migen | `tlv320_init.v` |
 | 12 | Codec/PMIC polling → LiteX/Migen | `polling_master.v` |
+| 13 | LCD init sequencer → LiteX/Migen | `ST7785_init.v` |
 
-**Current cleanup: 8 legacy RTL files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
+**Current cleanup: 9 legacy RTL files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
 
-Note: `tlv320regs.hex` remains as the codec register image, and `uart_rx.vhd`, `uart_tx.vhd`, and `fixed_point_divider.v` are still required by the USB CDC/UART block.
+Note: `regs.bin` and `tlv320regs.hex` remain as register images, and `uart_rx.vhd`, `uart_tx.vhd`, and `fixed_point_divider.v` are still required by the USB CDC/UART block.
 
 ### Future Steps
 
