@@ -71,6 +71,8 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 - **I2S**: Audio serialization with mute, mono/stereo mixing, headphone routing.
 - **I2C**: LiteI2C PHY with LiteX/Migen codec-init and codec/PMIC polling FSMs.
 - **UART**: LiteX RS232PHY (115200 baud, replaces custom UART2).
+- **System monitor transport**: LiteX/Migen UART packet RX/TX framing, CRC, and channel arbiter.
+- **System monitor payloads**: LiteX/Migen channel-valid generation and payload byte packing.
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
 
 ### What's in Verilog (Instance black boxes)
@@ -79,7 +81,7 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 - **mem_system_top**: PSRAM controller, multi-port arbiter, QSPI slave.
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
 - **usbuvcuart_top**: USB 2.0 soft PHY + UVC video + UART + UAC audio.
-- **system_monitor**: Menu UI, palette control, battery monitoring.
+- **system_monitor**: Menu UI, palette control, battery monitoring, and request generation.
 - **adc_wrap**: Gowin ADC for battery voltage measurement.
 
 ## Migration Steps
@@ -99,8 +101,10 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 | 11 | TLV320 init → LiteX/Migen | `tlv320_init.v` |
 | 12 | Codec/PMIC polling → LiteX/Migen | `polling_master.v` |
 | 13 | LCD init sequencer → LiteX/Migen | `ST7785_init.v` |
+| 14 | System monitor transport → LiteX/Migen | `system_monitor_arbiter.sv`, `uart_packet_wrapper_rx.sv`, `uart_packet_wrapper_tx.sv` |
+| 15 | System monitor payload packing → LiteX/Migen | (moved out of `system_monitor.sv`) |
 
-**Current cleanup: 9 legacy RTL files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
+**Current cleanup: 12 legacy RTL files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
 
 Note: `regs.bin` and `tlv320regs.hex` remain as register images, and `uart_rx.vhd`, `uart_tx.vhd`, and `fixed_point_divider.v` are still required by the USB CDC/UART block.
 

@@ -155,6 +155,12 @@ module emu_system_top
     wire cpu_speed;
     wire cpu_halt;
     wire cpu_stop;
+    wire ce;
+    wire ce_2x;
+    wire TSTATE1;
+    wire TSTATE2;
+    wire TSTATE3;
+    wire TSTATE4;
     
     wire [7:0] CART_DIN_r1;
     wire [15:0] a;
@@ -165,9 +171,9 @@ module emu_system_top
     (
         .clk_sys     (hclk),
         .pause       (sleep_savestate),
-        .speedup     (),
+        .speedup     (1'd0),
         .cart_act    (rd | wr),
-        .DMA_on      (),
+        .DMA_on      (1'd0),
         .ce          (ce),
         .ce_2x       (ce_2x),
         .refresh     (),
@@ -265,11 +271,13 @@ module emu_system_top
     assign LINK_OUT = serial_data_out_r1;
 
     wire [63:0] SAVE_out_Din  ;
-    wire [63:0] SAVE_out_Dout ;
     wire [25:0] SAVE_out_Adr  ;
     wire SAVE_out_rnw  ;                    
     wire SAVE_out_ena  ;                                    
-    wire SAVE_out_done ; 
+    wire [7:0]  SAVE_out_be   ;
+
+    wire [63:0] SAVE_out_Dout = 64'd0;
+    wire SAVE_out_done = 1'b0;
     
     reg ss_load = 1'b0;
     reg gbreset_1 = 1'b0;
@@ -417,68 +425,7 @@ module emu_system_top
     );
     
 // synthesis translate_off
-   wire DDRAM_CLK            ;
-   wire DDRAM_BUSY           ;
-   wire [7:0]  DDRAM_BURSTCNT;
-   wire [28:0] DDRAM_ADDR    ;
-   wire [63:0] DDRAM_DOUT    ;
-   wire DDRAM_DOUT_READY     ;
-   wire DDRAM_RD             ;
-   wire [63:0] DDRAM_DIN     ;   
-   wire [7:0]  DDRAM_BE      ;   
-   wire DDRAM_WE             ;
-
-   wire [27:1] ch1_addr;         
-   wire [63:0] ch1_dout;         
-   wire [63:0] ch1_din ;         
-   wire [7:0]  ch1_be  ;         
-   wire ch1_req        ;  
-   wire ch1_rnw        ;  
-   wire ch1_ready      ;  
-    
-   ddram iddram
-   (
-      .DDRAM_CLK        (hclk),      
-      .DDRAM_BUSY       (DDRAM_BUSY),      
-      .DDRAM_BURSTCNT   (DDRAM_BURSTCNT),  
-      .DDRAM_ADDR       (DDRAM_ADDR),      
-      .DDRAM_DOUT       (DDRAM_DOUT),      
-      .DDRAM_DOUT_READY (DDRAM_DOUT_READY),
-      .DDRAM_RD         (DDRAM_RD),        
-      .DDRAM_DIN        (DDRAM_DIN),       
-      .DDRAM_BE         (DDRAM_BE),        
-      .DDRAM_WE         (DDRAM_WE),                
-                
-      .ch1_addr         (ch1_addr),        
-      .ch1_dout         (ch1_dout),        
-      .ch1_din          (ch1_din),  
-      .ch1_be           (ch1_be),      
-      .ch1_req          (ch1_req),         
-      .ch1_rnw          (ch1_rnw),         
-      .ch1_ready        (ch1_ready)
-   );
-   
-   assign ch1_addr      = { SAVE_out_Adr[25:0], 1'b0 };
-   assign ch1_din       = SAVE_out_Din;
-   assign ch1_req       = SAVE_out_ena;
-   assign ch1_rnw       = SAVE_out_rnw;
-   assign ch1_be        = 8'hFF; // only required for increaseSSHeaderCount
-   assign SAVE_out_Dout = ch1_dout;
-   assign SAVE_out_done = ch1_ready;
-   
-   ddrram_model iddrram_model
-   (
-      .DDRAM_CLK        (hclk),      
-      .DDRAM_BUSY       (DDRAM_BUSY),      
-      .DDRAM_BURSTCNT   (DDRAM_BURSTCNT),  
-      .DDRAM_ADDR       (DDRAM_ADDR),      
-      .DDRAM_DOUT       (DDRAM_DOUT),      
-      .DDRAM_DOUT_READY (DDRAM_DOUT_READY),
-      .DDRAM_RD         (DDRAM_RD),        
-      .DDRAM_DIN        (DDRAM_DIN),       
-      .DDRAM_BE         (DDRAM_BE),        
-      .DDRAM_WE         (DDRAM_WE)       
-   );
+   // Save-state DDRAM model disabled in synthesized builds; return path is tied off above.
 // synthesis translate_on
     
 endmodule

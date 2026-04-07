@@ -429,6 +429,7 @@ module usbuvcuart_top(
          );
 
     wire [63:0] serial;
+    assign serial = 64'd0;
     //==============================================================
     //======USB Device descriptor Demo
     usb_desc

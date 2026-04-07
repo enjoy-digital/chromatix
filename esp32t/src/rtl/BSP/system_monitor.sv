@@ -1,55 +1,65 @@
 // system_monitor.v
 
-module system_monitor(
-    input               clk,
-    input               reset,
-    input               BTN_A,
-    input               BTN_B,
-    input               BTN_DPAD_DOWN,
-    input               BTN_DPAD_LEFT,
-    input               BTN_DPAD_RIGHT,
-    input               BTN_DPAD_UP,
-    input               BTN_MENU, // pressed = 0
-    input               BTN_SEL,
-    input               BTN_START,
+module system_monitor
+#(
+    parameter NUM_CH = 10
+)
+(
+    input                          clk,
+    input                          reset,
+    input                          BTN_A,
+    input                          BTN_B,
+    input                          BTN_DPAD_DOWN,
+    input                          BTN_DPAD_LEFT,
+    input                          BTN_DPAD_RIGHT,
+    input                          BTN_DPAD_UP,
+    input                          BTN_MENU, // pressed = 0
+    input                          BTN_SEL,
+    input                          BTN_START,
     // Controls external mux into ADC
-    output  reg         menuDisabled,
-    output  reg         ADC_SEL,
-    output  reg         hAdcReq_ext,
-    input               LCD_INIT_DONE,
-    output  reg         LCD_PWM,
-    output  reg         LCD_BACKLIGHT_INIT = 1'd0,
-    input               hAdcReady_r1,
-    input   [13:0]      hAdcValue_r1,
-    input   [8:0]       hButtons,
-    output  reg [8:0]   MCU_buttons,
-    input   [6:0]       hVolume,
-    input   [7:0]       pmic_sys_status,
-    input               hHeadphones,
-    input               gSecondEna,
-    input               gHalfSecondEna,
-    output  reg         low_battery,
-    output  reg         LED_Green,
-    output  reg         LED_Red,
-    output  reg         LED_Yellow,
-    output  reg         LED_White,
-    output  reg [15:0]  system_control,
-    output  reg [31:0]  debug_system,
-    output  reg [63:0]  paletteBGIn,
-    output  reg [63:0]  paletteOBJ0In,
-    output  reg [63:0]  paletteOBJ1In,
-    input               gbc_mode,
-    input   [63:0]      gpd,
-    input   [7:0]       uart_rx_data,
-    input               uart_rx_val,
-    input               uart_tx_busy,
-    output  [7:0]       uart_tx_data,
-    output              uart_tx_val
+    output  reg                    menuDisabled,
+    output  reg                    ADC_SEL,
+    output  reg                    hAdcReq_ext,
+    input                          LCD_INIT_DONE,
+    output  reg                    LCD_PWM,
+    output  reg                    LCD_BACKLIGHT_INIT = 1'd0,
+    input                          hAdcReady_r1,
+    input   [13:0]                 hAdcValue_r1,
+    input   [8:0]                  hButtons,
+    output  reg [8:0]              MCU_buttons,
+    input   [6:0]                  hVolume,
+    input   [7:0]                  pmic_sys_status,
+    input                          hHeadphones,
+    input                          gSecondEna,
+    input                          gHalfSecondEna,
+    output  reg                    low_battery,
+    output  reg                    LED_Green,
+    output  reg                    LED_Red,
+    output  reg                    LED_Yellow,
+    output  reg                    LED_White,
+    output  reg [15:0]             system_control,
+    output  reg [31:0]             debug_system,
+    output  reg [63:0]             paletteBGIn,
+    output  reg [63:0]             paletteOBJ0In,
+    output  reg [63:0]             paletteOBJ1In,
+    input                          gbc_mode,
+    input   [63:0]                 gpd,
+    input   [6:0]                  rx_address,
+    input   [79:0]                 rx_data,
+    input                          rx_data_val,
+    input   [$clog2(NUM_CH)-1:0]   tx_channel,
+    input                          write_done,
+    output                         o_request_buttons,
+    output                         o_request_version,
+    output                         o_updateBrightness,
+    output                         o_request_SystemStatusExtended,
+    output                         o_request_gpd,
+    output  [13:0]                 o_volt,
+    output                         o_bat_is_LI,
+    output                         o_transmitVolt,
+    output  [3:0]                  o_brightness,
+    output                         o_lowpowerBacklight
 );
-
-    wire    [6:0]   rx_address;
-    wire    [79:0]  rx_data;
-    wire            rx_data_val;
 
     reg [15:0] btnMenu_sr;
     reg btnMenu_r1;
@@ -369,9 +379,6 @@ module system_monitor(
       end
    end
 
-    wire [6:0] tx_address;
-    wire       write;
-
     wire [13:0] buttons = {
         4'd0,
         menuDisabled,
@@ -386,134 +393,15 @@ module system_monitor(
         BTN_START
     };
 
-    reg [13:0] version = {
-        1'd0,   // 1 bit reserved
-        1'd1,   // 1 bit debug / custom LiteX build marker
-        6'd42,  // 6 bits minor version
-        6'd63   // 6 bits major version
-    };
-
-    localparam  NUM_CH = 10;
-    wire [$clog2(NUM_CH)-1:0] tx_channel;
-
-    wire [NUM_CH-1:0] channelsNewDataValid =
-    {
-        request_gpd,                                  // Game Palette Data
-        ~menuDisabled | request_SystemStatusExtended, // System Status Extended
-        ~menuDisabled,                                // reserved
-        ~menuDisabled | request_version,              // version info
-        ~menuDisabled,                                // pmic sys status
-        ~menuDisabled,                                // System Control
-        ~menuDisabled | updateBrightness,             // Audio + Brightness
-        ~menuDisabled | request_buttons,              // Buttons
-        (~menuDisabled & transmitVolt & bat_is_LI),   // Lithium
-        (~menuDisabled & transmitVolt & ~bat_is_LI)   // AA
-    };
-
-    wire [13:0] audio_brightness = {2'd0, brightness, hHeadphones, hVolume};
-    wire [13:0] mic_sys_status = {6'd0 , pmic_sys_status};
-
-    wire [7:0] tx_byteCount = (tx_channel == 0) ? 8'd2 : // AA
-                              (tx_channel == 1) ? 8'd2 : // Lithium
-                              (tx_channel == 2) ? 8'd2 : // Buttons
-                              (tx_channel == 3) ? 8'd2 : // Audio + Brightness
-                              (tx_channel == 4) ? 8'd2 : // System Control
-                              (tx_channel == 5) ? 8'd2 : // pmic sys status
-                              (tx_channel == 6) ? 8'd2 : // version info
-                              (tx_channel == 7) ? 8'd4 : // reserved
-                              (tx_channel == 8) ? 8'd4 : // System Status Extended
-                              (tx_channel == 9) ? 8'd8 : // BG Palette Data
-                              8'd1;
-
-    wire [7:0] tx_bytepos;
-
-    wire [7:0] tx_senddata = (tx_channel == 0 && tx_bytepos == 0) ? {2'd0, volt[13:8]} : // AA
-                             (tx_channel == 0 && tx_bytepos == 1) ? volt[7:0] :
-
-                             (tx_channel == 1 && tx_bytepos == 0) ? {2'd0, volt[13:8]} : // Lithium
-                             (tx_channel == 1 && tx_bytepos == 1) ? volt[7:0] :
-
-                             (tx_channel == 2 && tx_bytepos == 0) ? {2'd0, buttons[13:8]} : // Buttons
-                             (tx_channel == 2 && tx_bytepos == 1) ? buttons[7:0] :
-
-                             (tx_channel == 3 && tx_bytepos == 0) ? {2'd0, audio_brightness[13:8]} : // Audio + Brightness
-                             (tx_channel == 3 && tx_bytepos == 1) ? audio_brightness[7:0] :
-
-                             (tx_channel == 4 && tx_bytepos == 0) ? {2'd0, system_control[13:8]} : // System Control
-                             (tx_channel == 4 && tx_bytepos == 1) ? system_control[7:0] :
-
-                             (tx_channel == 5 && tx_bytepos == 0) ? {2'd0, mic_sys_status[13:8]} : // pmic sys status
-                             (tx_channel == 5 && tx_bytepos == 1) ? mic_sys_status[7:0]  :
-
-                             (tx_channel == 6 && tx_bytepos == 0) ? {2'd0, version[13:8]} : // version info
-                             (tx_channel == 6 && tx_bytepos == 1) ? version[7:0] :
-
-                             (tx_channel == 7 && tx_bytepos == 0) ? 8'd0 : // reserved
-                             (tx_channel == 7 && tx_bytepos == 1) ? 8'd0 :
-                             (tx_channel == 7 && tx_bytepos == 2) ? 8'd0 :
-                             (tx_channel == 7 && tx_bytepos == 3) ? 8'd0 :
-
-                             (tx_channel == 8 && tx_bytepos == 0) ? {6'd0, gbc_mode, lowpowerBacklight} : // System Status Extended
-                             (tx_channel == 8 && tx_bytepos == 1) ? 8'd0 :
-                             (tx_channel == 8 && tx_bytepos == 2) ? 8'd0 :
-                             (tx_channel == 8 && tx_bytepos == 3) ? 8'd0 :
-
-                             (tx_channel == 9 && tx_bytepos == 0) ? gpd[7:0] : // Combined Game Palette Data
-                             (tx_channel == 9 && tx_bytepos == 1) ? gpd[15:8] :
-                             (tx_channel == 9 && tx_bytepos == 2) ? gpd[23:16] :
-                             (tx_channel == 9 && tx_bytepos == 3) ? gpd[31:24] :
-                             (tx_channel == 9 && tx_bytepos == 4) ? gpd[39:32] :
-                             (tx_channel == 9 && tx_bytepos == 5) ? gpd[47:40] :
-                             (tx_channel == 9 && tx_bytepos == 6) ? gpd[55:48] :
-                             (tx_channel == 9 && tx_bytepos == 7) ? gpd[63:56] :
-                             8'd0;
-
-    wire uartDisabled;
-
-    system_monitor_arbiter
-    #(
-        .NUM_CH(NUM_CH)
-    ) u_system_monitor_arbiter
-    (
-        .clk(clk),
-        .reset(reset),
-        .uartDisabled(uartDisabled),
-        .menuDisabled(menuDisabled),
-        .channelsNewDataValid(channelsNewDataValid),
-        .uart_tx_busy(uart_tx_busy),
-        .tx_address(tx_address),
-        .tx_channel(tx_channel),
-        .write_done(write_done),
-        .write(write)
-    );
-
-    uart_packet_wrapper_tx u_uart_packet_wrapper_tx
-    (
-        .clk(clk),
-        .reset(reset),
-        .uart_tx_busy(uart_tx_busy),
-        .uart_tx_data(uart_tx_data),
-        .uart_tx_val(uart_tx_val),
-        .uartDisabled(uartDisabled),
-        .menuDisabled(menuDisabled),
-        .write(write),
-        .write_done(write_done),
-        .tx_address(tx_address),
-        .tx_byteCount(tx_byteCount),
-        .tx_bytepos(tx_bytepos),
-        .tx_senddata(tx_senddata)
-    );
-
-    uart_packet_wrapper_rx u_uart_packet_wrapper_rx
-    (
-        .clk(clk),
-        .reset(reset),
-        .uart_rx_val(uart_rx_val),
-        .uart_rx_data(uart_rx_data),
-        .uartDisabled(uartDisabled),
-        .rx_address(rx_address),
-        .rx_data(rx_data),
-        .rx_data_val(rx_data_val)
-    );
+    assign o_request_buttons              = request_buttons;
+    assign o_request_version              = request_version;
+    assign o_updateBrightness             = updateBrightness;
+    assign o_request_SystemStatusExtended = request_SystemStatusExtended;
+    assign o_request_gpd                  = request_gpd;
+    assign o_volt                         = volt;
+    assign o_bat_is_LI                    = bat_is_LI;
+    assign o_transmitVolt                 = transmitVolt;
+    assign o_brightness                   = brightness;
+    assign o_lowpowerBacklight            = lowpowerBacklight;
 
 endmodule
