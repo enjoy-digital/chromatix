@@ -25,7 +25,17 @@ The license expires after one year and will require reactivation.
 You will receive an email within a few minutes with a `.lic` file attached. Run the Gowin IDE and install the license when it prompts you. You'll need to close and re-open the GOWIN IDE if everything was successful.
 
 ## Building
-Once in the IDE, load `evt1_x2.gprj` project and click on the green recycle-like button icon to run synthesis and PnR. This will take about 5-10 minutes to complete.
+The active build flow is the LiteX top-level in `top.py`.
+
+```bash
+# Generate project files only.
+python3 top.py --build --no-compile
+
+# Full build with Gowin Designer in PATH.
+python3 top.py --build
+```
+
+The generated bitstream is written to `build/chromatic.fs`.
 
 ## Flashing
 Flashing can be performed using the official [Gowin Programmer](https://www.gowinsemi.com/en/) software or the [`openFPGALoader`](https://github.com/trabucayre/openFPGALoader) utility through the Chromatic's USB interface. The Gowin Programmer requires the installation of the GWU2X device driver.
@@ -52,13 +62,17 @@ index 0:
         irlength 8
 ```
 
-**Flashing the Chromatic**
+**Load the current LiteX bitstream temporarily**
 
 ```bash
-openFPGALoader --write-flash --cable gwu2x --reset <file>
+openFPGALoader --cable gwu2x --bitstream build/chromatic.fs
 ```
 
-Here, `<file>` refers to the generated bitstream file. This file can be found at `esp32t/impl/pnr/evt1_x2.fs`.
+**Program the current LiteX bitstream to flash**
+
+```bash
+openFPGALoader --write-flash --cable gwu2x --reset build/chromatic.fs
+```
 
 ## Custom Modifications
 

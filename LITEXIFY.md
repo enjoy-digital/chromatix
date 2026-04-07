@@ -89,18 +89,20 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 
 | Step | Description | RTL Eliminated |
 |------|-------------|----------------|
-| 1  | LiteX build wrapper (TCL replacement) | — |
+| 1  | LiteX build wrapper (TCL replacement) | legacy Gowin project files |
 | 2  | PLL → LiteX GW5APLL CRG | `gowin_pll.v` |
 | 3  | top.v glue → Migen | `top.v` |
-| 4  | UART2 → LiteX RS232PHY | `uart.v`, `uart_rx.vhd`, `uart_tx.vhd`, `fixed_point_divider.v` |
+| 4  | UART2 → LiteX RS232PHY | `uart.v`, `usb_uart_config.v` |
 | 5  | I2C → LiteI2C PHY | `i2c_master.sv` |
 | 6  | Buttons → Migen debounce | `button_debounce.v` |
 | 7  | LEDs → Migen | (done in Step 3) |
-| 8  | LCD SPI init extracted to top level | (moved from vid_system_top) |
-| 9  | I2S → Migen | (part of aud_system_top) |
+| 8  | LCD SPI init extracted to top level | (moved from `vid_system_top.sv`) |
+| 9  | I2S → Migen | (moved out of `aud_system_top.v`) |
 | 10 | Audio system wrapper eliminated | `aud_system_top.v` |
 
-**Total: 10 RTL files eliminated, 2 modified** (`vid_system_top.sv`, `aud_system_top.v`).
+**Current cleanup: 6 legacy RTL files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
+
+Note: `uart_rx.vhd`, `uart_tx.vhd`, and `fixed_point_divider.v` are still required by the USB CDC/UART block and therefore remain in the tree.
 
 ### Future Steps
 
