@@ -113,11 +113,11 @@ def add_sources(platform, base_path):
     add("rtl/BSP/mm_burst_read_to_stream.v")
     add("rtl/BSP/mm_burst_write.v")
     add("rtl/BSP/mpmc.v")
-    add("rtl/BSP/polling_master.v")
+    # polling_master.v removed (ported to LiteX/Migen over LiteI2C).
     add("rtl/BSP/qspi_slave.v")
     add("rtl/BSP/system_monitor.sv")
     add("rtl/BSP/system_monitor_arbiter.sv")
-    add("rtl/BSP/tlv320_init.v")
+    # tlv320_init.v removed (ported to LiteX/Migen using tlv320regs.hex).
     add("rtl/BSP/vid_system_top.sv")
     add("rtl/BSP/vid_tpg.v")
 
@@ -138,9 +138,6 @@ def add_sources(platform, base_path):
     add("rtl/BSP/overlayTimerNumber.vhd",   language="vhdl")
     add("rtl/BSP/uart/uart_rx.vhd",          language="vhdl")
     add("rtl/BSP/uart/uart_tx.vhd",          language="vhdl")
-
-    # BSP - Other.
-    add("rtl/BSP/tlv320regs.hex")
 
     # EMU - Emulation Core.
     add("rtl/EMU/audio_filter.v")
@@ -300,6 +297,198 @@ def install_toolchain_fixes(platform):
 
     platform.toolchain.build_timing_constraints = MethodType(build_timing_constraints, platform.toolchain)
     platform.toolchain.build_io_constraints     = MethodType(build_io_constraints, platform.toolchain)
+
+TLV320_REGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "esp32t", "src", "rtl", "BSP", "tlv320regs.hex")
+
+
+def load_tlv320_registers(path=TLV320_REGS_PATH):
+    with open(path) as f:
+        registers = [int(line.strip(), 16) for line in f if line.strip()]
+    if not registers:
+        raise ValueError(f"No TLV320 register values found in {path}")
+    return registers
+
+
+class TLV320Init(LiteXModule):
+    def __init__(self, registers, device_address=0x18):
+        self.reset                = Signal()
+        self.done                 = Signal()
+        self.i2c_busy             = Signal()
+        self.i2c_enable           = Signal()
+        self.i2c_read_write       = Signal()
+        self.i2c_mosi_data        = Signal(8)
+        self.i2c_register_address = Signal(8)
+        self.i2c_device_address   = Signal(7)
+
+        regindex   = Signal(max=len(registers))
+        reg_word   = Signal(16)
+        state      = Signal(2, reset=0)
+        S_START    = 0
+        S_WAITBUSY = 1
+        S_WAITDONE = 2
+        S_DONE     = 3
+
+        self.comb += [
+            reg_word.eq(Array(Constant(value, 16) for value in registers)[regindex]),
+            self.done.eq(~self.reset & (state == S_DONE)),
+            self.i2c_enable.eq(~self.reset & ((state == S_START) | (state == S_WAITBUSY))),
+            self.i2c_read_write.eq(0),
+            self.i2c_mosi_data.eq(reg_word[:8]),
+            self.i2c_register_address.eq(reg_word[8:16]),
+            self.i2c_device_address.eq(device_address),
+        ]
+
+        self.sync.hclk += [
+            If(self.reset,
+                state.eq(S_START),
+                regindex.eq(0),
+            ).Else(
+                Case(state, {
+                    S_START: [
+                        If(~self.i2c_busy,
+                            state.eq(S_WAITBUSY),
+                        )
+                    ],
+                    S_WAITBUSY: [
+                        If(self.i2c_busy,
+                            state.eq(S_WAITDONE),
+                        )
+                    ],
+                    S_WAITDONE: [
+                        If(~self.i2c_busy,
+                            If(regindex == (len(registers) - 1),
+                                state.eq(S_DONE),
+                            ).Else(
+                                regindex.eq(regindex + 1),
+                                state.eq(S_START),
+                            )
+                        )
+                    ],
+                    S_DONE: [],
+                })
+            )
+        ]
+
+
+class PollingMaster(LiteXModule):
+    def __init__(self, codec_address=0x18, pmic_address=0x6b):
+        self.reset                = Signal()
+        self.enable               = Signal()
+        self.mute                 = Signal()
+        self.i2c_busy             = Signal()
+        self.i2c_miso_data        = Signal(8)
+        self.volume               = Signal(8)
+        self.gpio                 = Signal(8)
+        self.pmic_sys_status      = Signal(8)
+        self.new_fault            = Signal(8)
+        self.inlim                = Signal(8)
+        self.charge_current       = Signal(8)
+        self.i2c_enable           = Signal()
+        self.i2c_read_write       = Signal()
+        self.i2c_mosi_data        = Signal(8)
+        self.i2c_register_address = Signal(8)
+        self.i2c_device_address   = Signal(7)
+
+        step       = Signal(max=13)
+        state      = Signal(3, reset=0)
+        tx_is_read = Signal()
+        tx_data    = Signal(8)
+        tx_reg     = Signal(8)
+        tx_addr    = Signal(7)
+        S_IDLE     = 0
+        S_START    = 1
+        S_WAITBUSY = 2
+        S_WAITDONE = 3
+        S_CAPTURE  = 4
+        S_NEXT     = 5
+        LAST_STEP  = 12
+
+        self.comb += [
+            tx_is_read.eq(1),
+            tx_data.eq(0),
+            tx_reg.eq(117),
+            tx_addr.eq(codec_address),
+            self.i2c_enable.eq(~self.reset & ((state == S_START) | (state == S_WAITBUSY))),
+            self.i2c_read_write.eq(tx_is_read),
+            self.i2c_mosi_data.eq(tx_data),
+            self.i2c_register_address.eq(tx_reg),
+            self.i2c_device_address.eq(tx_addr),
+        ]
+        self.comb += Case(step, {
+            0: [],
+            1: [tx_reg.eq(51)],
+            2: [tx_is_read.eq(0), tx_reg.eq(0x00), tx_data.eq(0x01)],
+            3: [tx_is_read.eq(0), tx_reg.eq(0x26), tx_data.eq(Mux(self.gpio[1], 0x7F, 0x00))],
+            4: [tx_is_read.eq(0), tx_reg.eq(0x1F), tx_data.eq(Mux(self.gpio[1], 0xC4, 0x04))],
+            5: [tx_is_read.eq(0), tx_reg.eq(0x2E), tx_data.eq(Mux(self.mute, 0x80, 0x00))],
+            6: [tx_is_read.eq(0), tx_reg.eq(0x00), tx_data.eq(0x00)],
+            7: [tx_is_read.eq(0), tx_reg.eq(0x3F), tx_data.eq(Mux(self.gpio[1], 0xD4, 0x90))],
+            8: [tx_reg.eq(0x08), tx_addr.eq(pmic_address)],
+            9: [tx_reg.eq(0x09), tx_addr.eq(pmic_address)],
+            10: [tx_reg.eq(0x00), tx_addr.eq(pmic_address)],
+            11: [tx_is_read.eq(0), tx_reg.eq(0x02), tx_data.eq(0x20), tx_addr.eq(pmic_address)],
+            12: [tx_reg.eq(0x02), tx_addr.eq(pmic_address)],
+        })
+
+        self.sync.hclk += [
+            If(self.reset,
+                state.eq(S_IDLE),
+                step.eq(0),
+                self.volume.eq(0),
+                self.gpio.eq(0),
+                self.pmic_sys_status.eq(0),
+                self.new_fault.eq(0),
+                self.inlim.eq(0),
+                self.charge_current.eq(0),
+            ).Else(
+                Case(state, {
+                    S_IDLE: [
+                        If(~self.i2c_busy & self.enable,
+                            step.eq(0),
+                            state.eq(S_START),
+                        )
+                    ],
+                    S_START: [
+                        If(~self.i2c_busy,
+                            state.eq(S_WAITBUSY),
+                        )
+                    ],
+                    S_WAITBUSY: [
+                        If(self.i2c_busy,
+                            state.eq(S_WAITDONE),
+                        )
+                    ],
+                    S_WAITDONE: [
+                        If(~self.i2c_busy,
+                            If(tx_is_read,
+                                state.eq(S_CAPTURE),
+                            ).Else(
+                                state.eq(S_NEXT),
+                            )
+                        )
+                    ],
+                    S_CAPTURE: [
+                        Case(step, {
+                            0: [self.volume.eq(self.i2c_miso_data)],
+                            1: [self.gpio.eq(self.i2c_miso_data)],
+                            8: [self.pmic_sys_status.eq(self.i2c_miso_data)],
+                            9: [self.new_fault.eq(self.i2c_miso_data)],
+                            10: [self.inlim.eq(self.i2c_miso_data)],
+                            12: [self.charge_current.eq(self.i2c_miso_data)],
+                        }),
+                        state.eq(S_NEXT),
+                    ],
+                    S_NEXT: [
+                        If(step == LAST_STEP,
+                            state.eq(S_IDLE),
+                        ).Else(
+                            step.eq(step + 1),
+                            state.eq(S_START),
+                        )
+                    ],
+                })
+            )
+        ]
 
 # Chromatic Top ------------------------------------------------------------------------------------
 
@@ -771,7 +960,7 @@ class ChromaticTop(Module):
 
         # Audio System (I2S + TLV320 Codec) --------------------------------------------------------
 
-        # I2C control signals (shared between tlv320_init and polling_master).
+        # I2C control signals (shared between the LiteX TLV320 init and codec/PMIC polling controllers).
         i2c_enable           = Signal()
         i2c_read_write       = Signal()
         i2c_mosi_data        = Signal(8)
@@ -848,7 +1037,7 @@ class ChromaticTop(Module):
         # TLV320 Codec Init.
         # -------------------
 
-        # Sequences I2C register writes from ROM at power-up.
+        # Sequences I2C register writes from the TLV320 register image at power-up.
         tlv320_init_done     = Signal()
         tlv320_i2c_enable    = Signal()
         tlv320_i2c_rw        = Signal()
@@ -856,51 +1045,49 @@ class ChromaticTop(Module):
         tlv320_i2c_reg_addr  = Signal(8)
         tlv320_i2c_dev_addr  = Signal(7)
 
-        self.specials += Instance("tlv320_init",
-            i_pclk                 = ClockSignal("hclk"),
-            i_vb_rst               = ~crg.pll.locked,
-            i_i2c_busy             = i2c_busy,
-            o_tlv320_init_done     = tlv320_init_done,
-            o_i2c_enable           = tlv320_i2c_enable,
-            o_i2c_read_write       = tlv320_i2c_rw,
-            o_i2c_mosi_data        = tlv320_i2c_mosi,
-            o_i2c_register_address = tlv320_i2c_reg_addr,
-            o_i2c_device_address   = tlv320_i2c_dev_addr,
-        )
+        self.submodules.tlv320_init = tlv320_init = TLV320Init(load_tlv320_registers())
+        self.comb += [
+            tlv320_init.reset.eq(~crg.pll.locked),
+            tlv320_init.i2c_busy.eq(i2c_busy),
+            tlv320_init_done.eq(tlv320_init.done),
+            tlv320_i2c_enable.eq(tlv320_init.i2c_enable),
+            tlv320_i2c_rw.eq(tlv320_init.i2c_read_write),
+            tlv320_i2c_mosi.eq(tlv320_init.i2c_mosi_data),
+            tlv320_i2c_reg_addr.eq(tlv320_init.i2c_register_address),
+            tlv320_i2c_dev_addr.eq(tlv320_init.i2c_device_address),
+        ]
 
         # I2C Polling Master.
         # --------------------
 
-        # Periodic I2C reads/writes to codec + PMIC after init completes.
+        # Periodic codec + PMIC polling over the shared LiteI2C PHY after init completes.
         pol_i2c_enable    = Signal()
         pol_i2c_rw        = Signal()
         pol_i2c_mosi      = Signal(8)
         pol_i2c_reg_addr  = Signal(8)
         pol_i2c_dev_addr  = Signal(7)
 
-        self.specials += Instance("polling_master",
-            i_clk                  = ClockSignal("hclk"),
-            i_rst                  = ~crg.pll.locked,
-            i_i2c_busy             = i2c_busy,
-            i_enable               = tlv320_init_done,
-            i_mute                 = system_control[0],
-            # I2C Interface.
-            i_i2c_miso_data        = i2c_miso_data,
-            o_i2c_enable           = pol_i2c_enable,
-            o_i2c_read_write       = pol_i2c_rw,
-            o_i2c_mosi_data        = pol_i2c_mosi,
-            o_i2c_register_address = pol_i2c_reg_addr,
-            o_i2c_device_address   = pol_i2c_dev_addr,
-            # Status Outputs.
-            o_volume               = volume,
-            o_gpio                 = hp_gpio,
-            o_pmic_sys_status      = pmic_sys_status,
-        )
+        self.submodules.polling_master = polling_master = PollingMaster()
+        self.comb += [
+            polling_master.reset.eq(~crg.pll.locked),
+            polling_master.enable.eq(tlv320_init_done),
+            polling_master.mute.eq(system_control[0]),
+            polling_master.i2c_busy.eq(i2c_busy),
+            polling_master.i2c_miso_data.eq(i2c_miso_data),
+            pol_i2c_enable.eq(polling_master.i2c_enable),
+            pol_i2c_rw.eq(polling_master.i2c_read_write),
+            pol_i2c_mosi.eq(polling_master.i2c_mosi_data),
+            pol_i2c_reg_addr.eq(polling_master.i2c_register_address),
+            pol_i2c_dev_addr.eq(polling_master.i2c_device_address),
+            volume.eq(polling_master.volume),
+            hp_gpio.eq(polling_master.gpio),
+            pmic_sys_status.eq(polling_master.pmic_sys_status),
+        ]
 
         # I2C Mux.
         # --------
 
-        # Use tlv320_init until done, then switch to polling_master.
+        # Use the TLV320 init controller until done, then switch to the polling controller.
         self.comb += [
             If(tlv320_init_done,
                 i2c_enable.eq(pol_i2c_enable),

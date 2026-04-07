@@ -39,7 +39,7 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
                 │           │                                  │           │
                 │           │  system_monitor (Menu/UI/OSD)    │           │
                 │           │  adc_wrap (Battery Voltage)      │           │
-                │           │  tlv320_init + polling_master    │           │
+                │           │  LiteI2C init/polling FSMs       │           │
                 └───────────┼──────────────────────────────────┼───────────┘
                             │                                  │
                             │  ┌──────────────┐ ┌──────────┐  │
@@ -69,7 +69,7 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 - **CRG**: GW5APLL clock generation (5 domains).
 - **Glue logic**: Timers, cart-detect reset, LED FSM, LCD enable sync, USB init delay, ESP32 boot delay, UART resync, HDMI debug routing.
 - **I2S**: Audio serialization with mute, mono/stereo mixing, headphone routing.
-- **I2C**: LiteI2C PHY with bridge FSM for TLV320 codec and PMIC polling.
+- **I2C**: LiteI2C PHY with LiteX/Migen codec-init and codec/PMIC polling FSMs.
 - **UART**: LiteX RS232PHY (115200 baud, replaces custom UART2).
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
 
@@ -81,8 +81,6 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
 - **usbuvcuart_top**: USB 2.0 soft PHY + UVC video + UART + UAC audio.
 - **system_monitor**: Menu UI, palette control, battery monitoring.
-- **tlv320_init**: Audio codec register initialization from ROM.
-- **polling_master**: Periodic codec/PMIC I2C polling.
 - **adc_wrap**: Gowin ADC for battery voltage measurement.
 
 ## Migration Steps
@@ -99,10 +97,12 @@ This project demonstrates how LiteX can progressively simplify and modernize an 
 | 8  | LCD SPI init extracted to top level | (moved from `vid_system_top.sv`) |
 | 9  | I2S → Migen | (moved out of `aud_system_top.v`) |
 | 10 | Audio system wrapper eliminated | `aud_system_top.v` |
+| 11 | TLV320 init → LiteX/Migen | `tlv320_init.v` |
+| 12 | Codec/PMIC polling → LiteX/Migen | `polling_master.v` |
 
-**Current cleanup: 6 legacy RTL files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
+**Current cleanup: 8 legacy RTL files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
 
-Note: `uart_rx.vhd`, `uart_tx.vhd`, and `fixed_point_divider.v` are still required by the USB CDC/UART block and therefore remain in the tree.
+Note: `tlv320regs.hex` remains as the codec register image, and `uart_rx.vhd`, `uart_tx.vhd`, and `fixed_point_divider.v` are still required by the USB CDC/UART block.
 
 ### Future Steps
 
