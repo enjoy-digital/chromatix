@@ -1,0 +1,46 @@
+#
+# This file is part of ChromatiX.
+#
+# Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
+# SPDX-License-Identifier: BSD-2-Clause
+
+from migen import *
+
+from litex.gen import *
+
+from litex.soc.cores.clock.gowin_gw5a import GW5APLL
+
+# CRG (Clock Reset Generator) ----------------------------------------------------------------------
+
+class CRG(LiteXModule):
+    """
+    Clock Reset Generator for the Chromatic FPGA.
+
+    Generates five clock domains from the 33.55432 MHz board crystal via a GW5A PLL:
+    fClk (~134 MHz), pClk (~33.5 MHz), hClk (~16.8 MHz), gClk (~8.4 MHz), xClk (~67 MHz).
+
+    Parameters:
+    - platform : GowinPlatform instance providing devicename, device, and clk_fpga pad.
+    """
+    def __init__(self, platform):
+        self.cd_fclk = ClockDomain("fclk", reset_less=True)
+        self.cd_pclk = ClockDomain("pclk", reset_less=True)
+        self.cd_hclk = ClockDomain("hclk", reset_less=True)
+        self.cd_gclk = ClockDomain("gclk", reset_less=True)
+        self.cd_xclk = ClockDomain("xclk", reset_less=True)
+
+        # # #
+
+        # Main PLL: 33.55432MHz -> fClk/pClk/hClk/gClk/xClk.
+        clk_fpga = platform.request("clk_fpga")
+        self.pll = pll = GW5APLL(
+            devicename = platform.devicename,
+            device     = platform.device,
+        )
+        self.comb += pll.reset.eq(0)
+        pll.register_clkin(clk_fpga, 33.55432e6)
+        pll.create_clkout(self.cd_fclk, 33.55432e6 * 4, with_reset=False)  # ~134.22 MHz (ODIV=6)
+        pll.create_clkout(self.cd_pclk, 33.55432e6,     with_reset=False)  # ~33.55 MHz  (ODIV=24)
+        pll.create_clkout(self.cd_hclk, 33.55432e6 / 2, with_reset=False)  # ~16.78 MHz  (ODIV=48)
+        pll.create_clkout(self.cd_gclk, 33.55432e6 / 4, with_reset=False)  # ~8.39 MHz   (ODIV=96)
+        pll.create_clkout(self.cd_xclk, 33.55432e6 * 2, with_reset=False)  # ~67.11 MHz  (ODIV=12)

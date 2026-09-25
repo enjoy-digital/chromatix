@@ -1,3 +1,3 @@
-[submodule "esp32t/src/Gameboy_MiSTer"]
-	path = esp32t/src/Gameboy_MiSTer
+[submodule "chromatix/verilog/Gameboy_MiSTer"]
+	path = chromatix/verilog/Gameboy_MiSTer
 	url = https://github.com/MiSTer-devel/Gameboy_MiSTer.git

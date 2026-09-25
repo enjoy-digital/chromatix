@@ -1,0 +1,37 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      # Checkout Repository (with the MiSTer Game Boy core submodule).
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Install Tools.
+      - name: Install Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget build-essential python3 python3-pip
+
+      # Install (n)Migen / LiteX / Cores.
+      - name: Install LiteX
+        run: |
+          wget https://raw.githubusercontent.com/enjoy-digital/litex/master/litex_setup.py
+          python3 litex_setup.py --config=standard --init --install --user
+
+      # Install ChromatiX.
+      - name: Install ChromatiX
+        run: python3 -m pip install --user -e .
+
+      # Elaborate design (Verilog/constraints generation, no Gowin toolchain).
+      - name: Elaborate
+        run: python3 chromatix.py --build --no-compile
+
+      # Run simulation tests.
+      - name: Test
+        run: python3 -m pytest -v test

@@ -1,4 +1,6 @@
-esp32t/impl/gwsynthesis/*
-esp32t/impl/pnr/*
-esp32t/impl/temp/*
-esp32t/build/*
+/build
+/build_*
+__pycache__
+.pytest_cache/
+*.egg-info/
+*.csv

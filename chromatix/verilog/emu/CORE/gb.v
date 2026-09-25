@@ -1214,6 +1214,7 @@ gb_savestates gb_savestates (
    .sleep_savestate        (sleep_savestates),
    .clock_ena_in           (ce_2x),
    
+// synthesis translate_off
    .Save_RAMAddr           (Savestate_RAMAddr),   
    .Save_RAMWrEn           (Savestate_RAMRWrEn),
    .Save_RAMWriteData      (Savestate_RAMWriteData),
@@ -1222,6 +1223,7 @@ gb_savestates gb_savestates (
    .Save_RAMReadData_ORAM  (Savestate_RAMReadData_ORAM),
    .Save_RAMReadData_ZRAM  (Savestate_RAMReadData_ZRAM),
    .Save_RAMReadData_CRAM  (Savestate_CRAMReadData),
+// synthesis translate_on
             
    .bus_out_Din            (SAVE_out_Din),   
    .bus_out_Dout           (SAVE_out_Dout),  
