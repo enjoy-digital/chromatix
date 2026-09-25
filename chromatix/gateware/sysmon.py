@@ -8,6 +8,8 @@ from migen import *
 
 from litex.gen import *
 
+from litex.soc.cores.uart import RS232PHY
+
 # System Monitor RX Packet -------------------------------------------------------------------------
 
 class SystemMonitorRxPacket(LiteXModule):
@@ -31,7 +33,7 @@ class SystemMonitorRxPacket(LiteXModule):
         RX_CRC   = 5
         RX_ERROR = 6
 
-        self.sync.gclk += [
+        self.sync += [
             If(self.reset,
                 crc.eq(0xFF),
                 bit_count.eq(0),
@@ -51,7 +53,7 @@ class SystemMonitorRxPacket(LiteXModule):
             )
         ]
 
-        self.sync.gclk += [
+        self.sync += [
             self.rx_data_val.eq(0),
             If(self.reset,
                 rx_state.eq(RX_IDLE),
@@ -136,7 +138,7 @@ class SystemMonitorArbiterBridge(LiteXModule):
         ]
 
         for i in range(num_channels):
-            self.sync.gclk += [
+            self.sync += [
                 If(self.reset,
                     channels_refresh[i].eq(0),
                 ).Elif(self.channels_new_data_valid[i],
@@ -146,7 +148,7 @@ class SystemMonitorArbiterBridge(LiteXModule):
                 )
             ]
 
-        self.sync.gclk += [
+        self.sync += [
             If(self.reset,
                 active_channel.eq(0),
                 next_channel.eq(0),
@@ -230,7 +232,7 @@ class SystemMonitorTxPacket(LiteXModule):
 
         self.comb += self.write_done.eq((tx_state == TX_DONE) & ~self.uart_tx_busy & (cnt == 0))
 
-        self.sync.gclk += [
+        self.sync += [
             If(self.reset,
                 cnt.eq(0),
             ).Else(
@@ -238,7 +240,7 @@ class SystemMonitorTxPacket(LiteXModule):
             )
         ]
 
-        self.sync.gclk += [
+        self.sync += [
             If(self.reset,
                 self.uart_tx_val.eq(0),
             ).Else(
@@ -255,7 +257,7 @@ class SystemMonitorTxPacket(LiteXModule):
             )
         ]
 
-        self.sync.gclk += [
+        self.sync += [
             If(self.reset,
                 self.uart_tx_data.eq(0x8F),
             ).Else(
@@ -273,7 +275,7 @@ class SystemMonitorTxPacket(LiteXModule):
             )
         ]
 
-        self.sync.gclk += [
+        self.sync += [
             If(self.reset,
                 crc.eq(0xFF),
                 bit_count.eq(0),
@@ -296,7 +298,7 @@ class SystemMonitorTxPacket(LiteXModule):
             )
         ]
 
-        self.sync.gclk += [
+        self.sync += [
             If(self.reset,
                 tx_state.eq(TX_IDLE),
                 bytecount.eq(0),
@@ -554,3 +556,51 @@ class SystemMonitorPayloads(LiteXModule):
             })],
         }
         self.comb += Case(self.tx_channel, channel_cases)
+
+# System Monitor UART ------------------------------------------------------------------------------
+
+class SystemMonitorUART(LiteXModule):
+    """
+    ESP32 UART for the system monitor packets (LiteX RS232PHY, replacing UART2).
+
+    Exposes the val/busy byte interface expected by the packet transport: tx_busy stays asserted for
+    the full byte time.
+    """
+    def __init__(self, pads, clk_freq, baudrate=115200):
+        self.enable  = Signal()
+        self.tx_data = Signal(8)
+        self.tx_val  = Signal()
+        self.tx_busy = Signal()
+        self.rx_data = Signal(8)
+        self.rx_val  = Signal()
+
+        # # #
+
+        # PHY.
+        self.phy = phy = RS232PHY(pads, clk_freq=clk_freq, baudrate=baudrate)
+
+        # TX.
+        tx_active = Signal()
+        tx_data   = Signal(8)
+        self.sync += [
+            If(~self.enable,
+                tx_active.eq(0),
+            ).Elif(~tx_active & self.tx_val,
+                tx_active.eq(1),
+                tx_data.eq(self.tx_data),
+            ).Elif(tx_active & phy.sink.ready,
+                tx_active.eq(0),
+            )
+        ]
+        self.comb += [
+            phy.sink.valid.eq(~tx_active & self.tx_val),
+            phy.sink.data.eq(Mux(tx_active, tx_data, self.tx_data)),
+            self.tx_busy.eq(tx_active),
+        ]
+
+        # RX.
+        self.comb += [
+            self.rx_val.eq(phy.source.valid),
+            self.rx_data.eq(phy.source.data),
+            phy.source.ready.eq(1),
+        ]

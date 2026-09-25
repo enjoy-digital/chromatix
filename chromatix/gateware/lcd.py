@@ -53,7 +53,7 @@ class ST7785Init(LiteXModule):
             self.lcd_sck.eq(Mux(~cs, sck, 0)),
         ]
 
-        self.sync.pclk += [
+        self.sync += [
             tick.eq(0),
             If(self.reset,
                 div_counter.eq(0),
@@ -71,7 +71,7 @@ class ST7785Init(LiteXModule):
             )
         ]
 
-        self.sync.pclk += [
+        self.sync += [
             If(self.reset,
                 self.lcd_rst.eq(1),
                 self.lcd_init_done.eq(0),

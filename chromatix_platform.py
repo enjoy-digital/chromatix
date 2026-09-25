@@ -308,6 +308,19 @@ class Platform(GowinPlatform):
         self.toolchain.options["rw_check_on_ram"]        = 1
         self.toolchain.options["power_on_reset_monitor"] = 1
         self.toolchain.options["multi_boot"]             = 0
+        self.toolchain.options["looplimit"]              = 2000
+
+        # Place & Route options (from the original ModRetro Gowin project).
+        self.toolchain.options["timing_driven"]          = 1
+        self.toolchain.options["place_option"]           = 0
+        self.toolchain.options["route_option"]           = 1
+        self.toolchain.options["clock_route_order"]      = 1
+        self.toolchain.options["route_maxfan"]           = 23
+        self.toolchain.options["correct_hold_violation"] = 1
+        self.toolchain.options["replicate_resources"]    = 0
+        self.toolchain.options["ireg_in_iob"]            = 1
+        self.toolchain.options["oreg_in_iob"]            = 1
+        self.toolchain.options["ioreg_in_iob"]           = 1
 
         # Chromatic specific IO constraints generation.
         if toolchain == "gowin":

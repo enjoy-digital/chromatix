@@ -10,6 +10,8 @@ from migen import *
 
 from litex.gen import *
 
+from litei2c import LiteI2CPHYCore
+
 TLV320_REGS_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "tlv320_regs.hex")
 
 def load_tlv320_registers(path=TLV320_REGS_PATH):
@@ -50,7 +52,7 @@ class TLV320Init(LiteXModule):
             self.i2c_device_address.eq(device_address),
         ]
 
-        self.sync.hclk += [
+        self.sync += [
             If(self.reset,
                 state.eq(S_START),
                 regindex.eq(0),
@@ -143,7 +145,7 @@ class PollingMaster(LiteXModule):
             12: [tx_reg.eq(0x02), tx_addr.eq(pmic_address)],
         })
 
-        self.sync.hclk += [
+        self.sync += [
             If(self.reset,
                 state.eq(S_IDLE),
                 step.eq(0),
@@ -202,3 +204,184 @@ class PollingMaster(LiteXModule):
                 })
             )
         ]
+
+# Codec I2S ----------------------------------------------------------------------------------------
+
+class CodecI2S(LiteXModule):
+    """
+    I2S transmitter for the TLV320 codec (ported from aud_system_top.v).
+
+    MCLK = sys clock, BCLK = sys clock / 2, 32-bit frames (16-bit left + 16-bit right). When no
+    headphones are detected, a mono mix is sent on the left channel (speaker).
+    """
+    def __init__(self, pads):
+        self.enable     = Signal() # Held in reset when 0 (PLL not locked).
+        self.left       = Signal(16)
+        self.right      = Signal(16)
+        self.mute       = Signal()
+        self.headphones = Signal()
+
+        # # #
+
+        left_m      = Signal(16)
+        right_m     = Signal(16)
+        mono_spk    = Signal(17)
+        clk_half    = Signal()
+        clk_half_d  = Signal()
+        clk_half_re = Signal()
+        count       = Signal(5)
+        wclk        = Signal()
+        shift       = Signal(32)
+
+        # Mute / inversion / mono mix.
+        self.comb += [
+            left_m.eq( Mux(self.mute, 0, -self.left)),
+            right_m.eq(Mux(self.mute, 0, -self.right)),
+        ]
+        self.sync += If(self.enable, mono_spk.eq(left_m + right_m))
+
+        # BCLK generation (sys / 2).
+        self.sync += [
+            clk_half.eq(~clk_half),
+            clk_half_d.eq(clk_half),
+        ]
+        self.comb += clk_half_re.eq(clk_half & ~clk_half_d)
+
+        # Serializer.
+        self.sync += [
+            If(~self.enable,
+                count.eq(0),
+            ).Elif(clk_half_re,
+                If(count == 0,
+                    count.eq(31),
+                    wclk.eq(1),
+                    If(~self.headphones,
+                        shift.eq(Cat(mono_spk[1:17], Constant(0, 16))),
+                    ).Else(
+                        shift.eq(Cat(left_m, right_m)),
+                    ),
+                ).Else(
+                    count.eq(count - 1),
+                    If(count == 16,
+                        wclk.eq(0),
+                    ),
+                    shift.eq(Cat(Constant(0, 1), shift[:31])),
+                ),
+            ),
+        ]
+
+        # Codec pads.
+        self.comb += [
+            pads.mclk.eq(ClockSignal("sys")),
+            pads.bclk.eq(~clk_half),
+            pads.din.eq(shift[31]),
+            pads.reset.eq(self.enable),
+            pads.wclk.eq(wclk),
+        ]
+
+# Codec Control ------------------------------------------------------------------------------------
+
+class CodecControl(LiteXModule):
+    """
+    TLV320 codec + PMIC control over LiteI2C.
+
+    Runs the TLV320 register image init at power-up, then periodically polls the codec (volume,
+    headphones GPIO) and the PMIC (system status) through the same LiteI2C PHY.
+    """
+    def __init__(self, pads, sys_clk_freq, registers):
+        self.reset           = Signal()
+        self.mute            = Signal()
+        self.volume          = Signal(8)
+        self.gpio            = Signal(8)
+        self.pmic_sys_status = Signal(8)
+
+        # # #
+
+        # TLV320 Init / Polling.
+        self.tlv320_init    = tlv320_init    = TLV320Init(registers)
+        self.polling_master = polling_master = PollingMaster()
+        self.comb += [
+            tlv320_init.reset.eq(self.reset),
+            polling_master.reset.eq(self.reset),
+            polling_master.enable.eq(tlv320_init.done),
+            polling_master.mute.eq(self.mute),
+            self.volume.eq(polling_master.volume),
+            self.gpio.eq(polling_master.gpio),
+            self.pmic_sys_status.eq(polling_master.pmic_sys_status),
+        ]
+
+        # I2C Mux: TLV320 init until done, then polling.
+        i2c_enable           = Signal()
+        i2c_read_write       = Signal()
+        i2c_mosi_data        = Signal(8)
+        i2c_register_address = Signal(8)
+        i2c_device_address   = Signal(7)
+        i2c_miso_data        = Signal(8)
+        i2c_busy             = Signal()
+        self.comb += [
+            If(tlv320_init.done,
+                i2c_enable.eq(polling_master.i2c_enable),
+                i2c_read_write.eq(polling_master.i2c_read_write),
+                i2c_mosi_data.eq(polling_master.i2c_mosi_data),
+                i2c_register_address.eq(polling_master.i2c_register_address),
+                i2c_device_address.eq(polling_master.i2c_device_address),
+            ).Else(
+                i2c_enable.eq(tlv320_init.i2c_enable),
+                i2c_read_write.eq(tlv320_init.i2c_read_write),
+                i2c_mosi_data.eq(tlv320_init.i2c_mosi_data),
+                i2c_register_address.eq(tlv320_init.i2c_register_address),
+                i2c_device_address.eq(tlv320_init.i2c_device_address),
+            ),
+            tlv320_init.i2c_busy.eq(i2c_busy),
+            polling_master.i2c_busy.eq(i2c_busy),
+            polling_master.i2c_miso_data.eq(i2c_miso_data),
+        ]
+
+        # LiteI2C PHY.
+        self.i2c_phy = i2c_phy = LiteI2CPHYCore(
+            pads         = pads,
+            clock_domain = "sys",
+            sys_clk_freq = sys_clk_freq,
+        )
+        self.comb += i2c_phy.active.eq(1)
+
+        # Bridge: enable/busy interface -> LiteI2C stream.
+        i2c_enable_d  = Signal()
+        i2c_enable_re = Signal()
+        self.sync += i2c_enable_d.eq(i2c_enable)
+        self.comb += i2c_enable_re.eq(i2c_enable & ~i2c_enable_d)
+
+        self.bridge = bridge = FSM(reset_state="IDLE")
+        bridge.act("IDLE",
+            i2c_busy.eq(0),
+            If(i2c_enable_re,
+                NextState("SEND"),
+            ),
+        )
+        bridge.act("SEND",
+            i2c_busy.eq(1),
+            i2c_phy.sink.valid.eq(1),
+            i2c_phy.sink.addr.eq(i2c_device_address),
+            If(i2c_read_write,
+                # Read: send register address, then read 1 byte.
+                i2c_phy.sink.len_tx.eq(1),
+                i2c_phy.sink.len_rx.eq(1),
+                i2c_phy.sink.data.eq(i2c_register_address),
+            ).Else(
+                # Write: send register address + data.
+                i2c_phy.sink.len_tx.eq(2),
+                i2c_phy.sink.len_rx.eq(0),
+                i2c_phy.sink.data.eq(Cat(i2c_mosi_data, i2c_register_address)),
+            ),
+            If(i2c_phy.sink.ready,
+                NextState("WAIT"),
+            ),
+        )
+        bridge.act("WAIT",
+            i2c_busy.eq(1),
+            i2c_phy.source.ready.eq(1),
+            If(i2c_phy.source.valid,
+                NextValue(i2c_miso_data, i2c_phy.source.data[:8]),
+                NextState("IDLE"),
+            ),
+        )

@@ -6,7 +6,8 @@
 
 from migen import *
 
-from test.common import run_domain_simulation
+from litex.gen.sim import run_simulation
+
 
 from chromatix.gateware.lcd import ST7785Init, load_st7785_sequence
 
@@ -38,7 +39,7 @@ def test_st7785_init_sequence():
     dut      = ST7785Init(sequence, issimu=True)
     words    = []
     done     = []
-    run_domain_simulation(dut, {"pclk": spi_capture(dut, words, done)}, clocks={"pclk": 10})
+    run_simulation(dut, spi_capture(dut, words, done))
     assert done, "lcd_init_done never asserted"
     assert words == sequence[:-2]
 

@@ -6,9 +6,10 @@
 
 from migen import *
 
-from test.common import run_domain_simulation
+from litex.gen.sim import run_simulation
 
-from chromatix.gateware.codec import TLV320Init, PollingMaster, load_tlv320_registers
+
+from chromatix.gateware.codec import TLV320Init, PollingMaster, CodecI2S, load_tlv320_registers
 
 # Helpers ------------------------------------------------------------------------------------------
 
@@ -49,7 +50,7 @@ def test_tlv320_init_writes_registers():
             yield
         raise AssertionError("TLV320 init never completed")
 
-    run_domain_simulation(dut, {"hclk": [stimulus(), passive(i2c_responder)(dut, transactions)]}, clocks={"hclk": 10})
+    run_simulation(dut, [stimulus(), passive(i2c_responder)(dut, transactions)])
     assert transactions == [(0x18, reg >> 8, 0, reg & 0xFF) for reg in registers]
 
 def test_tlv320_register_image():
@@ -78,7 +79,41 @@ def test_polling_master_captures_status():
         assert (yield dut.gpio)            == 0x02
         assert (yield dut.pmic_sys_status) == 0xA5
 
-    run_domain_simulation(dut, {"hclk": [stimulus(), passive(i2c_responder)(dut, transactions, read_data)]}, clocks={"hclk": 10})
+    run_simulation(dut, [stimulus(), passive(i2c_responder)(dut, transactions, read_data)])
     # Headphones detected: speaker path muted / headphone path enabled (register 0x26 = 0x7F).
     assert (0x18, 0x26, 0, 0x7F) in transactions
     assert transactions[0][:3] == (0x18, 117, 1)
+
+# Codec I2S ----------------------------------------------------------------------------------------
+
+def test_codec_i2s_stereo_frame():
+    """With headphones, inverted samples are sent MSB first: right while WCLK=1, then left (I2S)."""
+    pads = Record([("mclk", 1), ("bclk", 1), ("din", 1), ("reset", 1), ("wclk", 1)], name="codec")
+    dut  = CodecI2S(pads)
+    left, right = 0x1234, 0x0F0F
+    frames = []
+
+    def gen():
+        yield dut.enable.eq(1)
+        yield dut.headphones.eq(1)
+        yield dut.left.eq(left)
+        yield dut.right.eq(right)
+        bits      = None
+        prev_bclk = 0
+        prev_wclk = 0
+        for _ in range(2000):
+            bclk = (yield pads.bclk)
+            wclk = (yield pads.wclk)
+            if wclk and not prev_wclk:
+                if bits is not None and len(bits) == 32:
+                    frames.append(int("".join(map(str, bits)), 2))
+                bits = []
+            if bits is not None and bclk and not prev_bclk and len(bits) < 32:
+                bits.append((yield pads.din))
+            prev_bclk = bclk
+            prev_wclk = wclk
+            yield
+
+    run_simulation(dut, gen())
+    assert len(frames) >= 2
+    assert frames[-1] == ((-right & 0xFFFF) << 16) | (-left & 0xFFFF)

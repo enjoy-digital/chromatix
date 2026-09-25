@@ -8,7 +8,6 @@ from migen import *
 
 from litex.gen.sim import run_simulation
 
-from test.common import run_domain_simulation
 
 from chromatix.gateware.sysmon import SystemMonitorRxPacket, SystemMonitorTxPacket, SystemMonitorPayloads
 
@@ -51,7 +50,7 @@ def rx_packet_sim(frame):
                 decoded.append(((yield dut.rx_address), (yield dut.rx_data)))
             yield
 
-    run_domain_simulation(dut, {"gclk": [send(), monitor()]}, clocks={"gclk": 10})
+    run_simulation(dut, [send(), monitor()])
     return decoded
 
 def test_rx_packet_decode():
@@ -109,7 +108,7 @@ def test_tx_packet_framing():
                 yield dut.uart_tx_busy.eq(0)
             yield
 
-    run_domain_simulation(dut, {"gclk": [stimulus(), payload_source(), uart()]}, clocks={"gclk": 10})
+    run_simulation(dut, [stimulus(), payload_source(), uart()])
     assert sent == make_packet(0x06, payload)
 
 # Payloads -----------------------------------------------------------------------------------------
