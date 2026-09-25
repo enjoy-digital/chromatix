@@ -81,12 +81,13 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **Video pipeline**: frame buffer addressing, frame blending, OSD/overlays (battery, timer, debug), GBC color correction (LCD/UVC), line buffer and ST7785 RGB666 panel timing, dot clock.
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
 - **Memory system**: AP Memory OPI x8 PSRAM controller with GW5A OSER4/IDES4/IODELAY PHY, startup BIST, ESP32 QSPI slave (GW5A DFFC for the CS asynchronous reset), multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs), framebuffer/OSD line readers.
+- **USB composite device** (UVC + UAC + CDC-ACM): USB PLL, descriptors, control/class requests, EP3 CDC buffers, UVC YUYV packing/packetizer (color space convertor + video FIFO), UAC endpoint, CDC UART at the host baudrate.
 - **SoC**: LiteX SoCMini (CSR bus in the sys = gClk domain) with debug/automation registers (virtual buttons, status) and an optional UARTBone debug bridge over the USB CDC port.
 
 ### What's in Verilog (Instance black boxes)
 
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
-- **usbuvcuart_top**: UVC video + UAC audio + CDC UART, on the Gowin USB 2.0 Device Controller and SoftPHY IPs (V1.9.12.04). Its other Gowin IPs (PLL, color space convertor, video FIFO, divider) are replaced by LiteX/Migen cores generated as drop-in modules (`gateware/usb.py`).
+- **Gowin USB 2.0 Device Controller + SoftPHY** (V1.9.12.04 IPs, encrypted): the only vendor IP left.
 
 ## Migration Steps
 
@@ -117,10 +118,11 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | 23 | Video pipeline → LiteX/Migen | `vid_system_top.sv`, `ST7785_panel_master.v`, 6 `overlay*.vhd` |
 | 24 | PSRAM controller/PHY, BIST and line readers → LiteX/Migen | `PSRAMController.vhd`, `PSRAMBIST_Burst.vhd`, `mm_burst_read_to_stream.v` |
 | 25 | QSPI slave → LiteX/Migen | `qspi_slave.v` |
+| 26 | USB class/device logic → LiteX/Migen (formally checked against the originals) | `usbuvcuart_top.v`, `usb_descriptor_video.v` + defs, `usb_fifo.v`, `sync_rx/tx_pkt_fifo.v`, `uart.v`, `uart_rx.vhd`, `uart_tx.vhd` |
 
-**Current cleanup: 38 legacy RTL/IP files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`cart.v`, `video.v`).
+**Remaining non-LiteX logic**: the MiSTer Game Boy emulation core (`chromatix/verilog/emu`, kept by design) and the encrypted Gowin USB 2.0 Device Controller/SoftPHY IPs (`chromatix/verilog/usb`).
 
-Remaining encrypted Gowin IP: USB 2.0 Device Controller and SoftPHY only.
+Ports are checked with simulations, formal equivalence checks against the original Verilog (`test/eqcheck.py`, Yosys) and on hardware (automated through the debug bridge + UVC capture).
 
 ### Future Steps
 
@@ -134,7 +136,7 @@ chromatix_platform.py     # Chromatic platform (IOs, Gowin options, programmer).
 chromatix/
   gateware/                   # LiteX/Migen cores (CRG, LCD, codec, system monitor, sources).
   data/                       # ST7785 / TLV320 register images.
-  verilog/                    # Remaining legacy RTL (bsp/, emu/, usb/, ip/) + Gameboy_MiSTer submodule.
+  verilog/                    # Remaining non-LiteX RTL: emu/ (Game Boy core) + Gameboy_MiSTer submodule, usb/ (Gowin IPs).
 scripts/                      # Host tools (chromatic.py: debug bridge control, buttons, UVC capture).
 test/                         # Simulation/elaboration tests (pytest).
 doc/                          # Roadmap.

@@ -15,8 +15,6 @@ VERILOG_SOURCES = [
     # Gowin IP.
 
     # BSP: Video, Memory, System Monitor, Battery ADC.
-    "bsp/uart/uart_rx.vhd",
-    "bsp/uart/uart_tx.vhd",
 
     # EMU: Emulation system.
     "emu/audio_filter.v",
@@ -50,21 +48,13 @@ VERILOG_SOURCES = [
     "Gameboy_MiSTer/rtl/hdma.v",
     "Gameboy_MiSTer/rtl/timer.v",
 
-    # USB: UVC + UAC + CDC (Gowin USB device controller + soft PHY).
-    "usb/usbuvcuart_top.v",
-    "usb/usb_video/usb_defs.v",
-    "usb/usb_video/usb_descriptor_video.v",
-    "usb/usb_video/uvc_defs.v",
+    # USB: Gowin USB 2.0 Device Controller + SoftPHY (class logic in gateware/usb_*.py).
     "usb/usb_device_controller/usb_device_controller_top.v",
     "usb/usb_device_controller/usb_device_controller.v",
     "usb/usb2_0_softphy/usb2_0_softphy_top.v",
     "usb/usb2_0_softphy/usb2_0_softphy_name.v",
     "usb/usb2_0_softphy/usb2_0_softphy.v",
     "usb/usb2_0_softphy/static_macro_define.v",
-    "usb/uart/uart.v",
-    "usb/sync_fifo/usb_fifo.v",
-    "usb/sync_fifo/sync_rx_pkt_fifo.v",
-    "usb/sync_fifo/sync_tx_pkt_fifo.v",
 ]
 
 def add_verilog_sources(platform):

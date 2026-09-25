@@ -10,7 +10,7 @@ from migen import *
 
 from litex.gen.sim import run_simulation
 
-from chromatix.gateware.usb import ColorSpaceConvertor, VideoFIFO, FixedPointDivider
+from chromatix.gateware.usb import ColorSpaceConvertor, VideoFIFO
 from chromatix.gateware.usb import CSC_COEFFICIENTS, CSC_FRAC_BITS, CSC_LATENCY
 
 # Color Space Convertor ----------------------------------------------------------------------------
@@ -46,32 +46,6 @@ def test_csc_conversion():
     # Reference points (limited range BT.601): black/white Y = 16/235, neutral chroma.
     assert outs[0] == [16, 128, 128]
     assert outs[1] == [235, 128, 128]
-
-# Fixed Point Divider ------------------------------------------------------------------------------
-
-def test_fixed_point_divider():
-    """quotient_out = floor(dividend*8/divisor), used as CDC UART baudrate divider."""
-    dut = FixedPointDivider()
-    cases = [(60_000_000*4, 115200), (60_000_000*4, 1_000_000), (60_000_000*4, 9600), (12345, 7)]
-    results = []
-
-    def gen():
-        for dividend, divisor in cases:
-            yield dut.dividend.eq(dividend)
-            yield dut.divisor.eq(divisor)
-            yield dut.start.eq(1)
-            # Wait for a full computation with these inputs.
-            completes = 0
-            while completes < 2:
-                yield
-                completes += (yield dut.complete)
-            yield
-            results.append((yield dut.quotient_out))
-
-    run_simulation(dut, gen())
-    assert results == [((dividend*8)//divisor) & 0xffffffff for dividend, divisor in cases]
-    # 60MHz / 115200 = 520.83 -> divider_value = 520, fraction = 3 (quarters).
-    assert (results[0] >> 5) == 520
 
 # Video FIFO ---------------------------------------------------------------------------------------
 

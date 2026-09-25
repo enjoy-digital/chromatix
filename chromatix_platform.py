@@ -313,7 +313,7 @@ class Platform(GowinPlatform):
         # Place & Route options (from the original ModRetro Gowin project).
         self.toolchain.options["timing_driven"]          = 1
         self.toolchain.options["place_option"]           = 0
-        self.toolchain.options["route_option"]           = 1
+        self.toolchain.options["route_option"]           = 2
         self.toolchain.options["clock_route_order"]      = 1
         self.toolchain.options["route_maxfan"]           = 23
         self.toolchain.options["correct_hold_violation"] = 1
