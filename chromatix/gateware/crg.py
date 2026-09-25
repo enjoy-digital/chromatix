@@ -19,6 +19,8 @@ class CRG(LiteXModule):
     Generates five clock domains from the 33.55432 MHz board crystal via a GW5A PLL:
     fClk (~134 MHz), pClk (~33.5 MHz), hClk (~16.8 MHz), gClk (~8.4 MHz), xClk (~67 MHz).
 
+    The LiteX "sys" domain (CSR bus, debug bridge) is an alias of gClk, reset until the PLL locks.
+
     Parameters:
     - platform : GowinPlatform instance providing devicename, device, and clk_fpga pad.
     """
@@ -28,6 +30,7 @@ class CRG(LiteXModule):
         self.cd_hclk = ClockDomain("hclk", reset_less=True)
         self.cd_gclk = ClockDomain("gclk", reset_less=True)
         self.cd_xclk = ClockDomain("xclk", reset_less=True)
+        self.cd_sys  = ClockDomain("sys")
 
         # # #
 
@@ -44,3 +47,9 @@ class CRG(LiteXModule):
         pll.create_clkout(self.cd_hclk, 33.55432e6 / 2, with_reset=False)  # ~16.78 MHz  (ODIV=48)
         pll.create_clkout(self.cd_gclk, 33.55432e6 / 4, with_reset=False)  # ~8.39 MHz   (ODIV=96)
         pll.create_clkout(self.cd_xclk, 33.55432e6 * 2, with_reset=False)  # ~67.11 MHz  (ODIV=12)
+
+        # Sys: alias of gClk.
+        self.comb += [
+            self.cd_sys.clk.eq(self.cd_gclk.clk),
+            self.cd_sys.rst.eq(~pll.locked),
+        ]

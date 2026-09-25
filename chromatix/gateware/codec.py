@@ -288,6 +288,10 @@ class CodecControl(LiteXModule):
     Runs the TLV320 register image init at power-up, then periodically polls the codec (volume,
     headphones GPIO) and the PMIC (system status) through the same LiteI2C PHY.
     """
+    # I2C speed is fixed and the core runs in hClk: don't expose the LiteI2C PHY CSRs on the sys bus.
+    def get_csrs(self):
+        return []
+
     def __init__(self, pads, sys_clk_freq, registers):
         self.reset           = Signal()
         self.mute            = Signal()

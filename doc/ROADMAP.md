@@ -30,6 +30,15 @@ Constraints that apply to every step:
 
 ---
 
+## Progress (2026-09-25)
+
+- Phase A: done (package/platform/tests/CI, top-level glue in LiteX modules).
+- Phase B: SoCMini + CSRs + debug bridge done, over USB CDC (UARTBone) since the GWU2X JTAG
+  cable is not usable from OpenOCD; LiteScope not yet added.
+- Phase C: `fifo1k` (encrypted), PSRAM arbiter and burst writers done.
+- Phase F1: USB controller/PHY updated to the Gowin V1.9.12.04 IP sources.
+- Toolchain: Gowin V1.9.12.04 required (USB does not enumerate with V1.9.10 builds).
+
 ## Phase A — Repository restructure (no functional change)
 
 Target layout, modelled on `/home/florent/dev/litex/litex_m2sdr`:

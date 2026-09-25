@@ -15,12 +15,16 @@ memory system, Game Boy emulation core, USB UVC+UART, battery ADC and system mon
 
 import os
 import argparse
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 from migen import *
 
 from litex.gen import *
 from litex.gen.genlib.cdc import BusSynchronizer
+
+from litex.soc.cores.uart import RS232PHY, UARTBone
+from litex.soc.integration.soc_core import SoCMini
+from litex.soc.integration.builder import Builder
 
 from chromatix import Platform
 
@@ -28,6 +32,7 @@ from chromatix.gateware.crg     import CRG
 from chromatix.gateware.sources import add_verilog_sources
 from chromatix.gateware.misc    import TickGenerator, StatusLed, ESP32Control
 from chromatix.gateware.buttons import Buttons
+from chromatix.gateware.debug   import DebugControl
 from chromatix.gateware.memory  import MemorySystem
 from chromatix.gateware.lcd     import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec   import CodecControl, CodecI2S, load_tlv320_registers
@@ -78,7 +83,7 @@ def add_timing_constraints(platform):
 
 # BaseSoC ------------------------------------------------------------------------------------------
 
-class BaseSoC(LiteXModule):
+class BaseSoC(SoCMini):
     """
     ChromatiX Top-Level.
 
@@ -86,8 +91,16 @@ class BaseSoC(LiteXModule):
     pipeline, audio I2S with TLV320 codec, Game Boy emulation core, memory controller, USB
     UVC+UART, ESP32 MCU communication, battery ADC, button debouncing, and system monitoring.
     """
-    def __init__(self, platform):
+    def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200):
         gclk_freq = int(33.55432e6 / 4)
+
+        # SoCMini (CSR bus in the sys domain = gClk) -----------------------------------------------
+
+        SoCMini.__init__(self, platform,
+            clk_freq      = gclk_freq,
+            ident         = "ChromatiX SoC",
+            ident_version = True,
+        )
         hclk_freq = int(33.55432e6 / 2)
 
         # CRG --------------------------------------------------------------------------------------
@@ -265,14 +278,22 @@ class BaseSoC(LiteXModule):
 
         # Buttons (gClk domain) --------------------------------------------------------------------
 
-        self.buttons = btns = ClockDomainsRenamer("gclk")(Buttons(buttons))
+        self.buttons = btns_phy = ClockDomainsRenamer("gclk")(Buttons(buttons))
+
+        # Debug control: virtual buttons OR'ed with the physical ones, status registers.
+        self.debug_ctrl = debug_ctrl = DebugControl()
+        btns = SimpleNamespace()
+        for name in ["a", "b", "dpad_down", "dpad_left", "dpad_right", "dpad_up", "sel", "start"]:
+            btn = Signal(name=f"btn_{name}")
+            self.comb += btn.eq(getattr(btns_phy, name) | getattr(debug_ctrl, name))
+            setattr(btns, name, btn)
 
         # Menu button: OR physical menu button with MCU menu bit, gate until cart is stable and
         # menu init is complete.
         btn_menu_ored = Signal()
         menu_gated    = Signal()
         self.comb += [
-            btn_menu_ored.eq(buttons.menu & ~mcu_buttons[8]),
+            btn_menu_ored.eq(buttons.menu & ~mcu_buttons[8] & ~debug_ctrl.menu),
             If(q_menu_init & (cart_det_sr[3:7] == 0xF),
                 menu_gated.eq(btn_menu_ored),
             ).Else(
@@ -476,6 +497,29 @@ class BaseSoC(LiteXModule):
         # Link Port: LINK_SD not driven by emu_system_top.
         self.comb += link.sd.eq(0)
 
+        # USB CDC UART: ESP32 passthrough (default) or LiteX UARTBone debug bridge.
+        usb_uart = Record([("tx", 1), ("rx", 1), ("dtr", 1), ("rts", 1)])
+        if with_debug_bridge:
+            # Keep the ESP32 running normally (EN high, IO0 high) with an idle UART.
+            self.comb += [
+                esp32_ctrl.usb_rxd.eq(1),
+                esp32_ctrl.usb_dtr.eq(0),
+                esp32_ctrl.usb_rts.eq(0),
+            ]
+            self.uartbone = UARTBone(
+                phy           = RS232PHY(usb_uart, clk_freq=gclk_freq, baudrate=debug_bridge_baudrate),
+                clk_freq      = gclk_freq,
+                address_width = self.bus.address_width,
+            )
+            self.bus.add_master(name="uartbone", master=self.uartbone.wishbone)
+        else:
+            self.comb += [
+                esp32_ctrl.usb_rxd.eq(usb_uart.rx),
+                usb_uart.tx.eq(esp32_ctrl.usb_txd),
+                esp32_ctrl.usb_dtr.eq(usb_uart.dtr),
+                esp32_ctrl.usb_rts.eq(usb_uart.rts),
+            ]
+
         # USB UVC+UAC+UART System ------------------------------------------------------------------
 
         self.specials += Instance("usbuvcuart_top",
@@ -485,10 +529,10 @@ class BaseSoC(LiteXModule):
             o_usblocked       = esp32_ctrl.usb_locked,
             i_hClk            = ClockSignal("gclk"),
             # UART.
-            o_UART_TXD        = esp32_ctrl.usb_rxd,
-            i_UART_RXD        = esp32_ctrl.usb_txd,
-            o_E_UART_DTR      = esp32_ctrl.usb_dtr,
-            o_E_UART_RTS      = esp32_ctrl.usb_rts,
+            o_UART_TXD        = usb_uart.rx,
+            i_UART_RXD        = usb_uart.tx,
+            o_E_UART_DTR      = usb_uart.dtr,
+            o_E_UART_RTS      = usb_uart.rts,
             # Audio.
             i_left            = g_left,
             i_right           = g_right,
@@ -635,6 +679,22 @@ class BaseSoC(LiteXModule):
             o_o_lowpowerBacklight            = sm_payloads.lowpower_backlight,
         )
 
+        # Debug Control Status -------------------------------------------------------------------
+
+        self.comb += [
+            debug_ctrl.bist_done.eq(memory.bist_done),
+            debug_ctrl.bist_failed.eq(memory.bist_failed),
+            debug_ctrl.lcd_init_done.eq(lcd_init_done),
+            debug_ctrl.menu_disabled.eq(menu_disabled),
+            debug_ctrl.low_battery.eq(low_battery),
+            debug_ctrl.system_control.eq(system_control),
+            debug_ctrl.volt.eq(sm_payloads.volt),
+            debug_ctrl.bat_is_li.eq(sm_payloads.bat_is_li),
+            debug_ctrl.volume.eq(codec_ctrl.volume),
+            debug_ctrl.headphones.eq(h_headphones),
+            debug_ctrl.pmic_sys_status.eq(codec_ctrl.pmic_sys_status),
+        ]
+
 # Build --------------------------------------------------------------------------------------------
 
 def main():
@@ -645,6 +705,8 @@ def main():
     parser.add_argument("--flash",      action="store_true", help="Flash bitstream (to SPI Flash) and reboot.")
     parser.add_argument("--toolchain",  default="gowin",     help="FPGA toolchain (gowin).")
     parser.add_argument("--gowin-path", default=os.environ.get("GOWIN_PATH", None), help="Gowin IDE install directory (or GOWIN_PATH env variable, ex: ~/tools/gowin_1.9.12.04/IDE).")
+    parser.add_argument("--with-debug-bridge",     action="store_true", help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
+    parser.add_argument("--debug-bridge-baudrate", default=115200, type=int, help="Debug bridge baudrate.")
     args = parser.parse_args()
 
     # Gowin IDE selection (bundled libs/Qt are required for the standalone gw_sh).
@@ -659,20 +721,19 @@ def main():
     add_verilog_sources(platform)
     add_timing_constraints(platform)
 
-    # Design.
-    soc = BaseSoC(platform)
+    # SoC.
+    soc = BaseSoC(platform,
+        with_debug_bridge     = args.with_debug_bridge,
+        debug_bridge_baudrate = args.debug_bridge_baudrate,
+    )
 
     # Build.
-    build_dir = "build"
+    builder = Builder(soc, output_dir="build", csr_csv="scripts/csr.csv")
     if args.build:
-        platform.build(soc,
-            build_dir  = build_dir,
-            build_name = "chromatic",
-            run        = not args.no_compile,
-        )
+        builder.build(build_name="chromatic", run=not args.no_compile)
 
     # Load / Flash.
-    bitstream = f"{build_dir}/chromatic.fs"
+    bitstream = os.path.join(builder.gateware_dir, "chromatic.fs")
     if args.load:
         prog = platform.create_programmer()
         prog.load_bitstream(bitstream)

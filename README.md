@@ -65,6 +65,7 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | gClk   | ~8.39 MHz   | GW5APLL    | Audio I2S, timers, UART, USB   |
 | xClk   | ~67.11 MHz  | GW5APLL    | Cart detect, LED control       |
 | phy    | ~60 MHz     | USB PLL    | USB UART resync, ESP32 boot    |
+| sys    | = gClk      | alias      | LiteX CSR bus, debug bridge    |
 
 ### What's in LiteX (Python/Migen)
 
@@ -76,13 +77,16 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **System monitor transport**: LiteX/Migen UART packet RX/TX framing, CRC, and channel arbiter.
 - **System monitor payloads**: LiteX/Migen channel-valid generation and payload byte packing.
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
+- **Memory system**: PSRAM multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs).
+- **SoC**: LiteX SoCMini (CSR bus in the sys = gClk domain) with debug/automation registers (virtual buttons, status) and an optional UARTBone debug bridge over the USB CDC port.
 
 ### What's in Verilog (Instance black boxes)
 
 - **vid_system_top**: LCD panel master, frame buffering, OSD overlays, color correction.
-- **mem_system_top**: PSRAM controller, multi-port arbiter, QSPI slave.
+- **PSRAMController / PSRAMBIST_Burst**: PSRAM PHY/controller and startup BIST.
+- **QSPI_Slave / mm_burst_read_to_stream**: ESP32 QSPI slave and framebuffer/OSD line readers.
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
-- **usbuvcuart_top**: USB 2.0 soft PHY + UVC video + UART + UAC audio.
+- **usbuvcuart_top**: UVC video + UAC audio + CDC UART, on the Gowin USB 2.0 Device Controller and SoftPHY IPs (V1.9.12.04).
 - **system_monitor**: Menu UI, palette control, battery monitoring, and request generation.
 - **adc_wrap**: Gowin ADC for battery voltage measurement.
 
@@ -106,8 +110,12 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | 14 | System monitor transport → LiteX/Migen | `system_monitor_arbiter.sv`, `uart_packet_wrapper_rx.sv`, `uart_packet_wrapper_tx.sv` |
 | 15 | System monitor payload packing → LiteX/Migen | (moved out of `system_monitor.sv`) |
 | 16 | Repository restructured as a LiteX project (package, platform, tests, CI) | `top.py`, `mpmc.v`, `vid_tpg.v` |
+| 17 | Top-level glue extracted into LiteX modules, audio CDC fix | |
+| 18 | PSRAM arbiter + burst writers → LiteX/Migen | `mem_system_top.sv`, `MultiPortRamCtrl.vhd`, `gb_burst_write.v`, `mm_burst_write.v`, `fifo1k.v` (encrypted IP) |
+| 19 | Gowin USB IPs updated to V1.9.12.04 sources | pre-synthesized V1.9.9 USB controller netlist |
+| 20 | LiteX SoCMini + debug bridge (UARTBone over USB CDC), virtual buttons | |
 
-**Current cleanup: 14 legacy RTL files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
+**Current cleanup: 19 legacy RTL/IP files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
 
 Note: `uart_rx.vhd`, `uart_tx.vhd`, and `fixed_point_divider.v` are still required by the USB CDC/UART block.
 
@@ -124,7 +132,8 @@ chromatix/
   gateware/                   # LiteX/Migen cores (CRG, LCD, codec, system monitor, sources).
   data/                       # ST7785 / TLV320 register images.
   verilog/                    # Remaining legacy RTL (bsp/, emu/, usb/, ip/) + Gameboy_MiSTer submodule.
-test/                         # Simulation tests (pytest).
+scripts/                      # Host tools (chromatic.py: debug bridge control, buttons, UVC capture).
+test/                         # Simulation/elaboration tests (pytest).
 doc/                          # Roadmap.
 ```
 
@@ -144,7 +153,7 @@ git submodule update --init --recursive
 python3 -m pytest -v test
 ```
 
-Output bitstream: `build/chromatic.fs`
+Output bitstream: `build/gateware/chromatic.fs` (CSR map: `scripts/csr.csv`).
 
 **Gowin version**: use Gowin V1.9.12.04 (`--gowin-path ~/tools/gowin_1.9.12.04/IDE` or `GOWIN_PATH`).
 Bitstreams built with V1.9.10 run the game but the USB (UVC/UAC/CDC) device does not enumerate (also
@@ -173,6 +182,29 @@ Notes:
 - Back up the official image before flashing (`openFPGALoader --cable gwu2x --dump-flash --file-size 1048576 official.bin`);
   it can be restored with `openFPGALoader --cable gwu2x --write-flash --file-type bin --reset official.bin`
   or with the ModRetro updater.
+
+## Debug / Automation
+
+A `--with-debug-bridge` build replaces the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone:
+the CSR bus is then accessible from the host over the same USB cable, with virtual buttons (OR'ed with
+the physical ones) and status registers. Combined with the UVC video stream, this allows fully
+automated tests (press buttons, capture screens). The ESP32 keeps running normally, only its USB
+flashing path is unavailable in this variant.
+
+```bash
+# Build/flash the debug variant.
+./chromatix.py --gowin-path ~/tools/gowin_1.9.12.04/IDE --with-debug-bridge --build --flash
+
+# Start the LiteX server on the USB CDC port.
+litex_server --uart --uart-port /dev/ttyACM0 --uart-baudrate 115200
+
+# Control/test.
+./scripts/chromatic.py ident
+./scripts/chromatic.py status
+./scripts/chromatic.py press start --duration 0.2
+./scripts/chromatic.py capture frame.png --frames 4 --scale 2
+./scripts/chromatic.py sequence "press:start wait:1.5 press:a wait:1.5 capture:menu.png"
+```
 
 ## Dependencies
 
