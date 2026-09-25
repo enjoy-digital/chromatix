@@ -15,10 +15,7 @@ VERILOG_SOURCES = [
     # Gowin IP.
 
     # BSP: Video, Memory, System Monitor, Battery ADC.
-    "bsp/mm_burst_read_to_stream.v",
     "bsp/qspi_slave.v",
-    "bsp/PSRAMBIST_Burst.vhd",
-    "bsp/PSRAMController.vhd",
     "bsp/uart/uart_rx.vhd",
     "bsp/uart/uart_tx.vhd",
 

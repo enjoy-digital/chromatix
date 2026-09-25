@@ -11,6 +11,8 @@ from litex.gen import *
 
 from litex.soc.interconnect import stream
 
+from chromatix.gateware.psram import PSRAMGW5APHY, PSRAMController, PSRAMBIST
+
 # Memory Port --------------------------------------------------------------------------------------
 
 def memory_port_layout():
@@ -250,6 +252,94 @@ class QSPIBurstWrite(LiteXModule):
             ),
         ]
 
+# Line Reader --------------------------------------------------------------------------------------
+
+class LineReader(LiteXModule):
+    """
+    PSRAM line reader (port of mm_burst_read_to_stream.v).
+
+    At each end of line / start of frame (hClk syncs seen in xClk), requests a 160-word burst read
+    into a line buffer, streamed out in hClk along with the Game Boy pixels.
+    """
+    LINE_DEPTH = 160
+
+    def __init__(self, port, ram_dout, base, ram_ready):
+        self.valid = Signal()   # hClk.
+        self.hsync = Signal()   # hClk.
+        self.vsync = Signal()   # hClk.
+        self.data  = Signal(16) # hClk.
+
+        # # #
+
+        # Line buffer (not an attribute: not exposed on the CSR bus).
+        mem     = Memory(16, self.LINE_DEPTH, init=[0]*self.LINE_DEPTH)
+        wr_port = mem.get_port(write_capable=True, clock_domain="xclk")
+        rd_port = mem.get_port(clock_domain="hclk")
+        self.specials += mem, wr_port, rd_port
+
+        # hClk: read side.
+        vsync_r1 = Signal()
+        hsync_r1 = Signal()
+        ra       = Signal(15)
+        self.sync.hclk += [
+            vsync_r1.eq(self.vsync),
+            hsync_r1.eq(self.hsync),
+            If(~vsync_r1 & self.vsync,
+                ra.eq(0),
+            ).Elif(self.valid,
+                If(ra < self.LINE_DEPTH,
+                    ra.eq(ra + 1),
+                )
+            ).Elif(~hsync_r1 & self.hsync,
+                ra.eq(0),
+            )
+        ]
+        self.comb += [
+            rd_port.adr.eq(ra),
+            self.data.eq(rd_port.dat_r),
+        ]
+
+        # xClk: write side.
+        wa = Signal(15)
+        self.comb += [
+            wr_port.adr.eq(wa),
+            wr_port.dat_w.eq(ram_dout),
+            wr_port.we.eq(port.dout_valid),
+        ]
+        self.sync.xclk += [
+            If(port.dout_valid,
+                wa.eq(wa + 1),
+            ),
+            If(port.done,
+                wa.eq(0),
+            ),
+        ]
+
+        # xClk: burst requests.
+        hsync_sr = Signal(4)
+        vsync_sr = Signal(4)
+        eol      = Signal()
+        sof      = Signal()
+        self.sync.xclk += [
+            hsync_sr.eq(Cat(self.hsync, hsync_sr[:3])),
+            vsync_sr.eq(Cat(self.vsync, vsync_sr[:3])),
+        ]
+        self.comb += [
+            eol.eq(hsync_sr[2:4] == 0b10), # HSync falling edge (xHsync_sr[3:2] == 2'b10).
+            sof.eq(vsync_sr[2:4] == 0b01), # VSync rising edge (xVsync_sr[3:2] == 2'b01).
+        ]
+        self.sync.xclk += [
+            port.request.eq(0),
+            If(eol | sof,
+                port.request.eq(ram_ready),
+            ),
+            If(sof,
+                port.addr.eq(base),
+            ).Elif(eol,
+                port.addr.eq(port.addr + 2*self.LINE_DEPTH),
+            ),
+        ]
+
 # Memory System ------------------------------------------------------------------------------------
 
 PORT_BIST   = 0 # PSRAM BIST (short test at startup).
@@ -295,50 +385,29 @@ class MemorySystem(LiteXModule):
         self.ctrl = ctrl = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT))
         ports = ctrl.ports
         self.comb += ctrl.reset.eq(self.reset)
-        self.specials += Instance("PSRAMController",
-            i_clk_sys      = ClockSignal("xclk"),
-            i_clk_fsys     = ClockSignal("fclk"),
-            i_rst          = self.reset,
-            i_req_read     = ctrl.req_read,
-            i_req_write    = ctrl.req_write,
-            i_addr         = ctrl.addr,
-            i_din          = ctrl.din,
-            i_burst_length = ctrl.burst_length,
-            o_ready        = ctrl.ready,
-            o_writeNext    = ctrl.write_next,
-            o_dout         = ctrl.dout,
-            o_dout_valid   = ctrl.dout_valid,
-            o_done         = ctrl.done,
-            o_psram_clk    = psram_pads.clk,
-            o_psram_cs_n   = psram_pads.ce_n,
-            io_psram_rwds  = psram_pads.dqs,
-            io_psram_dq    = psram_pads.dq,
-        )
+        self.phy = phy = ClockDomainsRenamer("xclk")(PSRAMGW5APHY(psram_pads))
+        self.psram = psram = ClockDomainsRenamer("xclk")(PSRAMController(phy))
+        self.comb += [
+            psram.reset.eq(self.reset),
+            psram.req_read.eq(ctrl.req_read),
+            psram.req_write.eq(ctrl.req_write),
+            psram.addr.eq(ctrl.addr),
+            psram.din.eq(ctrl.din),
+            psram.burst_length.eq(ctrl.burst_length),
+            ctrl.ready.eq(psram.ready),
+            ctrl.write_next.eq(psram.write_next),
+            ctrl.dout.eq(psram.dout),
+            ctrl.dout_valid.eq(psram.dout_valid),
+            ctrl.done.eq(psram.done),
+        ]
 
         # BIST ---------------------------------------------------------------------------------
-        port = ports[PORT_BIST]
-        bist_req_read  = Signal()
-        bist_req_write = Signal()
+        self.bist = bist = ClockDomainsRenamer("xclk")(PSRAMBIST(ports[PORT_BIST], ctrl))
         self.comb += [
-            port.request.eq(bist_req_read | bist_req_write),
-            port.rnw.eq(bist_req_read),
+            bist.reset.eq(self.reset),
+            self.bist_done.eq(bist.finished),
+            self.bist_failed.eq(bist.failed),
         ]
-        self.specials += Instance("PSRAMBIST_Burst",
-            i_clk            = ClockSignal("xclk"),
-            i_rst            = self.reset,
-            o_test_finished  = self.bist_done,
-            o_test_failed    = self.bist_failed,
-            o_ram_req_read   = bist_req_read,
-            o_ram_req_write  = bist_req_write,
-            o_ram_addr       = port.addr,
-            o_ram_din        = port.din,
-            o_burst_length   = port.burst_length,
-            i_ram_ready      = ctrl.ready,
-            i_ram_writeNext  = port.write_next,
-            i_ram_done       = port.done,
-            i_ram_dout       = ctrl.dout,
-            i_ram_dout_valid = port.dout_valid,
-        )
 
         # QSPI Writes (ESP32) ------------------------------------------------------------------
         port = ports[PORT_QSPI]
@@ -377,9 +446,9 @@ class MemorySystem(LiteXModule):
             h_hsync_d.eq(self.h_hsync),
             h_valid_d.eq(self.h_valid),
         ]
-        for n, base, (vsync, hsync, valid), data in [
-            (PORT_FBRD,  0x10000, (self.h_vsync, self.h_hsync, self.h_valid), self.fb_data),
-            (PORT_FBOSD, 0x00000, (h_vsync_d,    h_hsync_d,    h_valid_d),    self.osd_data),
+        for name, n, base, (vsync, hsync, valid), data in [
+            ("fb_reader",  PORT_FBRD,  0x10000, (self.h_vsync, self.h_hsync, self.h_valid), self.fb_data),
+            ("osd_reader", PORT_FBOSD, 0x00000, (h_vsync_d,    h_hsync_d,    h_valid_d),    self.osd_data),
         ]:
             port = ports[n]
             self.comb += [
@@ -387,21 +456,14 @@ class MemorySystem(LiteXModule):
                 port.burst_length.eq(320),
                 port.din.eq(0),
             ]
-            self.specials += Instance("mm_burst_read_to_stream",
-                p_base_pointer = Constant(base, 23),
-                i_hClk         = ClockSignal("hclk"),
-                i_hVsync       = vsync,
-                i_hHsync       = hsync,
-                i_hValid       = valid,
-                i_xClk         = ClockSignal("xclk"),
-                i_xRamReady    = self.bist_done,
-                i_xStreamValid = port.dout_valid,
-                i_xStreamData  = ctrl.dout,
-                i_xWrBurstDone = port.done,
-                o_xGbReqRead   = port.request,
-                o_hWrBurstQ    = data,
-                o_xGbAddress   = port.addr,
-            )
+            reader = LineReader(port, ctrl.dout, base, self.bist_done)
+            self.add_module(name=name, module=reader)
+            self.comb += [
+                reader.valid.eq(valid),
+                reader.hsync.eq(hsync),
+                reader.vsync.eq(vsync),
+                data.eq(reader.data),
+            ]
 
         # Game Boy Framebuffer Write -----------------------------------------------------------
         port = ports[PORT_FBWR]

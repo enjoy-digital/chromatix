@@ -80,13 +80,12 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **Battery ADC**: GW5A hard ADC (voltage mode) + request/ready FSM.
 - **Video pipeline**: frame buffer addressing, frame blending, OSD/overlays (battery, timer, debug), GBC color correction (LCD/UVC), line buffer and ST7785 RGB666 panel timing, dot clock.
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
-- **Memory system**: PSRAM multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs).
+- **Memory system**: AP Memory OPI x8 PSRAM controller with GW5A OSER4/IDES4/IODELAY PHY, startup BIST, multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs), framebuffer/OSD line readers.
 - **SoC**: LiteX SoCMini (CSR bus in the sys = gClk domain) with debug/automation registers (virtual buttons, status) and an optional UARTBone debug bridge over the USB CDC port.
 
 ### What's in Verilog (Instance black boxes)
 
-- **PSRAMController / PSRAMBIST_Burst**: PSRAM PHY/controller and startup BIST.
-- **QSPI_Slave / mm_burst_read_to_stream**: ESP32 QSPI slave and framebuffer/OSD line readers.
+- **QSPI_Slave**: ESP32 QSPI slave (asynchronous CS reset, kept as Verilog).
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
 - **usbuvcuart_top**: UVC video + UAC audio + CDC UART, on the Gowin USB 2.0 Device Controller and SoftPHY IPs (V1.9.12.04). Its other Gowin IPs (PLL, color space convertor, video FIFO, divider) are replaced by LiteX/Migen cores generated as drop-in modules (`gateware/usb.py`).
 
@@ -117,8 +116,9 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | 21 | USB PLL, color space convertor, video FIFO and CDC baudrate divider → LiteX/Migen; cart data sampled in hclk (timing fix) | `Gowin_PLL_UVC.v`, `color_space_convertor.v` (encrypted), `fifo_video.v` (encrypted), `fixed_point_divider.v` (encrypted) |
 | 22 | System monitor control + battery ADC → LiteX/Migen | `system_monitor.sv`, `adc_wrap.v`, `gowin_adc.v` |
 | 23 | Video pipeline → LiteX/Migen | `vid_system_top.sv`, `ST7785_panel_master.v`, 6 `overlay*.vhd` |
+| 24 | PSRAM controller/PHY, BIST and line readers → LiteX/Migen | `PSRAMController.vhd`, `PSRAMBIST_Burst.vhd`, `mm_burst_read_to_stream.v` |
 
-**Current cleanup: 34 legacy RTL/IP files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`cart.v`, `video.v`).
+**Current cleanup: 37 legacy RTL/IP files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`cart.v`, `video.v`).
 
 Remaining encrypted Gowin IP: USB 2.0 Device Controller and SoftPHY only.
 
