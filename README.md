@@ -78,13 +78,13 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **System monitor payloads**: LiteX/Migen channel-valid generation and payload byte packing.
 - **System monitor control**: ESP32 packet decode (palettes, MCU buttons, brightness, system control), menu toggle, backlight PWM, battery AA/Li-ion detection/averaging, low battery/LED status.
 - **Battery ADC**: GW5A hard ADC (voltage mode) + request/ready FSM.
+- **Video pipeline**: frame buffer addressing, frame blending, OSD/overlays (battery, timer, debug), GBC color correction (LCD/UVC), line buffer and ST7785 RGB666 panel timing, dot clock.
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
 - **Memory system**: PSRAM multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs).
 - **SoC**: LiteX SoCMini (CSR bus in the sys = gClk domain) with debug/automation registers (virtual buttons, status) and an optional UARTBone debug bridge over the USB CDC port.
 
 ### What's in Verilog (Instance black boxes)
 
-- **vid_system_top**: LCD panel master, frame buffering, OSD overlays, color correction.
 - **PSRAMController / PSRAMBIST_Burst**: PSRAM PHY/controller and startup BIST.
 - **QSPI_Slave / mm_burst_read_to_stream**: ESP32 QSPI slave and framebuffer/OSD line readers.
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
@@ -116,8 +116,9 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | 20 | LiteX SoCMini + debug bridge (UARTBone over USB CDC), virtual buttons | |
 | 21 | USB PLL, color space convertor, video FIFO and CDC baudrate divider → LiteX/Migen; cart data sampled in hclk (timing fix) | `Gowin_PLL_UVC.v`, `color_space_convertor.v` (encrypted), `fifo_video.v` (encrypted), `fixed_point_divider.v` (encrypted) |
 | 22 | System monitor control + battery ADC → LiteX/Migen | `system_monitor.sv`, `adc_wrap.v`, `gowin_adc.v` |
+| 23 | Video pipeline → LiteX/Migen | `vid_system_top.sv`, `ST7785_panel_master.v`, 6 `overlay*.vhd` |
 
-**Current cleanup: 26 legacy RTL/IP files removed, 4 legacy Gowin project files removed, 3 RTL files adapted** (`vid_system_top.sv`, `cart.v`, `video.v`).
+**Current cleanup: 34 legacy RTL/IP files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`cart.v`, `video.v`).
 
 Remaining encrypted Gowin IP: USB 2.0 Device Controller and SoftPHY only.
 

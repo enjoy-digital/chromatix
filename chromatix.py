@@ -35,6 +35,7 @@ from chromatix.gateware.misc    import TickGenerator, StatusLed, ESP32Control
 from chromatix.gateware.buttons import Buttons
 from chromatix.gateware.debug   import DebugControl
 from chromatix.gateware.memory  import MemorySystem
+from chromatix.gateware.video   import VideoPipeline
 from chromatix.gateware.lcd     import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec   import CodecControl, CodecI2S, load_tlv320_registers
 from chromatix.gateware.sysmon  import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
@@ -331,58 +332,42 @@ class BaseSoC(SoCMini):
 
         # Video System -----------------------------------------------------------------------------
 
-        self.specials += Instance("vid_system_top",
-            p_ISSIMU                   = 0,
-            i_gClk                     = ClockSignal("gclk"),
-            i_hClk                     = ClockSignal("hclk"),
-            i_pClk                     = ClockSignal("pclk"),
-            i_reset                    = memrst,
-            # Menu.
-            i_BTN_MENU                 = menu_disabled,
-            o_slideOutActive           = slide_out_active,
-            # LCD.
-            o_LCD_DB                   = lcd.db,
-            o_LCD_ENABLE_UVC           = lcd_enable_uvc,
-            o_LCD_DB_UVC               = lcd_db_uvc,
-            o_LCD_DOTCLK               = lcd.dotclk,
-            o_LCD_ENABLE               = lcd.enable,
-            o_LCD_HSYNC                = lcd.hsync,
-            i_LCD_EN                   = lcd_en,
-            i_LCD_TE                   = lcd.te,
-            o_LCD_VSYNC                = lcd.vsync,
-            o_LCD_GENLOCK              = Signal(),
-            i_LCD_INIT_DONE            = lcd_init_done,
-            # Display Options.
-            i_frameBlendEnable         = system_control[1],
-            i_colorCorrectionEnableLCD = system_control[2],
-            i_colorCorrectionEnableUVC = system_control[3],
-            i_voltageLow               = low_battery,
-            i_lowBattDispMode          = system_control[13:15],
-            i_showTimer                = 0,
-            i_runTimer                 = system_control[9],
-            i_resetTimer               = system_control[10],
-            i_gSecondEna               = ticks.second,
-            i_gPercentEna              = ticks.percent,
-            i_debug_system             = debug_system,
-            i_debug_system_on          = 0,
-            # OSD / Frame Buffer.
-            o_hDrawOSD                 = h_draw_osd,
-            o_hGBNewLine               = h_gb_newline,
-            o_hGBAddress               = h_gb_address,
-            o_hGBWrite                 = h_gb_write,
-            o_hGBData                  = h_gb_data,
-            o_hValid                   = Signal(),
-            o_hHsync                   = Signal(),
-            o_hVsync                   = Signal(),
-            o_hWrBurstQ                = h_wr_burst_q,
-            o_hWrBurstQ2               = h_wr_burst_q2,
+        self.video = video = VideoPipeline(lcd)
+        self.comb += [
             # Game Boy LCD.
-            i_gb_lcd_clkena            = gb_lcd_clkena,
-            i_gb_lcd_mode              = gb_lcd_mode,
-            i_gb_lcd_on                = gb_lcd_on,
-            i_gb_lcd_vsync             = gb_lcd_vsync,
-            i_gb_lcd_data              = gb_lcd_data,
-        )
+            video.gb_clkena.eq(gb_lcd_clkena),
+            video.gb_data.eq(gb_lcd_data),
+            video.gb_mode.eq(gb_lcd_mode),
+            video.gb_on.eq(gb_lcd_on),
+            video.gb_vsync.eq(gb_lcd_vsync),
+            # Frame Buffer / OSD.
+            h_gb_newline.eq(video.fb_new_line),
+            h_gb_address.eq(video.fb_address),
+            h_gb_write.eq(video.fb_write),
+            h_gb_data.eq(video.fb_data),
+            video.fb_prev.eq(h_wr_burst_q),
+            video.osd_data.eq(h_wr_burst_q2),
+            h_draw_osd.eq(video.draw_osd),
+            # Controls.
+            video.menu_disabled.eq(menu_disabled),
+            video.lcd_init_done.eq(lcd_init_done),
+            video.lcd_en.eq(lcd_en),
+            video.frame_blend.eq(system_control[1]),
+            video.correct_lcd.eq(system_control[2]),
+            video.correct_uvc.eq(system_control[3]),
+            video.voltage_low.eq(low_battery),
+            video.low_batt_mode.eq(system_control[13:15]),
+            video.show_timer.eq(0),
+            video.run_timer.eq(system_control[9]),
+            video.reset_timer.eq(system_control[10]),
+            video.second.eq(ticks.second),
+            video.percent.eq(ticks.percent),
+            video.debug_system.eq(debug_system),
+            video.debug_on.eq(0),
+            # UVC.
+            lcd_enable_uvc.eq(video.uvc_en),
+            lcd_db_uvc.eq(video.uvc_db),
+        ]
 
         # Audio: TLV320 Codec Control (hClk domain) + I2S (gClk domain) ----------------------------
 
