@@ -252,6 +252,95 @@ class QSPIBurstWrite(LiteXModule):
             ),
         ]
 
+# QSPI Slave ---------------------------------------------------------------------------------------
+
+class QSPISlave(LiteXModule):
+    """
+    ESP32 QSPI slave (port of qspi_slave.v): 1 command bit, 10 length bits and 32 address bits on
+    MOSI, then data bytes on the 4 lines (2 clocks per byte), assembled into 16-bit words.
+
+    The state registers are asynchronously reset by CS (QSPI_CLK stops while CS is high): they are
+    implemented with GW5A DFFC (async clear) flip-flops. Runs in the "qspi" domain (QSPI_CLK rising).
+    """
+    def __init__(self, pads):
+        self.menu_init  = Signal()
+        self.data_valid = Signal()
+        self.data       = Signal(16)
+        self.address    = Signal(32)
+
+        # # #
+
+        cs   = pads.cs_n
+        pins = Cat(pads.mosi, pads.miso, pads.wp_n, pads.hd)
+
+        # Async cleared (CS) registers: next values computed combinatorially.
+        cycle_count = Signal(8)
+        cycle_phase = Signal()
+        valid       = Signal()
+        valid_phase = Signal()
+        async_regs  = {}
+        for name, sig in [("cycle_count", cycle_count), ("cycle_phase", cycle_phase),
+                          ("valid", valid), ("valid_phase", valid_phase)]:
+            nxt = Signal(len(sig), name=f"{name}_next")
+            self.comb += nxt.eq(sig)
+            async_regs[name] = nxt
+            for i in range(len(sig)):
+                self.specials += Instance("DFFC", name=f"qspi_{name}_dffc{i}",
+                    i_D     = nxt[i],
+                    i_CLK   = ClockSignal("qspi"),
+                    i_CLEAR = cs,
+                    o_Q     = sig[i],
+                )
+
+        # Plain registers (only updated while CS is low).
+        pins_r1     = Signal(4)
+        data_byte   = Signal(8)
+        data_byte_r = Signal(8)
+        menu_init1  = Signal()
+        menu_init2  = Signal()
+
+        self.comb += [
+            If(cycle_count <= 50,
+                async_regs["cycle_count"].eq(cycle_count + 1),
+            ),
+            If(cycle_count >= 46,
+                async_regs["cycle_phase"].eq(~cycle_phase),
+                async_regs["valid"].eq(cycle_phase),
+            ),
+            If(valid,
+                async_regs["valid_phase"].eq(~valid_phase),
+            ),
+        ]
+        self.sync.qspi += If(~cs,
+            # Address.
+            If((cycle_count >= 11) & (cycle_count <= 42),
+                self.address.eq(Cat(pads.mosi, self.address[:31])),
+            ),
+            # Menu init: second transfer to address 0.
+            If((cycle_count == 43) & (self.address == 0),
+                menu_init1.eq(1),
+                If(menu_init1,
+                    menu_init2.eq(1),
+                ),
+            ),
+            # Data.
+            If(cycle_count >= 46,
+                If(cycle_phase,
+                    data_byte.eq(Cat(pins, pins_r1)),
+                ).Else(
+                    pins_r1.eq(pins),
+                ),
+            ),
+            If(valid,
+                data_byte_r.eq(data_byte),
+            ),
+        )
+        self.comb += [
+            self.menu_init.eq(menu_init2),
+            self.data_valid.eq(valid & valid_phase),
+            self.data.eq(Cat(data_byte_r, data_byte)),
+        ]
+
 # Line Reader --------------------------------------------------------------------------------------
 
 class LineReader(LiteXModule):
@@ -411,21 +500,13 @@ class MemorySystem(LiteXModule):
 
         # QSPI Writes (ESP32) ------------------------------------------------------------------
         port = ports[PORT_QSPI]
-        q_data_valid = Signal()
-        q_data       = Signal(16)
-        q_address    = Signal(32)
-        self.specials += Instance("QSPI_Slave",
-            i_QSPI_CLK    = qspi_pads.clk,
-            i_QSPI_CS     = qspi_pads.cs_n,
-            i_QSPI_MOSI   = qspi_pads.mosi,
-            i_QSPI_MISO   = qspi_pads.miso,
-            i_QSPI_WP     = qspi_pads.wp_n,
-            i_QSPI_HD     = qspi_pads.hd,
-            o_qMenuInit   = self.menu_init,
-            o_qDataValid  = q_data_valid,
-            o_qData       = q_data,
-            o_qAddress    = q_address,
-        )
+        self.cd_qspi = ClockDomain("qspi", reset_less=True)
+        self.comb += self.cd_qspi.clk.eq(qspi_pads.clk)
+        self.qspi_slave = qspi_slave = QSPISlave(qspi_pads)
+        self.comb += self.menu_init.eq(qspi_slave.menu_init)
+        q_data_valid = qspi_slave.data_valid
+        q_data       = qspi_slave.data
+        q_address    = qspi_slave.address
         self.qspi_write = qspi_write = QSPIBurstWrite(port)
         self.comb += [
             qspi_write.ram_ready.eq(self.bist_done),
