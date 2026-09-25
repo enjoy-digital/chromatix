@@ -66,6 +66,7 @@ class Chromatic:
         r = {name: (status >> i) & 0x1 for i, name in enumerate(STATUS_FIELDS)}
         r["system_control"]  = self.bus.regs.debug_ctrl_system_control.read()
         r["volt"]            = self.bus.regs.debug_ctrl_volt.read()
+        r["adc_value"]       = self.bus.regs.debug_ctrl_adc_value.read()
         r["volume"]          = self.bus.regs.debug_ctrl_volume.read()
         r["pmic_sys_status"] = self.bus.regs.debug_ctrl_pmic_sys_status.read()
         return r
@@ -104,12 +105,20 @@ def capture(filename, device=UVC_DEVICE, frames=1, fps=2, scale=1):
 # Sequence -----------------------------------------------------------------------------------------
 
 def run_sequence(chromatic, sequence, default_duration=0.1):
-    """Run a space-separated sequence of steps: press:a+b[@duration], wait:seconds, capture:file."""
+    """
+    Run a space-separated sequence of steps:
+    - press:a+b[@duration] : press and release button(s).
+    - buttons:a+b          : set the held buttons (buttons: releases all).
+    - wait:seconds         : wait.
+    - capture:file         : capture a UVC frame.
+    """
     for step in sequence.split():
         action, _, arg = step.partition(":")
         if action == "press":
             buttons, _, duration = arg.partition("@")
             chromatic.press(buttons.split("+"), float(duration) if duration else default_duration)
+        elif action == "buttons":
+            chromatic.set_buttons([b for b in arg.split("+") if b])
         elif action == "wait":
             time.sleep(float(arg))
         elif action == "capture":

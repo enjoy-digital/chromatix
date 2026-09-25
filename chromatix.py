@@ -37,7 +37,8 @@ from chromatix.gateware.debug   import DebugControl
 from chromatix.gateware.memory  import MemorySystem
 from chromatix.gateware.lcd     import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec   import CodecControl, CodecI2S, load_tlv320_registers
-from chromatix.gateware.sysmon  import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads
+from chromatix.gateware.sysmon  import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
+from chromatix.gateware.adc     import BatteryADC
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -551,20 +552,10 @@ class BaseSoC(SoCMini):
             io_usb_term_dn_io = usb.term_dn,
         )
 
-        # Battery ADC ------------------------------------------------------------------------------
+        # Battery ADC (gClk domain) ----------------------------------------------------------------
 
-        h_adc_value_r1 = Signal(14)
-        h_adc_req_ext  = Signal()
-        h_adc_ready_r1 = Signal()
-        self.specials += Instance("adc_wrap",
-            i_clk          = ClockSignal("gclk"),
-            i_reset_n      = crg.pll.locked,
-            o_hAdcReq_ext  = h_adc_req_ext,
-            o_hAdcValue_r1 = h_adc_value_r1,
-            o_hAdcReady_r1 = h_adc_ready_r1,
-            i_VBAT_ADC_P   = vbat_adc.p,
-            i_VBAT_ADC_N   = vbat_adc.n,
-        )
+        self.battery_adc = battery_adc = ClockDomainsRenamer("gclk")(BatteryADC(vbat_adc))
+        self.comb += battery_adc.enable.eq(crg.pll.locked)
 
         # System Monitor (gClk domain) -------------------------------------------------------------
 
@@ -612,70 +603,65 @@ class BaseSoC(SoCMini):
             sm_bridge.tx_senddata.eq(sm_payloads.tx_senddata),
         ]
 
-        # Menu / UI / Battery / Palette (legacy Verilog).
-        self.specials += Instance("system_monitor",
-            p_NUM_CH                         = sm_num_channels,
-            i_clk                            = ClockSignal("gclk"),
-            i_reset                          = ~crg.pll.locked,
+        # Menu / UI / Battery / Palette.
+        self.sm_ctrl = sm_ctrl = ClockDomainsRenamer("gclk")(SystemMonitorControl(num_channels=sm_num_channels))
+        self.comb += [
+            sm_ctrl.reset.eq(~crg.pll.locked),
             # Buttons.
-            i_BTN_A                          = btns.a,
-            i_BTN_B                          = btns.b,
-            i_BTN_DPAD_DOWN                  = btns.dpad_down,
-            i_BTN_DPAD_LEFT                  = btns.dpad_left,
-            i_BTN_DPAD_RIGHT                 = btns.dpad_right,
-            i_BTN_DPAD_UP                    = btns.dpad_up,
-            i_BTN_MENU                       = menu_gated,
-            i_BTN_SEL                        = btns.sel,
-            i_BTN_START                      = btns.start,
+            sm_ctrl.btn_a.eq(btns.a),
+            sm_ctrl.btn_b.eq(btns.b),
+            sm_ctrl.btn_down.eq(btns.dpad_down),
+            sm_ctrl.btn_left.eq(btns.dpad_left),
+            sm_ctrl.btn_right.eq(btns.dpad_right),
+            sm_ctrl.btn_up.eq(btns.dpad_up),
+            sm_ctrl.btn_menu.eq(menu_gated),
+            sm_ctrl.btn_sel.eq(btns.sel),
+            sm_ctrl.btn_start.eq(btns.start),
             # LCD.
-            o_menuDisabled                   = menu_disabled,
-            o_LCD_BACKLIGHT_INIT             = lcd_backlight_init,
-            i_LCD_INIT_DONE                  = lcd_init_done & ~boot_rom_enabled,
-            o_LCD_PWM                        = lcd.pwm,
+            menu_disabled.eq(sm_ctrl.menu_disabled),
+            lcd_backlight_init.eq(sm_ctrl.lcd_backlight_init),
+            sm_ctrl.lcd_init_done.eq(lcd_init_done & ~boot_rom_enabled),
+            lcd.pwm.eq(sm_ctrl.lcd_pwm),
             # ADC.
-            o_hAdcReq_ext                    = h_adc_req_ext,
-            i_hAdcValue_r1                   = h_adc_value_r1,
-            i_hAdcReady_r1                   = h_adc_ready_r1,
-            o_ADC_SEL                        = audio.adc_sel,
+            battery_adc.req.eq(sm_ctrl.adc_req),
+            sm_ctrl.adc_ready.eq(battery_adc.ready),
+            sm_ctrl.adc_value.eq(battery_adc.value),
+            audio.adc_sel.eq(sm_ctrl.adc_sel),
             # System Status.
-            i_hButtons                       = 0,
-            o_MCU_buttons                    = mcu_buttons,
-            i_hVolume                        = codec_ctrl.volume[:7],
-            i_pmic_sys_status                = codec_ctrl.pmic_sys_status,
-            i_hHeadphones                    = h_headphones,
-            i_gSecondEna                     = ticks.second,
-            i_gHalfSecondEna                 = ticks.half_second,
-            o_debug_system                   = debug_system,
-            o_low_battery                    = low_battery,
+            mcu_buttons.eq(sm_ctrl.mcu_buttons),
+            sm_ctrl.pmic_sys_status.eq(codec_ctrl.pmic_sys_status),
+            sm_ctrl.second.eq(ticks.second),
+            sm_ctrl.half_second.eq(ticks.half_second),
+            debug_system.eq(sm_ctrl.debug_system),
+            low_battery.eq(sm_ctrl.low_battery),
             # LED Control.
-            o_LED_Green                      = status_led.green,
-            o_LED_Red                        = status_led.red,
-            o_LED_Yellow                     = status_led.yellow,
-            o_LED_White                      = status_led.white,
+            status_led.green.eq(sm_ctrl.led_green),
+            status_led.red.eq(sm_ctrl.led_red),
+            status_led.yellow.eq(sm_ctrl.led_yellow),
+            status_led.white.eq(sm_ctrl.led_white),
             # System Control / Palette.
-            o_system_control                 = system_control,
-            o_paletteBGIn                    = palette_bg_in,
-            o_paletteOBJ0In                  = palette_obj0_in,
-            o_paletteOBJ1In                  = palette_obj1_in,
-            i_gbc_mode                       = gbc_mode,
-            i_gpd                            = gpd,
+            system_control.eq(sm_ctrl.system_control),
+            palette_bg_in.eq(sm_ctrl.palette_bg),
+            palette_obj0_in.eq(sm_ctrl.palette_obj0),
+            palette_obj1_in.eq(sm_ctrl.palette_obj1),
             # Decoded monitor transport.
-            i_rx_address                     = sm_bridge.rx_address,
-            i_rx_data                        = sm_bridge.rx_data,
-            i_rx_data_val                    = sm_bridge.rx_data_val,
-            i_tx_channel                     = sm_bridge.tx_channel,
-            i_write_done                     = sm_bridge.write_done,
-            o_o_request_buttons              = sm_payloads.request_buttons,
-            o_o_request_version              = sm_payloads.request_version,
-            o_o_updateBrightness             = sm_payloads.update_brightness,
-            o_o_request_SystemStatusExtended = sm_payloads.request_system_status_extended,
-            o_o_request_gpd                  = sm_payloads.request_gpd,
-            o_o_volt                         = sm_payloads.volt,
-            o_o_bat_is_LI                    = sm_payloads.bat_is_li,
-            o_o_transmitVolt                 = sm_payloads.transmit_volt,
-            o_o_brightness                   = sm_payloads.brightness,
-            o_o_lowpowerBacklight            = sm_payloads.lowpower_backlight,
-        )
+            sm_ctrl.rx_address.eq(sm_bridge.rx_address),
+            sm_ctrl.rx_data.eq(sm_bridge.rx_data),
+            sm_ctrl.rx_data_val.eq(sm_bridge.rx_data_val),
+            sm_ctrl.tx_channel.eq(sm_bridge.tx_channel),
+            sm_ctrl.write_done.eq(sm_bridge.write_done),
+            # Payload requests/values.
+            sm_payloads.request_buttons.eq(sm_ctrl.request_buttons),
+            sm_payloads.request_version.eq(sm_ctrl.request_version),
+            sm_payloads.update_brightness.eq(sm_ctrl.update_brightness),
+            sm_payloads.request_system_status_extended.eq(sm_ctrl.request_system_status_extended),
+            sm_payloads.request_gpd.eq(sm_ctrl.request_gpd),
+            sm_payloads.volt.eq(sm_ctrl.volt),
+            sm_payloads.bat_is_li.eq(sm_ctrl.bat_is_li),
+            sm_payloads.transmit_volt.eq(sm_ctrl.transmit_volt),
+            sm_payloads.brightness.eq(sm_ctrl.brightness),
+            sm_payloads.lowpower_backlight.eq(sm_ctrl.lowpower_backlight),
+        ]
 
         # Debug Control Status -------------------------------------------------------------------
 
@@ -687,6 +673,7 @@ class BaseSoC(SoCMini):
             debug_ctrl.low_battery.eq(low_battery),
             debug_ctrl.system_control.eq(system_control),
             debug_ctrl.volt.eq(sm_payloads.volt),
+            debug_ctrl.adc_value.eq(battery_adc.value),
             debug_ctrl.bat_is_li.eq(sm_payloads.bat_is_li),
             debug_ctrl.volume.eq(codec_ctrl.volume),
             debug_ctrl.headphones.eq(h_headphones),

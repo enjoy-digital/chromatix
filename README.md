@@ -76,6 +76,8 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **UART**: LiteX RS232PHY (115200 baud, replaces custom UART2).
 - **System monitor transport**: LiteX/Migen UART packet RX/TX framing, CRC, and channel arbiter.
 - **System monitor payloads**: LiteX/Migen channel-valid generation and payload byte packing.
+- **System monitor control**: ESP32 packet decode (palettes, MCU buttons, brightness, system control), menu toggle, backlight PWM, battery AA/Li-ion detection/averaging, low battery/LED status.
+- **Battery ADC**: GW5A hard ADC (voltage mode) + request/ready FSM.
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
 - **Memory system**: PSRAM multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs).
 - **SoC**: LiteX SoCMini (CSR bus in the sys = gClk domain) with debug/automation registers (virtual buttons, status) and an optional UARTBone debug bridge over the USB CDC port.
@@ -87,8 +89,6 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **QSPI_Slave / mm_burst_read_to_stream**: ESP32 QSPI slave and framebuffer/OSD line readers.
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
 - **usbuvcuart_top**: UVC video + UAC audio + CDC UART, on the Gowin USB 2.0 Device Controller and SoftPHY IPs (V1.9.12.04). Its other Gowin IPs (PLL, color space convertor, video FIFO, divider) are replaced by LiteX/Migen cores generated as drop-in modules (`gateware/usb.py`).
-- **system_monitor**: Menu UI, palette control, battery monitoring, and request generation.
-- **adc_wrap**: Gowin ADC for battery voltage measurement.
 
 ## Migration Steps
 
@@ -115,8 +115,9 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | 19 | Gowin USB IPs updated to V1.9.12.04 sources | pre-synthesized V1.9.9 USB controller netlist |
 | 20 | LiteX SoCMini + debug bridge (UARTBone over USB CDC), virtual buttons | |
 | 21 | USB PLL, color space convertor, video FIFO and CDC baudrate divider → LiteX/Migen; cart data sampled in hclk (timing fix) | `Gowin_PLL_UVC.v`, `color_space_convertor.v` (encrypted), `fifo_video.v` (encrypted), `fixed_point_divider.v` (encrypted) |
+| 22 | System monitor control + battery ADC → LiteX/Migen | `system_monitor.sv`, `adc_wrap.v`, `gowin_adc.v` |
 
-**Current cleanup: 23 legacy RTL/IP files removed, 4 legacy Gowin project files removed, 2 RTL files adapted** (`vid_system_top.sv`, `system_monitor.sv`).
+**Current cleanup: 26 legacy RTL/IP files removed, 4 legacy Gowin project files removed, 3 RTL files adapted** (`vid_system_top.sv`, `cart.v`, `video.v`).
 
 Remaining encrypted Gowin IP: USB 2.0 Device Controller and SoftPHY only.
 

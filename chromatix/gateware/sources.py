@@ -13,14 +13,11 @@ VERILOG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ve
 # Subsystems still integrated as Verilog/VHDL Instances (see README migration table).
 VERILOG_SOURCES = [
     # Gowin IP.
-    "ip/gowin_adc/gowin_adc.v",
 
     # BSP: Video, Memory, System Monitor, Battery ADC.
     "bsp/ST7785_panel_master.v",
-    "bsp/adc_wrap.v",
     "bsp/mm_burst_read_to_stream.v",
     "bsp/qspi_slave.v",
-    "bsp/system_monitor.sv",
     "bsp/vid_system_top.sv",
     "bsp/PSRAMBIST_Burst.vhd",
     "bsp/PSRAMController.vhd",

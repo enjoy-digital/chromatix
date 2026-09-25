@@ -604,3 +604,326 @@ class SystemMonitorUART(LiteXModule):
             self.rx_data.eq(phy.source.data),
             phy.source.ready.eq(1),
         ]
+
+# System Monitor Control ---------------------------------------------------------------------------
+
+class SystemMonitorControl(LiteXModule):
+    """
+    System monitor control logic (port of system_monitor.sv).
+
+    - Decodes ESP32 packets: palettes, MCU buttons, brightness, system control and requests.
+    - Menu button handling (menu open/close toggle on release).
+    - LCD backlight PWM, brightness adjust with Menu + Left/Right when the menu is closed.
+    - Battery ADC scheduling, AA/Li-ion detection, voltage averaging, low battery / LED status and
+      low power backlight mode (AA).
+    """
+    def __init__(self, num_channels=10, adc_interval=41946, adc_sel_lead=1000):
+        # adc_interval: ADC sampling interval (41946: 5ms at 8.388608MHz).
+        # adc_sel_lead: ADC_SEL mux toggle lead time before a measurement.
+        self.reset              = Signal()
+
+        # Buttons (1 = pressed, except menu: 0 = pressed).
+        self.btn_a              = Signal()
+        self.btn_b              = Signal()
+        self.btn_down           = Signal()
+        self.btn_left           = Signal()
+        self.btn_right          = Signal()
+        self.btn_up             = Signal()
+        self.btn_menu           = Signal()
+        self.btn_sel            = Signal()
+        self.btn_start          = Signal()
+
+        # Menu / LCD.
+        self.menu_disabled      = Signal(reset=1)
+        self.lcd_init_done      = Signal()
+        self.lcd_pwm            = Signal()
+        self.lcd_backlight_init = Signal()
+
+        # ADC.
+        self.adc_sel            = Signal()
+        self.adc_req            = Signal()
+        self.adc_ready          = Signal()
+        self.adc_value          = Signal(14)
+
+        # Status inputs.
+        self.pmic_sys_status    = Signal(8)
+        self.second             = Signal()
+        self.half_second        = Signal()
+
+        # Outputs.
+        self.mcu_buttons        = Signal(9)
+        self.low_battery        = Signal()
+        self.led_green          = Signal()
+        self.led_red            = Signal()
+        self.led_yellow         = Signal()
+        self.led_white          = Signal()
+        self.system_control     = Signal(16)
+        self.debug_system       = Signal(32)
+        self.palette_bg         = Signal(64)
+        self.palette_obj0       = Signal(64)
+        self.palette_obj1       = Signal(64)
+
+        # Packet transport.
+        self.rx_address         = Signal(7)
+        self.rx_data            = Signal(80)
+        self.rx_data_val        = Signal()
+        self.tx_channel         = Signal(max=num_channels)
+        self.write_done         = Signal()
+
+        # Payload requests/values.
+        self.request_buttons                = Signal()
+        self.request_version                = Signal()
+        self.update_brightness              = Signal()
+        self.request_system_status_extended = Signal()
+        self.request_gpd                    = Signal()
+        self.volt                           = Signal(14)
+        self.bat_is_li                      = Signal()
+        self.transmit_volt                  = Signal()
+        self.brightness                     = Signal(4, reset=3)
+        self.lowpower_backlight             = Signal()
+
+        # # #
+
+        brightness     = self.brightness
+        volt           = self.volt
+        block_receive  = Signal(2)
+        lowpower_old   = Signal(4)
+
+        # Button sampling (2 synchronization stages + 16-bit history for D-Pad/Menu).
+        def sampled(btn, with_history=False):
+            r1 = Signal()
+            r2 = Signal()
+            sr = Signal(16) if with_history else None
+            self.sync += If(~self.reset,
+                r1.eq(btn),
+                r2.eq(r1),
+                *([sr.eq(Cat(r2, sr[:15]))] if with_history else []),
+            )
+            return r2, sr
+        btn_menu_r2,  btn_menu_sr  = sampled(self.btn_menu,  True)
+        btn_down_r2,  _            = sampled(self.btn_down,  True)
+        btn_up_r2,    _            = sampled(self.btn_up,    True)
+        btn_left_r2,  btn_left_sr  = sampled(self.btn_left,  True)
+        btn_right_r2, btn_right_sr = sampled(self.btn_right, True)
+        btn_sel_r2,   _            = sampled(self.btn_sel)
+        btn_start_r2, _            = sampled(self.btn_start)
+        btn_a_r2,     _            = sampled(self.btn_a)
+        btn_b_r2,     _            = sampled(self.btn_b)
+
+        # Menu toggle: menu button pressed then released (16 stable samples each).
+        menu_down = Signal()
+        self.sync += [
+            If(self.reset,
+                self.menu_disabled.eq(1),
+            ).Else(
+                If(btn_menu_sr == 0x8000,
+                    menu_down.eq(1),
+                ),
+                If((btn_menu_sr == 0x7fff) & menu_down,
+                    self.menu_disabled.eq(~self.menu_disabled),
+                    menu_down.eq(0),
+                ),
+                If(btn_a_r2 | btn_b_r2 | btn_down_r2 | btn_up_r2 | btn_left_r2 | btn_right_r2 | btn_sel_r2 | btn_start_r2,
+                    menu_down.eq(0),
+                ),
+            )
+        ]
+
+        # Packet decode / brightness / low power backlight.
+        self.sync += [
+            If(self.reset,
+                self.system_control.eq(0),
+                self.mcu_buttons.eq(0),
+                self.request_gpd.eq(0),
+            ).Else(
+                self.request_buttons.eq(0),
+                self.request_version.eq(0),
+                self.update_brightness.eq(0),
+                self.request_system_status_extended.eq(0),
+
+                If(self.half_second,
+                    self.lcd_backlight_init.eq(1),
+                ),
+
+                If(self.rx_data_val,
+                    If(self.rx_address == 0xd,
+                        self.request_gpd.eq(1),
+                    ),
+                    If(self.rx_address == 0xc,
+                        If(self.rx_data[63],
+                            self.palette_obj1.eq(self.rx_data[:64]),
+                        ).Else(
+                            self.palette_obj0.eq(self.rx_data[:64]),
+                        )
+                    ),
+                    If(self.rx_address == 0xb,
+                        self.palette_bg.eq(self.rx_data[:64]),
+                    ),
+                    If(self.rx_address == 9,
+                        self.mcu_buttons.eq(self.rx_data[:9]),
+                    ),
+                    If(self.rx_address == 6,
+                        self.request_version.eq(1),
+                    ),
+                    If(self.rx_address == 5,
+                        If(block_receive == 0,
+                            brightness.eq(self.rx_data[:4]),
+                        ).Else(
+                            block_receive.eq(block_receive - 1),
+                        )
+                    ),
+                    If(self.rx_address == 4,
+                        self.system_control.eq(self.rx_data[:16]),
+                    ),
+                    If(self.rx_address == 2,
+                        self.request_buttons.eq(1),
+                    ),
+                ),
+
+                # Brightness adjust with Menu (held) + Left/Right when the menu is closed.
+                If(self.menu_disabled,
+                    If((btn_left_sr == 0x8000) & ~btn_menu_r2,
+                        If(brightness >= 1,
+                            brightness.eq(brightness - 1),
+                            block_receive.eq(3),
+                            self.update_brightness.eq(1),
+                        )
+                    ),
+                    If((btn_right_sr == 0x8000) & ~btn_menu_r2,
+                        If(brightness != 15,
+                            brightness.eq(brightness + 1),
+                            block_receive.eq(3),
+                            self.update_brightness.eq(1),
+                        )
+                    ),
+                ),
+
+                If(self.lowpower_backlight,
+                    brightness.eq(0),
+                    self.update_brightness.eq(0),
+                ),
+
+                # Low power backlight (AA batteries only).
+                If(volt >= 700, # ~1.8V.
+                    If(~self.lowpower_backlight & ~self.bat_is_li & (volt < 979), # Below 2.55V.
+                        self.request_system_status_extended.eq(1),
+                        self.lowpower_backlight.eq(1),
+                        lowpower_old.eq(brightness),
+                    ),
+                    If(self.lowpower_backlight & ~self.bat_is_li & (volt > 1293), # Above 3.4V.
+                        self.request_system_status_extended.eq(1),
+                        self.lowpower_backlight.eq(0),
+                        brightness.eq(lowpower_old),
+                    ),
+                ),
+
+                If(self.write_done & (self.tx_channel == 9) & self.request_gpd,
+                    self.request_gpd.eq(0),
+                ),
+            )
+        ]
+
+        # LCD backlight PWM.
+        lcd_count = Signal(8)
+        self.sync += lcd_count.eq(lcd_count + 1)
+        self.comb += If(self.lcd_init_done & self.lcd_backlight_init,
+            self.lcd_pwm.eq(lcd_count <= Cat(Constant(0, 4), brightness))
+        )
+
+        # ADC scheduling (every 5ms), with ADC_SEL toggling (AA/Li-ion) until detection is done.
+        adc_timer      = Signal(16)
+        startup_cnt    = Signal(10)
+        startup_select = Signal((11, True))
+        startup_done   = Signal()
+        self.sync += [
+            If(adc_timer < adc_interval,
+                adc_timer.eq(adc_timer + 1),
+                self.adc_req.eq(0),
+                If(startup_done,
+                    self.adc_sel.eq(startup_select[10]),
+                ).Elif(adc_timer == (adc_interval - adc_sel_lead),
+                    self.adc_sel.eq(~self.adc_sel),
+                )
+            ).Else(
+                adc_timer.eq(0),
+                self.adc_req.eq(1),
+            )
+        ]
+
+        # Battery: type detection, averaging (256 samples), status/LEDs.
+        volt_sum      = Signal(22)
+        volt_cnt      = Signal(9)
+        blink         = Signal()
+        voltage_full  = Signal(14)
+        voltage_red   = Signal(14)
+        self.comb += [
+            self.bat_is_li.eq(startup_select[10]),
+            voltage_full.eq(Mux(self.bat_is_li, 1423, 1367)), # 3.75V Li-ion : 3.6V AA.
+            voltage_red.eq( Mux(self.bat_is_li, 1182, 1071)), # 3.1V  Li-ion : 2.8V AA.
+        ]
+        self.sync += [
+            If(self.reset,
+                self.low_battery.eq(0),
+                self.led_red.eq(0),
+                self.led_green.eq(0),
+                self.led_yellow.eq(0),
+                blink.eq(0),
+                volt.eq(0),
+                volt_sum.eq(0),
+                volt_cnt.eq(0),
+                startup_cnt.eq(0),
+                startup_select.eq(0),
+                startup_done.eq(0),
+                self.transmit_volt.eq(0),
+            ).Else(
+                self.transmit_volt.eq(0),
+                self.debug_system.eq(Cat(volt, Constant(0, 6), startup_select, Constant(0, 1))),
+                If(self.adc_ready,
+                    If(~startup_cnt[9], # Wait ~4s for stable measurements.
+                        startup_cnt.eq(startup_cnt + 1),
+                    ),
+                    If(startup_done,
+                        volt_sum.eq(volt_sum + self.adc_value),
+                        volt_cnt.eq(volt_cnt + 1),
+                    ).Elif(startup_cnt[9] & (self.adc_value >= 700),
+                        # Negative: Li-ion, positive: AA.
+                        If(self.adc_sel,
+                            startup_select.eq(startup_select - 1),
+                        ).Else(
+                            startup_select.eq(startup_select + 1),
+                        )
+                    ),
+                    If((startup_select > 127) | (startup_select < -127),
+                        startup_done.eq(1),
+                    ),
+                ),
+                If(volt_cnt[8],
+                    volt_sum.eq(0),
+                    volt_cnt.eq(0),
+                    volt.eq(volt_sum[8:22]),
+                    self.transmit_volt.eq(1),
+                ),
+                If(self.second,
+                    blink.eq(~blink),
+                ),
+                self.low_battery.eq(0),
+                self.led_red.eq(0),
+                self.led_green.eq(0),
+                self.led_yellow.eq(0),
+                self.led_white.eq(0),
+                If(volt >= 700, # ~1.8V.
+                    If(self.pmic_sys_status[2], # Charging.
+                        If(self.bat_is_li & (volt < voltage_full),
+                            self.led_white.eq(1),
+                        )
+                    ).Else(
+                        If(volt < voltage_red,
+                            self.low_battery.eq(1),
+                            If(blink,
+                                self.led_red.eq(1),
+                            )
+                        )
+                    )
+                ),
+            )
+        ]

@@ -32,6 +32,7 @@ class DebugControl(LiteXModule):
         self.low_battery     = Signal()
         self.system_control  = Signal(16)
         self.volt            = Signal(14)
+        self.adc_value       = Signal(14)
         self.bat_is_li       = Signal()
         self.volume          = Signal(8) # hClk.
         self.headphones      = Signal() # hClk.
@@ -58,6 +59,7 @@ class DebugControl(LiteXModule):
         ])
         self._system_control  = CSRStatus(16, description="System control word (from the ESP32).")
         self._volt            = CSRStatus(14, description="Battery ADC value (averaged).")
+        self._adc_value       = CSRStatus(14, description="Battery ADC value (last raw sample).")
         self._volume          = CSRStatus(8,  description="Codec volume.")
         self._pmic_sys_status = CSRStatus(8,  description="PMIC system status.")
 
@@ -75,4 +77,5 @@ class DebugControl(LiteXModule):
             self._status.fields.bat_is_li.eq(self.bat_is_li),
             self._system_control.status.eq(self.system_control),
             self._volt.status.eq(self.volt),
+            self._adc_value.status.eq(self.adc_value),
         ]
