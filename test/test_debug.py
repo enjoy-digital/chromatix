@@ -26,7 +26,8 @@ def load_chromatic_script():
     spec.loader.exec_module(script)
     return script
 
-CSRS = ["buttons", "status", "system_control", "volt", "adc_value", "volume", "pmic_sys_status"]
+CSRS = ["buttons", "status", "system_control", "volt", "adc_value", "volume", "pmic_sys_status",
+    "uvc_status", "uvc_hbw_count", "uvc_frame_count", "uvc_debug"]
 
 class DebugControlBench(LiteXModule):
     """DebugControl behind a 32-bit CSR bank (CSR i at word address i)."""
@@ -113,7 +114,7 @@ def test_debug_control_status():
         status = (yield from tb.read("status"))
         for i, name in enumerate(fields):
             assert (status >> i) & 0x1 == inputs[name], name
-        for name in CSRS[2:]:
+        for name in CSRS[2:7]:
             assert (yield from tb.read(name)) == inputs[name], name
 
         # Toggle every status bit.

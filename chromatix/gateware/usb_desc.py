@@ -63,12 +63,18 @@ VIDEO_BITS_PER_PIXEL           = 16
 VIDEO_FPS_MIN                  = 1
 VIDEO_FPS_MAX                  = 60
 VIDEO_FPS                      = 60
-VIDEO_MAX_FRAME_SIZE           = VIDEO_WIDTH*VIDEO_HEIGHT*VIDEO_BITS_PER_PIXEL//8
-VIDEO_MIN_BIT_RATE             = VIDEO_MAX_FRAME_SIZE*VIDEO_FPS_MIN*8
-VIDEO_MAX_BIT_RATE             = VIDEO_MAX_FRAME_SIZE*VIDEO_FPS_MAX*8
 VIDEO_FRAME_INTERVAL           = 10_000_000//VIDEO_FPS # In 100ns units.
 VIDEO_PACKET_SIZE              = 1024
-VIDEO_ADDITIONAL_PACKET        = 0
+# Video frames (bFrameIndex 1, 2...): 320x288 (2x2 upscale, default: exact YUY2 chroma since each
+# pixel pair is a single source pixel) and native 160x144.
+VIDEO_FRAMES                   = [(2*VIDEO_WIDTH, 2*VIDEO_HEIGHT), (VIDEO_WIDTH, VIDEO_HEIGHT)]
+
+def video_frame_size(width, height):
+    return width*height*VIDEO_BITS_PER_PIXEL//8
+
+def video_transactions(width, height):
+    """Isochronous transactions per micro-frame (1024 bytes each) required by a frame size."""
+    return 1 if video_frame_size(width, height)*VIDEO_FPS_MAX <= 1012*8000 else 2
 YUY2_GUID                      = [0x59, 0x55, 0x59, 0x32, 0x00, 0x00, 0x10, 0x00,
                                   0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71]
 
@@ -120,7 +126,7 @@ def ascii_hex(nibble):
 class USBDescriptorsLayout:
     """Descriptor ROM content and layout (addresses/lengths), as computed by usb_desc."""
     def __init__(self, vendor_id, product_id, version_bcd, vendor_str, product_str, serial_str,
-        hs_support, self_powered, player_str="XX"):
+        hs_support, self_powered, player_str="XX", uvc_frames=VIDEO_FRAMES):
         # Device Descriptor (+2 bytes padding).
         dev = descriptor(USB_DESCTYPE_DEVICE,
             le(0x0200 if hs_support else 0x0110, 2), # bcdUSB.
@@ -145,8 +151,29 @@ class USBDescriptorsLayout:
         uvc_vc_ot_len     = 9
         uvc_vs_header_len = 14
         uvc_vs_format_len = 27
-        uvc_vs_frame_len  = 30
+        uvc_vs_frame_len  = 30*len(uvc_frames)
         uvc_vs_color_len  = 6
+        # VS Frames.
+        uvc_vs_frames = []
+        for index, (width, height) in enumerate(uvc_frames, start=1):
+            frame_size = video_frame_size(width, height)
+            uvc_vs_frames += descriptor(USB_DESCTYPE_CS_INTERFACE, USB_VS_FRAME_UNCOMPRESSED, index, 1,
+                le(width, 2), le(height, 2),
+                le(frame_size*VIDEO_FPS_MIN*8, 4), le(frame_size*VIDEO_FPS_MAX*8, 4),
+                le(frame_size, 4), le(VIDEO_FRAME_INTERVAL, 4),
+                1, le(VIDEO_FRAME_INTERVAL, 4))
+        # VideoStreaming alternate settings (Alt n: n transactions of 1024 bytes per micro-frame).
+        uvc_vs_alts = []
+        for alt in range(1, max(video_transactions(*f) for f in uvc_frames) + 1):
+            uvc_vs_alts += [
+                *descriptor(USB_DESCTYPE_INTERFACE, UVC_VS_INTERFACE, alt, 1, USB_CLASS_VIDEO,
+                    USB_VIDEO_STREAMING, 0x00, 0x00),
+                # VS Isochronous Endpoint.
+                *descriptor(USB_DESCTYPE_ENDPOINT, 0x80 | VIDEO_DATA_EP_NUM, 0x05,
+                    VIDEO_PACKET_SIZE & 0xff,
+                    (((alt - 1) & 0x3) << 3) | ((VIDEO_PACKET_SIZE >> 8) & 0x7),
+                    1),
+            ]
         uvc = [
             # Interface Association.
             *descriptor(USB_DESCTYPE_INTERFACE_ASSOCIATION, UVC_VC_INTERFACE, 2, USB_CLASS_VIDEO,
@@ -174,25 +201,14 @@ class USBDescriptorsLayout:
             *descriptor(USB_DESCTYPE_CS_INTERFACE, USB_VS_INPUT_HEADER, 1,
                 le(uvc_vs_header_len + uvc_vs_format_len + uvc_vs_frame_len + uvc_vs_color_len, 2),
                 0x80 | VIDEO_DATA_EP_NUM, 0, 2, 1, 0, 0, 1, 0),
-            # VS Format (Uncompressed YUY2).
-            *descriptor(USB_DESCTYPE_CS_INTERFACE, USB_VS_FORMAT_UNCOMPRESSED, 1, 1, YUY2_GUID,
-                VIDEO_BITS_PER_PIXEL, 1, 0, 0, 0, 0),
-            # VS Frame.
-            *descriptor(USB_DESCTYPE_CS_INTERFACE, USB_VS_FRAME_UNCOMPRESSED, 1, 1,
-                le(VIDEO_WIDTH, 2), le(VIDEO_HEIGHT, 2),
-                le(VIDEO_MIN_BIT_RATE, 4), le(VIDEO_MAX_BIT_RATE, 4),
-                le(VIDEO_MAX_FRAME_SIZE, 4), le(VIDEO_FRAME_INTERVAL, 4),
-                1, le(VIDEO_FRAME_INTERVAL, 4)),
+            # VS Format (Uncompressed YUY2, default frame: 1).
+            *descriptor(USB_DESCTYPE_CS_INTERFACE, USB_VS_FORMAT_UNCOMPRESSED, 1, len(uvc_frames),
+                YUY2_GUID, VIDEO_BITS_PER_PIXEL, 1, 0, 0, 0, 0),
+            *uvc_vs_frames,
             # VS Color Matching.
             *descriptor(USB_DESCTYPE_CS_INTERFACE, USB_VS_COLORFORMAT, 1, 1, 4),
-            # VideoStreaming Interface, Alt 1.
-            *descriptor(USB_DESCTYPE_INTERFACE, UVC_VS_INTERFACE, 1, 1, USB_CLASS_VIDEO,
-                USB_VIDEO_STREAMING, 0x00, 0x00),
-            # VS Isochronous Endpoint.
-            *descriptor(USB_DESCTYPE_ENDPOINT, 0x80 | VIDEO_DATA_EP_NUM, 0x05,
-                VIDEO_PACKET_SIZE & 0xff,
-                ((VIDEO_ADDITIONAL_PACKET & 0x3) << 3) | ((VIDEO_PACKET_SIZE >> 8) & 0x7),
-                1),
+            # VideoStreaming Interface, Alt 1..n.
+            *uvc_vs_alts,
         ]
 
         # UAC 2.0 Function.
@@ -319,7 +335,8 @@ class USBDescriptors(LiteXModule):
         product_str  = "Chromatic - Player XX",
         serial_str   = "012345678",
         hs_support   = True,
-        self_powered = False):
+        self_powered = False,
+        uvc_frames   = VIDEO_FRAMES):
         self.layout = layout = USBDescriptorsLayout(
             vendor_id    = vendor_id,
             product_id   = product_id,
@@ -329,6 +346,7 @@ class USBDescriptors(LiteXModule):
             serial_str   = serial_str,
             hs_support   = hs_support,
             self_powered = self_powered,
+            uvc_frames   = uvc_frames,
         )
 
         self.reset           = Signal()

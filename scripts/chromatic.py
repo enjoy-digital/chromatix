@@ -87,15 +87,19 @@ class Chromatic:
 
 # Capture ------------------------------------------------------------------------------------------
 
-def capture(filename, device=UVC_DEVICE, frames=1, fps=2, scale=1):
-    """Capture frame(s) from the Chromatic UVC stream (frames > 1: horizontal strip)."""
+def capture(filename, device=UVC_DEVICE, frames=1, fps=2, scale=1, size=f"{UVC_WIDTH}x{UVC_HEIGHT}"):
+    """
+    Capture frame(s) from the Chromatic UVC stream (frames > 1: horizontal strip), at the native
+    160x144 or at 320x288 (2x2 upscale with exact colors).
+    """
+    width, height = [int(v) for v in size.split("x")]
     filters = [f"fps={fps}"] if frames > 1 else []
     if scale != 1:
-        filters.append(f"scale={UVC_WIDTH*scale}:{UVC_HEIGHT*scale}:flags=neighbor")
+        filters.append(f"scale={width*scale}:{height*scale}:flags=neighbor")
     if frames > 1:
         filters.append(f"tile={frames}x1")
     cmd = ["ffmpeg", "-loglevel", "error", "-y",
-        "-f", "v4l2", "-input_format", "yuyv422", "-video_size", f"{UVC_WIDTH}x{UVC_HEIGHT}",
+        "-f", "v4l2", "-input_format", "yuyv422", "-video_size", size,
         "-i", device]
     if filters:
         cmd += ["-vf", ",".join(filters)]
@@ -148,6 +152,7 @@ def main():
     p.add_argument("--frames", default=1, type=int,   help="Number of frames (tiled horizontally).")
     p.add_argument("--fps",    default=2, type=float, help="Capture rate for multiple frames.")
     p.add_argument("--scale",  default=1, type=int,   help="Scale factor.")
+    p.add_argument("--size",   default="160x144",     help="UVC frame size (160x144 or 320x288).")
 
     p = subparsers.add_parser("sequence", help="Run a sequence (ex: \"press:start wait:2 capture:x.png\").")
     p.add_argument("sequence", help="Space-separated steps (press:a+b[@duration], buttons:a+b, wait:s, capture:file).")
@@ -155,7 +160,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "capture":
-        capture(args.filename, frames=args.frames, fps=args.fps, scale=args.scale)
+        capture(args.filename, frames=args.frames, fps=args.fps, scale=args.scale, size=args.size)
         return
 
     chromatic = Chromatic(host=args.host, port=args.port, csr_csv=args.csr_csv)

@@ -83,12 +83,13 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **Memory system**: AP Memory OPI x8 PSRAM controller with GW5A OSER4/IDES4/IODELAY PHY, startup BIST, ESP32 QSPI slave (GW5A DFFC for the CS asynchronous reset), multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs), framebuffer/OSD line readers.
 - **USB 2.0 PHY**: LiteX USB2PHY (UTMI, High-Speed 480Mbps + Full-Speed, GW5A SerDes).
 - **USB composite device** (UVC + UAC + CDC-ACM): USB PLL, descriptors, control/class requests, EP3 CDC buffers, UVC YUYV packing/packetizer (color space convertor + video FIFO), UAC endpoint, CDC UART at the host baudrate.
+- **UVC 320x288**: the UVC stream is offered at **320x288** (default, 2x2 integer upscale: each YUY2 chroma pair is a single source pixel, so colors are exact) and at native 160x144, selected by the host (bFrameIndex). Lines are replayed at 60MHz from line buffers; 320x288 uses high-bandwidth isochronous transfers (2x1024 bytes per micro-frame, DATA1 -> DATA0, alternate setting 2) and runs at 60 fps. Sizes are selected with `--uvc-sizes` (ex: `--uvc-sizes 160x144` for the original single size).
 - **SoC**: LiteX SoCMini (CSR bus in the sys = gClk domain) with debug/automation registers (virtual buttons, status) and an optional UARTBone debug bridge over the USB CDC port.
 
 ### What's in Verilog (Instance black boxes)
 
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
-- **Gowin USB 2.0 Device Controller** (V1.9.12.04 IP, encrypted): the only vendor IP left.
+- **Gowin USB 2.0 Device Controller** (encrypted): the only vendor IP left. The V1.9.9 netlist is used by default (`--usb-controller v1.9.9`): the V3.4 sources from Gowin V1.9.12.04 (`--usb-controller v3.4`) ignore the isochronous PID input (always DATA0), which rules out the high-bandwidth transfers needed by 320x288 (checked on the wire with the UTMI monitor).
 
 ## Migration Steps
 
@@ -121,6 +122,7 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | 25 | QSPI slave → LiteX/Migen | `qspi_slave.v` |
 | 26 | USB class/device logic → LiteX/Migen (formally checked against the originals) | `usbuvcuart_top.v`, `usb_descriptor_video.v` + defs, `usb_fifo.v`, `sync_rx/tx_pkt_fifo.v`, `uart.v`, `uart_rx.vhd`, `uart_tx.vhd` |
 | 27 | USB 2.0 PHY (HS + FS) → LiteX USB2PHY | `usb2_0_softphy*.v` (encrypted IP) |
+| 28 | UVC 320x288 (2x2 upscale, high-bandwidth isochronous) alongside 160x144; V1.9.9 controller netlist as default | |
 
 **Remaining non-LiteX logic**: the MiSTer Game Boy emulation core (`chromatix/verilog/emu`, kept by design) and the encrypted Gowin USB 2.0 Device Controller IP (`chromatix/verilog/usb`).
 
@@ -210,8 +212,14 @@ litex_server --uart --uart-port /dev/ttyACM0 --uart-baudrate 115200
 ./scripts/chromatic.py status
 ./scripts/chromatic.py press start --duration 0.2
 ./scripts/chromatic.py capture frame.png --frames 4 --scale 2
+./scripts/chromatic.py capture frame320.png --size 320x288
 ./scripts/chromatic.py sequence "press:start wait:1.5 press:a wait:1.5 capture:menu.png"
 ```
+
+The debug variant also has USB debug registers: UVC status/counters (`debug_ctrl_uvc_*`: selected
+frame, high-bandwidth micro-frames, frames sent, FIFO level, dropped lines) and a UTMI packet monitor
+(`usb_utmi_monitor_*`: PID/length/idle clocks of the transmitted data packets and received SOFs after
+the first video packet), to check the USB traffic without a protocol analyzer.
 
 ## Dependencies
 

@@ -30,8 +30,9 @@ def read_rom(dut, addr, length):
     return data
 
 def test_usb_desc_sim():
-    """Device descriptor, VID/PID and product string follow playerNum."""
-    dut     = USBDescriptors()
+    """Device descriptor, VID/PID and product string follow playerNum (original single frame
+    layout: 364-byte configuration)."""
+    dut     = USBDescriptors(uvc_frames=[(160, 144)])
     layout  = dut.layout
     results = {}
 
@@ -139,7 +140,15 @@ def test_usb_desc_configuration():
         assert len(endpoints[(d[2], d[3])]) == d[4]
     assert endpoints[(0, 0)] == [(0x81, 0x3, 64)]   # UVC interrupt.
     assert endpoints[(1, 0)] == []                  # UVC zero-bandwidth.
-    assert endpoints[(1, 1)] == [(0x82, 0x1, 1024)] # UVC isochronous.
+    assert endpoints[(1, 1)] == [(0x82, 0x1, 1024)]        # UVC isochronous, 1 transaction.
+    assert endpoints[(1, 2)] == [(0x82, 0x1, 1024 | 1 << 11)] # UVC isochronous, 2 transactions.
+    # UVC frames: 1 (default): 320x288, 2: 160x144; VS header wTotalLength covers them.
+    frames = [(d[3], d[5] | d[6] << 8, d[7] | d[8] << 8) for t, d in descs if t == 0x24 and d[2] == 0x05]
+    assert frames == [(1, 320, 288), (2, 160, 144)]
+    vs_header = [d for t, d in descs if t == 0x24 and d[2] == 0x01 and len(d) == 14][0]
+    vs_format = [d for t, d in descs if t == 0x24 and d[2] == 0x04][0]
+    assert vs_format[4] == 2 and vs_format[22] == 1 # bNumFrameDescriptors, bDefaultFrameIndex.
+    assert vs_header[4] | vs_header[5] << 8 == 14 + 27 + 2*30 + 6
     assert endpoints[(2, 0)] == [(0x84, 0x3, 8)]    # CDC notification.
     assert endpoints[(3, 0)] == [(0x83, 0x2, 512), (0x03, 0x2, 512)] # CDC bulk.
     assert endpoints[(5, 1)] == [(0x85, 0x1, 24)]   # UAC isochronous.
@@ -265,7 +274,7 @@ class USBDescriptorsWrapper(LiteXModule):
         rst_done = Signal()
         self.sync += rst_done.eq(1)
 
-        self.desc = desc = USBDescriptors()
+        self.desc = desc = USBDescriptors(uvc_frames=[(160, 144)]) # Original (single frame).
         self.comb += [
             desc.reset.eq(self.RESET | ~rst_done),
             desc.player_num.eq(self.playerNum),

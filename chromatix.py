@@ -65,19 +65,22 @@ TIMING_CONSTRAINTS = [
     # USB clocks (USB PLL and USB PHY SerDes clock divider, 120MHz).
     'create_generated_clock -name PHY_CLKOUT -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 16 -multiply_by 40 [get_pins {usb_pll/CLKOUT1}]',
     'create_generated_clock -name fclk_960M  -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 1  -multiply_by 40 [get_pins {usb_pll/CLKOUT0}]',
-    'create_clock -name usbintsclk -period 8.333 [get_nets {usb_hs_clk}]',
+    'create_clock -name usbintsclk -period 8.333 [get_nets {{{usb_sclk}}}]',
     'set_clock_groups -asynchronous -group [get_clocks {PHY_CLKOUT}] -group [get_clocks {fclk_960M}]',
     'set_clock_groups -asynchronous -group [get_clocks {PHY_CLKOUT}] -group [get_clocks {usbintsclk}]',
     'set_clock_groups -asynchronous -group [get_clocks {fclk_960M}] -group [get_clocks {usbintsclk}]',
 ]
 
+USB_SCLK_NET = "usb_hs_clk" # USB2PHY SerDes clock divider output (120MHz).
+
 def add_timing_constraints(platform):
+    constraints = [c.replace("{{{usb_sclk}}}", "{" + USB_SCLK_NET + "}") for c in TIMING_CONSTRAINTS]
     original_build_timing_constraints = platform.toolchain.build_timing_constraints
 
     def build_timing_constraints(toolchain, vns):
         sdc = original_build_timing_constraints(vns)
         with open(sdc[0], "a") as f:
-            f.write("\n" + "\n".join(TIMING_CONSTRAINTS) + "\n")
+            f.write("\n" + "\n".join(constraints) + "\n")
         return sdc
 
     platform.toolchain.build_timing_constraints = MethodType(build_timing_constraints, platform.toolchain)
@@ -92,7 +95,7 @@ class BaseSoC(SoCMini):
     pipeline, audio I2S with TLV320 codec, Game Boy emulation core, memory controller, USB
     UVC+UART, ESP32 MCU communication, battery ADC, button debouncing, and system monitoring.
     """
-    def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200):
+    def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200, uvc_frames=None):
         gclk_freq = int(33.55432e6 / 4)
         hclk_freq = int(33.55432e6 / 2)
 
@@ -502,7 +505,9 @@ class BaseSoC(SoCMini):
 
         # USB UVC+UAC+UART System ------------------------------------------------------------------
 
-        self.usb = usb_dev = USBDevice(platform, clk_24, usb)
+        self.usb = usb_dev = USBDevice(platform, clk_24, usb,
+            with_utmi_monitor = with_debug_bridge,
+            **({} if uvc_frames is None else {"uvc_frames": uvc_frames}))
         self.comb += [
             usb_dev.reset.eq(usb_rst),
             esp32_ctrl.usb_locked.eq(usb_dev.locked),
@@ -648,6 +653,12 @@ class BaseSoC(SoCMini):
             debug_ctrl.volume.eq(codec_ctrl.volume),
             debug_ctrl.headphones.eq(h_headphones),
             debug_ctrl.pmic_sys_status.eq(codec_ctrl.pmic_sys_status),
+            debug_ctrl.uvc_hbw.eq(usb_dev.uvc.hbw),
+            debug_ctrl.uvc_frame_index.eq(usb_dev.uvc.frame_index),
+            debug_ctrl.uvc_hbw_count.eq(usb_dev.uvc.hbw_count),
+            debug_ctrl.uvc_frame_count.eq(usb_dev.uvc.frame_count),
+            debug_ctrl.uvc_debug.eq(Cat(usb_dev.uvc.max_level, Constant(0, 3), usb_dev.uvc.drop_count,
+                usb_dev.uvc.skip_count, usb_dev.uvc.start_count)),
         ]
 
 # Build --------------------------------------------------------------------------------------------
@@ -668,6 +679,8 @@ def main():
     # SoC.
     parser.add_argument("--with-debug-bridge",     action="store_true",                      help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
     parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,                 help="Debug bridge baudrate.")
+    parser.add_argument("--usb-controller", default="v1.9.9", choices=["v1.9.9", "v3.4"], help="Gowin USB 2.0 Device Controller (v1.9.9: high-bandwidth isochronous, required for UVC 320x288).")
+    parser.add_argument("--uvc-sizes", default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
     args = parser.parse_args()
 
     # Gowin IDE selection (bundled libs/Qt are required for the standalone gw_sh).
@@ -679,13 +692,14 @@ def main():
 
     # Platform.
     platform = Platform(toolchain=args.toolchain)
-    add_verilog_sources(platform)
+    add_verilog_sources(platform, usb_controller=args.usb_controller)
     add_timing_constraints(platform)
 
     # SoC.
     soc = BaseSoC(platform,
         with_debug_bridge     = args.with_debug_bridge,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
+        uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
     )
 
     # Build.

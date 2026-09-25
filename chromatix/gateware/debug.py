@@ -37,6 +37,11 @@ class DebugControl(LiteXModule):
         self.volume          = Signal(8) # hClk.
         self.headphones      = Signal()  # hClk.
         self.pmic_sys_status = Signal(8) # hClk.
+        self.uvc_hbw         = Signal()   # USB PHY clock.
+        self.uvc_frame_index = Signal(8)  # USB PHY clock.
+        self.uvc_hbw_count   = Signal(16) # USB PHY clock.
+        self.uvc_frame_count = Signal(16) # USB PHY clock.
+        self.uvc_debug       = Signal(64) # {start_count, skip_count, drop_count, max_level} (debug).
 
         # Virtual Buttons.
         self._buttons = CSRStorage(len(BUTTONS), fields=[
@@ -60,6 +65,13 @@ class DebugControl(LiteXModule):
         self._adc_value       = CSRStatus(14, description="Battery ADC value (last raw sample).")
         self._volume          = CSRStatus(8,  description="Codec volume.")
         self._pmic_sys_status = CSRStatus(8,  description="PMIC system status.")
+        self._uvc_status = CSRStatus(fields=[
+            CSRField("hbw",         size=1,  offset=0,  description="UVC high-bandwidth alternate setting selected."),
+            CSRField("frame_index", size=8,  offset=8,  description="UVC committed frame (1: 320x288, 2: 160x144)."),
+        ])
+        self._uvc_hbw_count   = CSRStatus(16, description="UVC high-bandwidth micro-frames (2nd transactions sent, wraps).")
+        self._uvc_frame_count = CSRStatus(16, description="UVC frames sent (wraps).")
+        self._uvc_debug       = CSRStatus(64, description="UVC debug: {frame starts, skipped frames, dropped lines, max FIFO level}.")
 
         # # #
 
@@ -70,6 +82,12 @@ class DebugControl(LiteXModule):
             MultiReg(self.headphones,      self._status.fields.headphones),
             MultiReg(self.volume,          self._volume.status),
             MultiReg(self.pmic_sys_status, self._pmic_sys_status.status),
+            # Debug counters (quasi-static, may tear while counting).
+            MultiReg(self.uvc_hbw,         self._uvc_status.fields.hbw),
+            MultiReg(self.uvc_frame_index, self._uvc_status.fields.frame_index),
+            MultiReg(self.uvc_hbw_count,   self._uvc_hbw_count.status),
+            MultiReg(self.uvc_frame_count, self._uvc_frame_count.status),
+            MultiReg(self.uvc_debug,       self._uvc_debug.status),
         ]
         self.comb += [
             self._status.fields.menu_disabled.eq(self.menu_disabled),

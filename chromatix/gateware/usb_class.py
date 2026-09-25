@@ -21,6 +21,7 @@ from litex.soc.interconnect import stream
 from litex.soc.cores.uart import RS232PHYTX, RS232PHYRX
 
 from chromatix.gateware.usb import ColorSpaceConvertor, VideoFIFO, CSC_LATENCY
+from chromatix.gateware.usb_desc import VIDEO_FRAMES, video_frame_size, video_transactions
 
 # Constants ----------------------------------------------------------------------------------------
 
@@ -48,7 +49,9 @@ UVC_HEADER_SIZE      = 12
 UVC_PAYLOAD_SIZE     = UVC_PACKET_SIZE
 UVC_MAX_FRAME_SIZE   = UVC_WIDTH*UVC_HEIGHT*16//8
 UVC_FRAME_INTERVAL   = 10000000//UVC_FPS
-UVC_VS_PROBE_CONTROL = 0x01
+UVC_VS_PROBE_CONTROL  = 0x01
+UVC_VS_COMMIT_CONTROL = 0x02
+UVC_SET_CUR          = 0x01
 UVC_GET_CUR          = 0x81
 UVC_GET_MIN          = 0x82
 UVC_GET_MAX          = 0x83
@@ -233,30 +236,74 @@ class CDCACMControl(_ControlHandler):
 # UVC Control --------------------------------------------------------------------------------------
 
 class UVCControl(_ControlHandler):
-    """UVC VideoStreaming probe control GET requests (port of ctrl_uvc; SET requests are ignored)."""
-    def __init__(self, setup):
+    """
+    UVC VideoStreaming probe/commit controls (port of ctrl_uvc).
+
+    With a single frame (the original), the probe is constant and SET requests are ignored. With
+    several frames, the bFrameIndex of SET_CUR(PROBE/COMMIT) is tracked: the probe returns the
+    frame size/payload transfer size of the probed frame (the host selects the VS alternate setting
+    from dwMaxPayloadTransferSize) and frame_index is the committed frame (1: default).
+    """
+    def __init__(self, setup, frames=[(UVC_WIDTH, UVC_HEIGHT)]):
         _ControlHandler.__init__(self, setup)
+        self.frame_index = Signal(8, reset=1) # Committed frame (bFrameIndex).
 
         # # #
 
         s = setup
-        # Probe/commit control (UVC 1.1, 34 bytes), constant values.
-        probe = []
-        probe += [0, 0]                                          # bmHint.
-        probe += [1]                                             # bFormatIndex.
-        probe += [1]                                             # bFrameIndex.
-        probe += [byte(UVC_FRAME_INTERVAL, n) for n in range(4)] # dwFrameInterval.
-        probe += [0, 0]                                          # wKeyFrameRate.
-        probe += [0, 0]                                          # wPFrameRate.
-        probe += [0, 0]                                          # wCompQuality.
-        probe += [0, 0]                                          # wCompWindowSize.
-        probe += [0, 0]                                          # wDelay.
-        probe += [byte(UVC_MAX_FRAME_SIZE, n) for n in range(4)] # dwMaxVideoFrameSize.
-        probe += [byte(UVC_PAYLOAD_SIZE,   n) for n in range(4)] # dwMaxPayloadTransferSize.
-        probe += [byte(60000000,           n) for n in range(4)] # dwClockFrequency.
-        probe += [0]                                             # bmFramingInfo.
-        probe += [0, 0, 0]                                       # bPreferedVersion, bMin/MaxVersion.
-        assert len(probe) == 34
+        # Probe/commit control (UVC 1.1, 34 bytes) of each frame.
+        def probe(index, width, height):
+            payload_size = UVC_PAYLOAD_SIZE*(video_transactions(width, height) if len(frames) > 1 else 1)
+            probe = []
+            probe += [0, 0]                                                   # bmHint.
+            probe += [1]                                                      # bFormatIndex.
+            probe += [index]                                                  # bFrameIndex.
+            probe += [byte(UVC_FRAME_INTERVAL, n) for n in range(4)]          # dwFrameInterval.
+            probe += [0, 0]                                                   # wKeyFrameRate.
+            probe += [0, 0]                                                   # wPFrameRate.
+            probe += [0, 0]                                                   # wCompQuality.
+            probe += [0, 0]                                                   # wCompWindowSize.
+            probe += [0, 0]                                                   # wDelay.
+            probe += [byte(video_frame_size(width, height), n) for n in range(4)] # dwMaxVideoFrameSize.
+            probe += [byte(payload_size, n) for n in range(4)]               # dwMaxPayloadTransferSize.
+            probe += [byte(60000000, n) for n in range(4)]                   # dwClockFrequency.
+            probe += [0]                                                      # bmFramingInfo.
+            probe += [0, 0, 0]                                                # bPreferedVersion, bMin/MaxVersion.
+            assert len(probe) == 34
+            return probe
+        probes = [probe(i, w, h) for i, (w, h) in enumerate(frames, start=1)]
+
+        # Probed/committed frames (SET_CUR data stage, bFrameIndex at offset 3).
+        probe_frame = Signal(8, reset=1)
+        probe_sel   = Signal(max=max(len(frames), 2))
+        if len(frames) > 1:
+            is_set_cur = Signal()
+            valid      = Signal()
+            self.comb += [
+                is_set_cur.eq(s.header_ready & (s.wIndex == UVC_VS_INTERFACE) &
+                    (s.bmRequestType == 0x21) & (s.bRequest == UVC_SET_CUR)),
+                valid.eq((self.rxdat >= 1) & (self.rxdat <= len(frames))),
+            ]
+            self.sync += [
+                If(self.reset,
+                    probe_frame.eq(1),
+                    self.frame_index.eq(1),
+                ).Elif(is_set_cur & self.rxact & self.rxval & (s.cdata_ofs == 3) & valid,
+                    If(s.wValue[8:16] == UVC_VS_PROBE_CONTROL,
+                        probe_frame.eq(self.rxdat),
+                    ).Elif(s.wValue[8:16] == UVC_VS_COMMIT_CONTROL,
+                        self.frame_index.eq(self.rxdat),
+                    )
+                )
+            ]
+            # GET_DEF returns the default frame, GET_CUR/MIN/MAX the probed one.
+            self.comb += If(s.bRequest != UVC_GET_DEF, probe_sel.eq(probe_frame - 1))
+
+        def probe_byte(i):
+            values = [p[i] for p in probes]
+            if len(set(values)) == 1:
+                return values[0]
+            return Array(values)[probe_sel]
 
         self.sync += [
             If(self.reset,
@@ -268,7 +315,7 @@ class UVCControl(_ControlHandler):
                         (s.bRequest == UVC_GET_MIN) | (s.bRequest == UVC_GET_MAX)),
                         If(self.txpop,
                             Case(s.cdata_ofs, {
-                                **{i: self.txdat.eq(probe[i + 1]) for i in range(33)},
+                                **{i: self.txdat.eq(probe_byte(i + 1)) for i in range(33)},
                                 "default": self.txdat.eq(0),
                             }),
                             If(self.last,
@@ -277,7 +324,7 @@ class UVCControl(_ControlHandler):
                         ).Elif(s.cdata_ofs == 0,
                             self.txval.eq(1),
                             self.txdat_len.eq(Mux(s.wLength < 34, s.wLength[:12], 34)),
-                            self.txdat.eq(probe[0]),
+                            self.txdat.eq(probe_byte(0)),
                         )
                     )
                 )
@@ -535,18 +582,31 @@ class CDCUART(LiteXModule):
 
 class UVCVideo(LiteXModule):
     """
-    UVC isochronous video IN endpoint (port of the UVC part of usbuvcuart_top.v).
+    UVC isochronous video IN endpoint (port of the UVC part of usbuvcuart_top.v, extended with
+    integer upscaling and high-bandwidth transfers).
 
-    "video" domain (hClk): RGB666 LCD copy -> YCbCr (4:2:2 YUYV) -> async FIFO.
-    "sys" domain (60MHz UTMI clock): one packet per micro-frame (12-byte UVC header + payload).
+    "video" domain (hClk): the LCD copy (160x144 RGB666, 1 pixel every 3 clocks while enable) is
+    captured in ping-pong line buffers.
+    "sys" domain (60MHz UTMI clock): lines are replayed at the committed frame geometry (160x144
+    or 320x288: each pixel/line repeated, so YUY2 chroma pairs are single source pixels), converted
+    to YCbCr, packed as YUYV in a FIFO and sent with one or two (high-bandwidth, alt setting >= 2)
+    1024-byte transactions per micro-frame (12-byte UVC header per micro-frame payload transfer).
     """
-    def __init__(self):
+    def __init__(self, frames=VIDEO_FRAMES, n_buffers=4, fifo_depth=4096):
+        assert all((w % UVC_WIDTH == 0) and (h % UVC_HEIGHT == 0) and (w//UVC_WIDTH == h//UVC_HEIGHT)
+            for w, h in frames)
+        max_scale = max(w//UVC_WIDTH for w, h in frames)
+        # The FIFO must be able to buffer 2 transactions (+ header) with room for a whole line.
+        assert fifo_depth - (2*UVC_WIDTH*max_scale + 64) >= 2*UVC_PACKET_SIZE - UVC_HEADER_SIZE
         self.reset       = Signal() # sys.
         # Video input ("video" domain).
         self.line_valid  = Signal() # Unused.
         self.enable      = Signal()
         self.frame_valid = Signal()
         self.data        = Signal(18) # {B, G, R}, 6-bit each.
+        # Control (sys).
+        self.frame_index = Signal(8, reset=1) # Committed bFrameIndex.
+        self.hbw         = Signal()           # High-bandwidth alternate setting selected.
         # USB (sys).
         self.sof         = Signal()
         self.txact       = Signal()
@@ -554,34 +614,252 @@ class UVCVideo(LiteXModule):
         self.txdat       = Signal(8)
         self.txdat_len   = Signal(12)
         self.txcork      = Signal()
+        self.txiso_pid   = Signal(4, reset=0b0011) # DATA1 (0b1011) when a 2nd transaction follows.
         self.sof_rise    = Signal() # SOF rising edge (also used by the UAC endpoint).
+        # Statistics (sys).
+        self.hbw_count   = Signal(16) # 2nd transactions sent.
+        self.frame_count = Signal(16) # Frames sent (EOF).
+        self.max_level   = Signal(13) # Maximum FIFO level.
+        self.drop_count  = Signal(16) # Dropped lines (video domain).
+        self.skip_count  = Signal(16) # Skipped frames (video domain).
+        self.start_count = Signal(16) # Frame starts (replay).
 
         # # #
 
+        # Line Capture (video) ---------------------------------------------------------------------
+        # Pixels are captured at the middle of their 3 clocks into one of n_buffers line buffers;
+        # a complete line is published with a toggle (and freed by the replay with another toggle)
+        # so only single-bit signals cross clock domains.
+        sel_bits   = log2_int(n_buffers)
+        line_bits  = log2_int(UVC_WIDTH, need_pow2=False)
+        stride     = 2**line_bits
+        storage    = Memory(18, n_buffers*stride)
+        wrport     = storage.get_port(write_capable=True, clock_domain="video")
+        rdport     = storage.get_port(clock_domain="sys")
+        self.specials += storage, wrport, rdport
+
+        w_phase     = Signal(2)
+        w_sel       = Signal(sel_bits)
+        w_idx       = Signal(line_bits + 1)
+        w_drop      = Signal()                # Line dropped (buffer still in use).
+        w_tog       = Signal(n_buffers)       # Published lines.
+        w_frame_tog = Signal()                # Frame starts.
+        w_enable_d  = Signal()
+        w_fv_d      = Signal()
+        w_skip      = Signal()                # Frame skipped (replay still busy with the previous one).
+        w_broken    = Signal()                # Frame with dropped lines (replay will never complete it).
+        r_tog       = Signal(n_buffers)       # Consumed lines (sys).
+        r_tog_v     = Signal(n_buffers)
+        r_busy      = Signal()                # Replay busy (sys).
+        r_busy_v    = Signal()
+        self.specials += [
+            MultiReg(r_tog,  r_tog_v,  odomain="video"),
+            MultiReg(r_busy, r_busy_v, odomain="video"),
+        ]
+        self.comb += [
+            wrport.adr.eq(Cat(w_idx[:line_bits], w_sel)),
+            wrport.dat_w.eq(self.data),
+            wrport.we.eq(self.enable & (w_phase == 1) & (w_idx < UVC_WIDTH) & ~w_drop & ~w_skip),
+        ]
+        self.sync.video += [
+            w_enable_d.eq(self.enable),
+            w_fv_d.eq(self.frame_valid),
+            If(self.frame_valid & ~w_fv_d,
+                # Frame start (skipped when the previous frame is still being sent, ex when the USB
+                # bandwidth is lower than the video rate).
+                If(r_busy_v & ~w_broken,
+                    w_skip.eq(1),
+                    self.skip_count.eq(self.skip_count + 1),
+                ).Else(
+                    # Accepted (the replay realigns on it, also aborting a broken frame).
+                    w_skip.eq(0),
+                    w_broken.eq(0),
+                    w_frame_tog.eq(~w_frame_tog),
+                ),
+                w_sel.eq(0),
+                w_idx.eq(0),
+                w_phase.eq(0),
+                w_drop.eq(0),
+            ).Elif(self.enable,
+                If(~w_enable_d & ~w_skip,
+                    # Line start: drop it if its buffer has not been replayed yet.
+                    If(((w_tog ^ r_tog_v) >> w_sel)[0],
+                        w_drop.eq(1),
+                        w_broken.eq(1),
+                        self.drop_count.eq(self.drop_count + 1),
+                    ).Else(
+                        w_drop.eq(0),
+                    )
+                ),
+                If(w_phase == 2,
+                    w_phase.eq(0),
+                    If(w_idx < UVC_WIDTH, w_idx.eq(w_idx + 1)),
+                ).Else(
+                    w_phase.eq(w_phase + 1),
+                )
+            ).Elif(w_enable_d,
+                # Line end: publish it.
+                If(~w_drop & ~w_skip,
+                    w_tog.eq(w_tog ^ (1 << w_sel)),
+                    w_sel.eq(w_sel + 1),
+                ),
+                w_idx.eq(0),
+                w_phase.eq(0),
+            )
+        ]
+
+        # Line Replay (sys) ------------------------------------------------------------------------
+        w_tog_s   = Signal(n_buffers)
+        frame_s   = Signal()
+        frame_d   = Signal()
+        self.specials += [
+            MultiReg(w_tog,       w_tog_s, odomain="sys"),
+            MultiReg(w_frame_tog, frame_s, odomain="sys"),
+        ]
+        frame_start = Signal()
+        self.sync += frame_d.eq(frame_s)
+        self.comb += frame_start.eq(frame_s != frame_d)
+
+        # Frame geometry, latched at frame start.
+        scale      = Signal(max=max_scale + 1, reset=1)
+        width      = Signal(10, reset=UVC_WIDTH)
+        height     = Signal(10, reset=UVC_HEIGHT)
+        scale_next = Signal(max=max_scale + 1)
+        self.comb += Case(self.frame_index, {
+            **{i: scale_next.eq(w//UVC_WIDTH) for i, (w, h) in enumerate(frames, start=1)},
+            "default": scale_next.eq(frames[0][0]//UVC_WIDTH),
+        })
+
+        r_sel      = Signal(sel_bits)
+        r_px       = Signal(line_bits + 1)
+        r_dup      = Signal(max=max(max_scale, 2))
+        r_pass     = Signal(max=max(max_scale, 2))
+        r_phase    = Signal(2)
+        r_lines    = Signal(10)
+        r_gap      = Signal(5)
+        r_enable   = Signal()
+        v_frame_valid = Signal()
+        v_enable      = Signal()
+        v_data        = Signal(18)
+        line_ready = Signal()
+        fifo_room  = Signal()
+        self.comb += line_ready.eq(((w_tog_s ^ r_tog) >> r_sel)[0])
+
+        last_packet = Signal() # Last data of the frame buffered (packetizer).
+        eof_pending = Signal() # Frame end not sent yet (until the EOF transfer is done).
+        R_IDLE, R_LEAD, R_SETTLE, R_WAIT, R_PIXELS, R_GAP = range(6)
+        r_state = Signal(3)
+        self.comb += [
+            r_enable.eq(r_state == R_PIXELS),
+            r_busy.eq(r_state != R_IDLE),
+        ]
+        self.sync += [
+            If(self.reset,
+                r_state.eq(R_IDLE),
+                v_frame_valid.eq(0),
+                r_tog.eq(0),
+            ).Elif(frame_start,
+                # Realign to the source frame (skip the lines of the previous one): frame_valid is
+                # low for 16 clocks (lead), then high until all the lines are sent.
+                r_state.eq(R_LEAD),
+                v_frame_valid.eq(0),
+                r_tog.eq(w_tog_s),
+                r_sel.eq(0),
+                r_lines.eq(0),
+                r_pass.eq(0),
+                r_gap.eq(0),
+                scale.eq(scale_next),
+                width.eq(UVC_WIDTH*scale_next),
+                height.eq(UVC_HEIGHT*scale_next),
+            ).Else(
+                Case(r_state, {
+                    R_LEAD: [
+                        # Wait for the previous frame end to be sent (the FIFO is reset at the
+                        # start of the frame).
+                        If(r_gap != 15, r_gap.eq(r_gap + 1)),
+                        If((r_gap == 15) & ~eof_pending,
+                            r_gap.eq(0),
+                            v_frame_valid.eq(1),
+                            r_state.eq(R_SETTLE),
+                        )
+                    ],
+                    R_SETTLE: [
+                        # Let the FIFO reset (on the frame_valid rising edge) complete.
+                        r_gap.eq(r_gap + 1),
+                        If(r_gap == 15,
+                            r_gap.eq(0),
+                            r_state.eq(R_WAIT),
+                        )
+                    ],
+                    R_WAIT: [
+                        If(r_lines == height,
+                            v_frame_valid.eq(0),
+                            r_state.eq(R_IDLE),
+                        ).Elif(line_ready & fifo_room,
+                            r_px.eq(0),
+                            r_dup.eq(0),
+                            r_phase.eq(0),
+                            r_state.eq(R_PIXELS),
+                        )
+                    ],
+                    R_PIXELS: [
+                        r_phase.eq(r_phase + 1),
+                        If(r_phase == 2,
+                            r_phase.eq(0),
+                            r_dup.eq(r_dup + 1),
+                            If(r_dup == (scale - 1),
+                                r_dup.eq(0),
+                                r_px.eq(r_px + 1),
+                                If(r_px == (UVC_WIDTH - 1),
+                                    r_state.eq(R_GAP),
+                                )
+                            )
+                        )
+                    ],
+                    R_GAP: [
+                        # Blanking: ends the line for the packer, lets the CSC pipeline drain.
+                        r_gap.eq(r_gap + 1),
+                        If(r_gap == 15,
+                            r_gap.eq(0),
+                            r_lines.eq(r_lines + 1),
+                            r_pass.eq(r_pass + 1),
+                            If(r_pass == (scale - 1),
+                                # Line replayed scale times: free its buffer.
+                                r_pass.eq(0),
+                                r_tog.eq(r_tog ^ (1 << r_sel)),
+                                r_sel.eq(r_sel + 1),
+                            ),
+                            r_state.eq(R_WAIT),
+                        )
+                    ],
+                })
+            )
+        ]
+        # Synchronous read: data of pixel r_px available 1 clock later, enable delayed to match.
+        self.comb += rdport.adr.eq(Cat(r_px[:line_bits], r_sel))
+        self.sync += v_enable.eq(r_enable)
+        self.comb += v_data.eq(rdport.dat_r)
+
         # Video: Color Space Conversion ------------------------------------------------------------
         csc = ColorSpaceConvertor(clock_pins=False)
-        csc = ClockDomainsRenamer("video")(csc)
         self.csc = csc
-        reset_v = Signal()
-        self.specials += MultiReg(self.reset, reset_v, odomain="video")
         self.comb += [
-            csc.I_rst_n.eq(~reset_v),
-            csc.I_din0.eq(Cat(Constant(0, 2), self.data[0:6])),   # R.
-            csc.I_din1.eq(Cat(Constant(0, 2), self.data[6:12])),  # G.
-            csc.I_din2.eq(Cat(Constant(0, 2), self.data[12:18])), # B.
-            csc.I_dinvalid.eq(self.enable),
+            csc.I_rst_n.eq(~self.reset),
+            csc.I_din0.eq(Cat(Constant(0, 2), v_data[0:6])),   # R.
+            csc.I_din1.eq(Cat(Constant(0, 2), v_data[6:12])),  # G.
+            csc.I_din2.eq(Cat(Constant(0, 2), v_data[12:18])), # B.
+            csc.I_dinvalid.eq(v_enable),
         ]
         y_enable  = csc.O_doutvalid
         y, cb, cr = csc.O_dout0, csc.O_dout1, csc.O_dout2
-        # Frame valid delayed to match the CSC latency (line_valid is unused: lines are delimited
-        # by enable).
+        # Frame valid delayed to match the CSC latency.
         y_frame_valid = Signal()
-        fv_sr         = Signal(CSC_LATENCY)
-        self.sync.video += [
-            If(reset_v,
+        fv_sr         = Signal(CSC_LATENCY + 1)
+        self.sync += [
+            If(self.reset,
                 fv_sr.eq(0),
             ).Else(
-                fv_sr.eq(Cat(self.frame_valid, fv_sr[:-1])),
+                fv_sr.eq(Cat(v_frame_valid, fv_sr[:-1])),
             )
         ]
         self.comb += y_frame_valid.eq(fv_sr[-1])
@@ -594,7 +872,7 @@ class UVCVideo(LiteXModule):
         count_y          = Signal(10)
         h_image_eof      = Signal()
         count3           = Signal(3)
-        self.sync.video += [
+        self.sync += [
             y_frame_valid_r1.eq(y_frame_valid),
             y_enable_r1.eq(y_enable),
             If(~y_enable,
@@ -604,7 +882,7 @@ class UVCVideo(LiteXModule):
             ),
         ]
         self.comb += h_sof.eq(y_frame_valid & ~y_frame_valid_r1)
-        self.sync.video += [
+        self.sync += [
             If(h_sof,
                 count_x.eq(0),
                 count_y.eq(0),
@@ -617,7 +895,7 @@ class UVCVideo(LiteXModule):
                     )
                 ).Elif(y_enable_r1,
                     count_y.eq(count_y + 1),
-                    If(count_y == (UVC_HEIGHT - 1),
+                    If(count_y == (height - 1),
                         h_image_eof.eq(1),
                     ),
                     count_x.eq(0),
@@ -642,7 +920,7 @@ class UVCVideo(LiteXModule):
         self.comb += [
             sum_u.eq(mu + cb),
             sum_v.eq(mv + cr),
-            can_write.eq((count_x < UVC_WIDTH) & y_enable),
+            can_write.eq((count_x < width) & y_enable),
             h_enable2.eq(count3[2] & vnu & can_write),
             h_enable1.eq(count3[0] & vnu & can_write),
             h_enable0.eq(((count3[0] & ~vnu) | (count3[1] & vnu)) & can_write),
@@ -656,14 +934,14 @@ class UVCVideo(LiteXModule):
                 fram_d.eq(sum_v[1:9]),
             ),
         ]
-        self.sync.video += [
+        self.sync += [
             If(store_u, mu.eq(cb)),
             If(store_v, mv.eq(cr)),
         ]
 
-        # FIFO (video -> sys) ----------------------------------------------------------------------
-        fifo = VideoFIFO(clock_pins=False)
-        fifo = ClockDomainsRenamer({"write": "video", "read": "sys"})(fifo)
+        # FIFO -------------------------------------------------------------------------------------
+        fifo = VideoFIFO(depth=fifo_depth, clock_pins=False)
+        fifo = ClockDomainsRenamer({"write": "sys", "read": "sys"})(fifo)
         self.fifo = fifo
         rden = Signal()
         self.comb += [
@@ -672,6 +950,8 @@ class UVCVideo(LiteXModule):
             fifo.WrEn.eq(h_enable0 | h_enable1 | h_enable2),
             fifo.RdEn.eq(rden),
             fifo.AlmostFullTh.eq(UVC_PACKET_SIZE - UVC_HEADER_SIZE),
+            # Room for a whole output line (+ margin for the level latency).
+            fifo_room.eq(fifo.Rnum <= (fifo_depth - 2*UVC_WIDTH*max_scale - 64)),
         ]
 
         # USB: Packetizer (sys) --------------------------------------------------------------------
@@ -679,9 +959,10 @@ class UVCVideo(LiteXModule):
         txact_d1     = Signal()
         txact_fall   = Signal()
         state        = Signal(3, reset=0b001) # IDLE (001), UNCORK (010), TXACTIVE (100).
-        last_packet  = Signal()
         last_read    = Signal()
         read_active  = Signal()
+        second       = Signal() # 2nd transaction of the micro-frame (payload only).
+        two          = Signal() # 2 transactions in this micro-frame.
         byte_count   = Signal(11)
         pts_counter  = Signal(32)
         pts_reg      = Signal(32)
@@ -692,7 +973,11 @@ class UVCVideo(LiteXModule):
         sof_d1       = Signal()
         eof_sr       = Signal(4)
         len_m1       = Signal(32)
+        preload      = Signal()
+        DATA0, DATA1 = 0b0011, 0b1011
         IDLE, UNCORK, TXACTIVE = 0b001, 0b010, 0b100
+        # 2 transactions: header + 1012 bytes, then 1024 bytes (only when all are buffered).
+        two_bytes    = 2*UVC_PACKET_SIZE - UVC_HEADER_SIZE
 
         self.comb += txact_fall.eq(txact_d1 & ~txact_d0)
         self.sync += [
@@ -705,30 +990,53 @@ class UVCVideo(LiteXModule):
             )
         ]
         self.sync += [
+            preload.eq(0),
             If(self.reset,
                 state.eq(IDLE),
+                self.txiso_pid.eq(DATA0),
+                second.eq(0),
             ).Elif(self.sof,
                 # Note: the FIFO almost full triggers at 1012 bytes, while 1011 are needed for a
                 # full packet (one extra byte is always kept at the FIFO output).
-                If(fifo.Almost_Full,
+                two.eq(0),
+                If(self.hbw & (fifo.Rnum >= two_bytes),
                     self.txdat_len.eq(UVC_PACKET_SIZE),
+                    self.txiso_pid.eq(DATA1),
+                    two.eq(1),
+                    last_read.eq(0),
+                    read_active.eq(1),
+                ).Elif(fifo.Almost_Full,
+                    self.txdat_len.eq(UVC_PACKET_SIZE),
+                    self.txiso_pid.eq(DATA0),
                     last_read.eq(0),
                     read_active.eq(1),
                 ).Elif(last_packet,
                     self.txdat_len.eq(fifo.Rnum[:12] + UVC_HEADER_SIZE),
+                    self.txiso_pid.eq(DATA0),
                     last_read.eq(1),
                     read_active.eq(1),
                 ).Else(
                     self.txdat_len.eq(UVC_HEADER_SIZE),
+                    self.txiso_pid.eq(DATA0),
                     last_read.eq(0),
                     read_active.eq(0),
                 ),
+                second.eq(0),
                 self.txcork.eq(0),
                 state.eq(UNCORK),
             ).Elif(self.txact & (state == UNCORK),
                 state.eq(TXACTIVE),
             ).Elif(~self.txact & (state == TXACTIVE),
-                state.eq(IDLE),
+                If(two & ~second,
+                    # Re-arm for the 2nd transaction (payload only, 1st byte preloaded).
+                    self.txdat_len.eq(UVC_PACKET_SIZE),
+                    self.txiso_pid.eq(DATA0),
+                    second.eq(1),
+                    preload.eq(1),
+                    state.eq(UNCORK),
+                ).Else(
+                    state.eq(IDLE),
+                )
             )
         ]
         self.sync += [
@@ -752,10 +1060,14 @@ class UVCVideo(LiteXModule):
                 pts_reg.eq(pts_counter),
             ),
         ]
-        self.comb += rden.eq(self.txpop & (byte_count >= (UVC_HEADER_SIZE - 1)) &
-                                          (byte_count <  (UVC_PACKET_SIZE - 1)) & read_active)
+        self.comb += If(second,
+            rden.eq(preload | (self.txpop & (byte_count < (UVC_PACKET_SIZE - 1)))),
+        ).Else(
+            rden.eq(self.txpop & (byte_count >= (UVC_HEADER_SIZE - 1)) &
+                                 (byte_count <  (UVC_PACKET_SIZE - 1)) & read_active),
+        )
 
-        # End of image (video -> sys).
+        # End of image.
         p_image_eof = Signal()
         self.sync += eof_sr.eq(Cat(h_image_eof, eof_sr[:3]))
         self.comb += p_image_eof.eq(eof_sr[2:4] == 0b01)
@@ -764,6 +1076,23 @@ class UVCVideo(LiteXModule):
                 last_packet.eq(1),
             ).Elif(~self.sof & last_read,
                 last_packet.eq(0),
+            )
+        ]
+        self.sync += [
+            If(self.txact & (state == UNCORK) & second, self.hbw_count.eq(self.hbw_count + 1)),
+            If(txact_fall & last_read, self.frame_count.eq(self.frame_count + 1)),
+        ]
+        self.sync += [
+            If(fifo.Rnum > self.max_level, self.max_level.eq(fifo.Rnum)),
+            If(frame_start, self.start_count.eq(self.start_count + 1)),
+        ]
+        self.sync += [
+            If(self.reset,
+                eof_pending.eq(0),
+            ).Elif(p_image_eof,
+                eof_pending.eq(1),
+            ).Elif(txact_fall & last_read,
+                eof_pending.eq(0),
             )
         ]
 
@@ -790,7 +1119,7 @@ class UVCVideo(LiteXModule):
             )
         ]
 
-        # Packet data: UVC payload header, then FIFO data.
+        # Packet data: UVC payload header (1st transaction), then FIFO data.
         self.comb += len_m1.eq(self.txdat_len - 1)
         header = {
             1: pts_reg[0:8],   2: pts_reg[8:16],  3: pts_reg[16:24], 4: pts_reg[24:32], # dwPresentationTime.
@@ -800,15 +1129,21 @@ class UVCVideo(LiteXModule):
         self.sync += [
             If(self.sof,
                 self.txdat.eq(UVC_HEADER_SIZE), # bHeaderLength.
+            ).Elif(preload,
+                self.txdat.eq(fifo.Q),
             ).Elif(self.txpop,
-                Case(byte_count, {
-                    0: self.txdat.eq(Mux(last_read, frame | 0x02, frame)), # bmHeaderInfo (EOF on last).
-                    **{n: self.txdat.eq(v) for n, v in header.items()},
-                    "default": If(byte_count >= len_m1,
-                        self.txdat.eq(UVC_HEADER_SIZE),
-                    ).Else(
-                        self.txdat.eq(fifo.Q),
-                    ),
-                })
+                If(second,
+                    self.txdat.eq(fifo.Q),
+                ).Else(
+                    Case(byte_count, {
+                        0: self.txdat.eq(Mux(last_read, frame | 0x02, frame)), # bmHeaderInfo (EOF on last).
+                        **{n: self.txdat.eq(v) for n, v in header.items()},
+                        "default": If(byte_count >= len_m1,
+                            self.txdat.eq(UVC_HEADER_SIZE),
+                        ).Else(
+                            self.txdat.eq(fifo.Q),
+                        ),
+                    })
+                )
             )
         ]

@@ -12,7 +12,8 @@ import pytest
 from litex.soc.integration.builder import Builder
 
 from chromatix import Platform
-from chromatix.gateware.sources import VERILOG_PATH, VERILOG_SOURCES, add_verilog_sources
+from chromatix.gateware.sources import VERILOG_PATH, VERILOG_SOURCES, USB_CONTROLLER_SOURCES
+from chromatix.gateware.sources import add_verilog_sources
 
 # Helpers ------------------------------------------------------------------------------------------
 
@@ -28,17 +29,19 @@ def load_target():
 
 def test_verilog_sources():
     """All the Verilog/VHDL sources exist (MiSTer submodule initialized) and get the right language."""
-    for source in VERILOG_SOURCES:
+    for source in VERILOG_SOURCES + sum(USB_CONTROLLER_SOURCES.values(), []):
         assert os.path.exists(os.path.join(VERILOG_PATH, source)), source
-    platform = Platform()
-    add_verilog_sources(platform)
-    sources  = {os.path.relpath(path, VERILOG_PATH): language for path, language, library in platform.sources}
-    assert sorted(sources) == sorted(VERILOG_SOURCES)
-    for source, language in sources.items():
-        if source.endswith(".vhd"):
-            assert language == "vhdl", source
-        else:
-            assert language in ["verilog", "systemverilog"], source
+    for usb_controller in USB_CONTROLLER_SOURCES:
+        platform = Platform()
+        add_verilog_sources(platform, usb_controller=usb_controller)
+        sources  = {os.path.relpath(path, VERILOG_PATH): language for path, language, library in platform.sources}
+        expected = VERILOG_SOURCES + USB_CONTROLLER_SOURCES[usb_controller]
+        assert sorted(sources) == sorted(expected)
+        for source, language in sources.items():
+            if source.endswith(".vhd"):
+                assert language == "vhdl", source
+            else:
+                assert language in ["verilog", "systemverilog"], source
 
 # SoC Elaboration ----------------------------------------------------------------------------------
 

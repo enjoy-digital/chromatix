@@ -44,13 +44,25 @@ VERILOG_SOURCES = [
     "Gameboy_MiSTer/rtl/hdma.v",
     "Gameboy_MiSTer/rtl/timer.v",
 
-    # USB: Gowin USB 2.0 Device Controller (class logic in gateware/usb_*.py).
-    "usb/usb_device_controller/usb_device_controller_top.v",
-    "usb/usb_device_controller/usb_device_controller.v",
 ]
 
-def add_verilog_sources(platform):
-    for source in VERILOG_SOURCES:
+# USB: Gowin USB 2.0 Device Controller (class logic in gateware/usb_*.py): V1.9.9 (pre-synthesized
+# netlist, default: honors the isochronous PID input, required for high-bandwidth UVC 320x288) or
+# V3.4 (Gowin V1.9.12.04 sources: always sends DATA0, limited to 1 isochronous transaction per
+# micro-frame).
+USB_CONTROLLER_SOURCES = {
+    "v3.4": [
+        "usb/usb_device_controller/usb_device_controller_top.v",
+        "usb/usb_device_controller/usb_device_controller.v",
+    ],
+    "v1.9.9": [
+        "usb/usb_device_controller_v1.9.9/usb_device_controller.v",
+    ],
+}
+
+def add_verilog_sources(platform, usb_controller="v1.9.9"):
+    sources = VERILOG_SOURCES + USB_CONTROLLER_SOURCES[usb_controller]
+    for source in sources:
         path = os.path.join(VERILOG_PATH, source)
         if not os.path.exists(path):
             raise FileNotFoundError(f"{path} not found (git submodule update --init?).")

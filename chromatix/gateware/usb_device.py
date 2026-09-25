@@ -8,9 +8,8 @@
 Chromatic USB composite device: UVC (video) + UAC (audio) + CDC-ACM (UART bridge), port of
 usbuvcuart_top.v.
 
-Only the Gowin USB 2.0 Device Controller IP is still instantiated; the PLL, UTMI PHY (LiteX
-USB2PHY), descriptors, class handlers, endpoint buffers, UVC/UAC data paths and CDC UART are
-LiteX/Migen.
+Only the Gowin USB 2.0 Device Controller IP is still instantiated; the PLL, UTMI PHY, descriptors,
+class handlers, endpoint buffers, UVC/UAC data paths and CDC UART are LiteX/Migen.
 
 Clock domains: "phy" (60MHz UTMI clock, created here), "usb_960" (960MHz PHY oversampling clock,
 created here), "gclk" (video and audio samples).
@@ -20,12 +19,16 @@ from migen import *
 
 from litex.gen import *
 
+from migen.genlib.cdc import MultiReg
+
+from litex.soc.interconnect.csr import *
+
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
 from litex.soc.cores.usb2_phy.phy        import USB2PHY
 from litex.soc.cores.usb2_phy.gowin_gw5a import GW5AUSB2PHYCRG
 
 from chromatix.gateware.usb_class import *
-from chromatix.gateware.usb_desc  import USBDescriptors
+from chromatix.gateware.usb_desc  import USBDescriptors, VIDEO_FRAMES
 from chromatix.gateware.usb_fifo  import USBEndpointFIFO
 
 # USB Device ---------------------------------------------------------------------------------------
@@ -33,9 +36,9 @@ from chromatix.gateware.usb_fifo  import USBEndpointFIFO
 class USBDevice(LiteXModule):
     """
     USB composite device (UVC + UAC + CDC-ACM) with its own PLL (clk_24 -> 60MHz "phy" / 960MHz
-    "usb_960"), Gowin USB 2.0 Device Controller and UTMI PHY (LiteX USB2PHY).
+    "usb_960"), Gowin USB 2.0 Device Controller and LiteX UTMI PHY (USB2PHY).
     """
-    def __init__(self, platform, clk_24, pads):
+    def __init__(self, platform, clk_24, pads, uvc_frames=VIDEO_FRAMES, with_utmi_monitor=False):
         self.reset       = Signal() # Held in reset (PLL too) when 1 (async).
         self.locked      = Signal()
         self.player_num  = Signal(8)
@@ -102,7 +105,7 @@ class USBDevice(LiteXModule):
         alt_set   = Signal()
 
         # Descriptors ------------------------------------------------------------------------------
-        self.desc = desc = ClockDomainsRenamer("phy")(USBDescriptors())
+        self.desc = desc = ClockDomainsRenamer("phy")(USBDescriptors(uvc_frames=uvc_frames))
         self.comb += [
             desc.reset.eq(rst),
             desc.player_num.eq(self.player_num),
@@ -121,8 +124,11 @@ class USBDevice(LiteXModule):
             sp.txpop.eq(txpop),
         ]
         handlers = []
-        for name, cls in [("ctrl_uart", CDCACMControl), ("ctrl_uvc", UVCControl), ("ctrl_uac", UACControl)]:
-            h = ClockDomainsRenamer("phy")(cls(sp))
+        for name, cls, kwargs in [
+            ("ctrl_uart", CDCACMControl, {}),
+            ("ctrl_uvc",  UVCControl,    {"frames": uvc_frames}),
+            ("ctrl_uac",  UACControl,    {})]:
+            h = ClockDomainsRenamer("phy")(cls(sp, **kwargs))
             self.add_module(name=name, module=h)
             self.comb += [
                 h.reset.eq(rst),
@@ -164,9 +170,11 @@ class USBDevice(LiteXModule):
         })
 
         # UVC --------------------------------------------------------------------------------------
-        self.uvc = uvc = ClockDomainsRenamer({"sys": "phy", "video": "gclk"})(UVCVideo())
+        self.uvc = uvc = ClockDomainsRenamer({"sys": "phy", "video": "gclk"})(UVCVideo(frames=uvc_frames))
         self.comb += [
             uvc.reset.eq(rst),
+            uvc.frame_index.eq(self.ctrl_uvc.frame_index),
+            uvc.hbw.eq(alts[UVC_VS_INTERFACE].alt_o >= 2),
             uvc.line_valid.eq(self.line_valid),
             uvc.enable.eq(self.enable),
             uvc.frame_valid.eq(self.frame_valid),
@@ -232,6 +240,8 @@ class USBDevice(LiteXModule):
             ("rxvalid", 1), ("rxerror",  1), ("linestate", 2), ("opmode", 2), ("xcvrselect", 2),
             ("termselect", 1), ("reset", 1),
         ])
+        if with_utmi_monitor:
+            self.utmi_monitor = UTMIMonitor(utmi)
         d = desc
         self.specials += Instance("USB_Device_Controller_Top", name="u_usb_device_controller_top",
             i_clk_i                  = ClockSignal("phy"),
@@ -243,7 +253,9 @@ class USBDevice(LiteXModule):
             i_txdat_i                = txdat,
             i_txval_i                = txval,
             i_txdat_len_i            = txdat_len,
-            i_txiso_pid_i            = Constant(0b0011, 4), # DATA0 (HS, 1 packet per micro-frame).
+            # Isochronous PID: not sampled with endpt by the controller, so driven by the video
+            # endpoint (DATA1 -> DATA0 for high-bandwidth micro-frames, else DATA0).
+            i_txiso_pid_i            = uvc.txiso_pid,
             i_txcork_i               = txcork,
             o_txpop_o                = txpop,
             o_txact_o                = txact,
@@ -315,4 +327,106 @@ class USBDevice(LiteXModule):
             utmi.rxactive.eq(usb_phy.rx_active),
             utmi.rxerror.eq(usb_phy.rx_error),
             utmi.linestate.eq(usb_phy.line_state),
+        ]
+
+# UTMI Monitor -------------------------------------------------------------------------------------
+
+class UTMIMonitor(LiteXModule):
+    """
+    Debug: records the transmitted data packets and received SOFs (PID, length, idle clocks before
+    the packet) after the first long (> 600 bytes, video) transmitted packet.
+
+    Packets are captured in the "phy" domain; entries are read from the CSRs (sys domain) with
+    sel -> data.
+    """
+    def __init__(self, utmi, depth=32):
+        self._control = CSRStorage(fields=[
+            CSRField("arm", size=1, offset=0, pulse=True, description="Re-arm the capture."),
+            CSRField("sel", size=8, offset=8, description="Entry to read."),
+        ])
+        self._status = CSRStatus(fields=[
+            CSRField("count", size=8, offset=0, description="Captured entries."),
+        ])
+        self._data = CSRStatus(32, description="Entry: [31] tx, [30:23] PID, [22:12] length, [11:0] idle clocks (sat.).")
+
+        # # #
+
+        mem = Memory(32, depth)
+        wr  = mem.get_port(write_capable=True, clock_domain="phy")
+        rd  = mem.get_port(async_read=True, clock_domain="phy")
+        self.specials += mem, wr, rd
+
+        arm_toggle   = Signal()
+        arm_toggle_p = Signal()
+        arm_toggle_d = Signal()
+        sel_p        = Signal(8)
+        count        = Signal(8)
+        data_p       = Signal(32)
+        self.sync += If(self._control.fields.arm, arm_toggle.eq(~arm_toggle))
+        self.specials += [
+            MultiReg(arm_toggle,                 arm_toggle_p, odomain="phy"),
+            MultiReg(self._control.fields.sel,   sel_p,        odomain="phy"),
+            MultiReg(count,                      self._status.fields.count),
+            MultiReg(data_p,                     self._data.status),
+        ]
+
+        triggered = Signal()
+        tx_d      = Signal()
+        rx_d      = Signal()
+        first     = Signal()
+        pid       = Signal(8)
+        length    = Signal(11)
+        idle      = Signal(12)
+        gap       = Signal(12)
+        tx        = Signal()
+        active    = Signal()
+        record    = Signal()
+        self.comb += [
+            active.eq(utmi.txvalid | utmi.rxactive),
+            rd.adr.eq(sel_p),
+            data_p.eq(rd.dat_r),
+            wr.adr.eq(count),
+            wr.dat_w.eq(Cat(gap, length, pid, tx)),
+            # Transmitted data packets (no handshakes) and received SOFs (micro-frame delimiters).
+            record.eq(Mux(tx, (pid != 0x5a) & (pid != 0xd2), pid == 0xa5)),
+        ]
+        self.sync.phy += [
+            arm_toggle_d.eq(arm_toggle_p),
+            tx_d.eq(utmi.txvalid),
+            rx_d.eq(utmi.rxactive),
+            wr.we.eq(0),
+            If(arm_toggle_p != arm_toggle_d,
+                triggered.eq(0),
+                count.eq(0),
+            ),
+            If(active,
+                If(~tx_d & ~rx_d,
+                    # Packet start.
+                    tx.eq(utmi.txvalid),
+                    first.eq(1),
+                    length.eq(0),
+                    gap.eq(idle),
+                ),
+                If(utmi.txvalid & utmi.txready,
+                    If(first, pid.eq(utmi.dataout), first.eq(0)),
+                    length.eq(length + 1),
+                ),
+                If(utmi.rxactive & utmi.rxvalid,
+                    If(first, pid.eq(utmi.datain), first.eq(0)),
+                    length.eq(length + 1),
+                ),
+                idle.eq(0),
+            ).Else(
+                If(idle != 0xfff, idle.eq(idle + 1)),
+                If(tx_d | rx_d,
+                    # Packet end: record (trigger on the 1st long transmitted trigger PID).
+                    If(triggered | (tx & (length > 600)),
+                        triggered.eq(1),
+                        If(record & (count < depth),
+                            wr.we.eq(1),
+                            count.eq(count + 1),
+                        )
+                    ),
+                ),
+            ),
         ]
