@@ -13,6 +13,7 @@ Integrates clock generation, button debouncing, LCD/video pipeline, audio I2S, I
 memory system, Game Boy emulation core, USB UVC+UART, battery ADC and system monitoring.
 """
 
+import os
 import argparse
 from types import MethodType
 
@@ -27,6 +28,7 @@ from chromatix.gateware.crg     import CRG
 from chromatix.gateware.sources import add_verilog_sources
 from chromatix.gateware.misc    import TickGenerator, StatusLed, ESP32Control
 from chromatix.gateware.buttons import Buttons
+from chromatix.gateware.memory  import MemorySystem
 from chromatix.gateware.lcd     import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec   import CodecControl, CodecI2S, load_tlv320_registers
 from chromatix.gateware.sysmon  import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads
@@ -395,39 +397,22 @@ class BaseSoC(LiteXModule):
 
         # Memory System ----------------------------------------------------------------------------
 
-        self.specials += Instance("mem_system_top",
-            p_ISSIMU         = 0,
-            i_xClk           = ClockSignal("xclk"),
-            i_fClk           = ClockSignal("fclk"),
-            i_hClk           = ClockSignal("hclk"),
-            i_reset          = memrst,
-            # QSPI.
-            i_QSPI_CLK       = qspi.clk,
-            i_QSPI_MOSI      = qspi.mosi,
-            i_QSPI_MISO      = qspi.miso,
-            i_QSPI_CS        = qspi.cs_n,
-            i_QSPI_WP        = qspi.wp_n,
-            i_QSPI_HD        = qspi.hd,
-            # PSRAM.
-            o_PS_CE_N        = ps.ce_n,
-            o_PS_CLK         = ps.clk,
-            io_PS_DQ         = ps.dq,
-            io_PS_DQS        = ps.dqs,
-            # BIST / Frame Buffer.
-            o_BIST_failed    = Signal(),
-            o_BIST_finished  = Signal(),
-            o_qMenuInit      = q_menu_init,
-            i_hGBNewLine     = h_gb_newline,
-            i_hGBAddress     = h_gb_address,
-            i_hGBWrite       = h_gb_write,
-            i_hGBData        = h_gb_data,
-            # Burst Read/Write.
-            i_hValid         = gb_lcd_clkena,
-            i_hHsync         = gb_lcd_mode[1],
-            i_hVsync         = gb_lcd_vsync,
-            o_hWrBurstQ      = h_wr_burst_q,
-            o_hWrBurstQ2     = h_wr_burst_q2,
-        )
+        self.memory = memory = MemorySystem(qspi_pads=qspi, psram_pads=ps)
+        self.comb += [
+            memory.reset.eq(memrst),
+            q_menu_init.eq(memory.menu_init),
+            # Game Boy framebuffer write.
+            memory.gb_new_line.eq(h_gb_newline),
+            memory.gb_address.eq(h_gb_address),
+            memory.gb_write.eq(h_gb_write),
+            memory.gb_data.eq(h_gb_data),
+            # Framebuffer/OSD line reads.
+            memory.h_valid.eq(gb_lcd_clkena),
+            memory.h_hsync.eq(gb_lcd_mode[1]),
+            memory.h_vsync.eq(gb_lcd_vsync),
+            h_wr_burst_q.eq(memory.fb_data),
+            h_wr_burst_q2.eq(memory.osd_data),
+        ]
 
         # Emulation System -------------------------------------------------------------------------
 
@@ -659,7 +644,15 @@ def main():
     parser.add_argument("--load",       action="store_true", help="Load bitstream (to SRAM, USB will not enumerate).")
     parser.add_argument("--flash",      action="store_true", help="Flash bitstream (to SPI Flash) and reboot.")
     parser.add_argument("--toolchain",  default="gowin",     help="FPGA toolchain (gowin).")
+    parser.add_argument("--gowin-path", default=os.environ.get("GOWIN_PATH", None), help="Gowin IDE install directory (or GOWIN_PATH env variable, ex: ~/tools/gowin_1.9.12.04/IDE).")
     args = parser.parse_args()
+
+    # Gowin IDE selection (bundled libs/Qt are required for the standalone gw_sh).
+    if args.gowin_path is not None:
+        gowin_path = os.path.expanduser(args.gowin_path)
+        os.environ["PATH"]            = os.path.join(gowin_path, "bin") + os.pathsep + os.environ["PATH"]
+        os.environ["LD_LIBRARY_PATH"] = os.path.join(gowin_path, "lib") + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
     # Platform.
     platform = Platform(toolchain=args.toolchain)

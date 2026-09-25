@@ -33,8 +33,15 @@ module `module_name (
     output      ulpi_nxt_o       ,
     `endif
     //usb interface
+    `ifdef D_LVDS
+    input       usb_dxp_i       ,
+    input       usb_dxn_i       ,
+    output      usb_dxp_o       ,
+    output      usb_dxn_o       ,
+    `else
     inout       usb_dxp_io       ,
     inout       usb_dxn_io       ,
+    `endif
     input       usb_rxdp_i       ,
     input       usb_rxdn_i       ,
     output      usb_pullup_en_o  ,
@@ -72,8 +79,15 @@ usb2_0_softphy usb2_0_softphy
     ,.ulpi_nxt_o       (ulpi_nxt_o       )
     `endif
     //usb interface
+    `ifdef D_LVDS
+    ,.usb_dxp_o        (usb_dxp_o       )
+    ,.usb_dxn_o        (usb_dxn_o       )
+    ,.usb_dxp_i        (usb_dxp_i       )
+    ,.usb_dxn_i        (usb_dxn_i       )
+    `else
     ,.usb_dxp_io       (usb_dxp_io       )
     ,.usb_dxn_io       (usb_dxn_io       )
+    `endif
     ,.usb_rxdp_i       (usb_rxdp_i       )
     ,.usb_rxdn_i       (usb_rxdn_i       )
     ,.usb_pullup_en_o  (usb_pullup_en_o  )

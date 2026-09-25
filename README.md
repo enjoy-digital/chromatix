@@ -137,8 +137,8 @@ git submodule update --init --recursive
 # Generate build files only (no Gowin toolchain required).
 ./chromatix.py --build --no-compile
 
-# Full build (requires gw_sh in PATH).
-./chromatix.py --build
+# Full build.
+./chromatix.py --gowin-path ~/tools/gowin_1.9.12.04/IDE --build
 
 # Run simulation tests.
 python3 -m pytest -v test
@@ -146,9 +146,9 @@ python3 -m pytest -v test
 
 Output bitstream: `build/chromatic.fs`
 
-**Gowin version**: official ModRetro images are built with Gowin V1.9.9.03. Bitstreams built with
-V1.9.10 run the game but the USB (UVC/UAC/CDC) device does not enumerate, including when building the
-original ModRetro sources.
+**Gowin version**: use Gowin V1.9.12.04 (`--gowin-path ~/tools/gowin_1.9.12.04/IDE` or `GOWIN_PATH`).
+Bitstreams built with V1.9.10 run the game but the USB (UVC/UAC/CDC) device does not enumerate (also
+when building the original ModRetro sources); V1.9.9 fails timing in the Game Boy core.
 
 ## Programming
 

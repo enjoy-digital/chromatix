@@ -13,21 +13,16 @@ VERILOG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ve
 # Subsystems still integrated as Verilog/VHDL Instances (see README migration table).
 VERILOG_SOURCES = [
     # Gowin IP.
-    "ip/fifo1k/fifo1k.v",
     "ip/gowin_adc/gowin_adc.v",
 
     # BSP: Video, Memory, System Monitor, Battery ADC.
     "bsp/ST7785_panel_master.v",
     "bsp/adc_wrap.v",
-    "bsp/gb_burst_write.v",
-    "bsp/mem_system_top.sv",
     "bsp/mm_burst_read_to_stream.v",
-    "bsp/mm_burst_write.v",
     "bsp/qspi_slave.v",
     "bsp/system_monitor.sv",
     "bsp/vid_system_top.sv",
     "bsp/uart/fixed_point_divider/fixed_point_divider.v",
-    "bsp/MultiPortRamCtrl.vhd",
     "bsp/PSRAMBIST_Burst.vhd",
     "bsp/PSRAMController.vhd",
     "bsp/overlayBatteryBack.vhd",
@@ -79,10 +74,11 @@ VERILOG_SOURCES = [
     "usb/usb_video/usb_defs.v",
     "usb/usb_video/usb_descriptor_video.v",
     "usb/usb_video/uvc_defs.v",
+    "usb/usb_device_controller/usb_device_controller_top.v",
     "usb/usb_device_controller/usb_device_controller.v",
     "usb/usb2_0_softphy/usb2_0_softphy_top.v",
     "usb/usb2_0_softphy/usb2_0_softphy_name.v",
-    "usb/usb2_0_softphy/usb2_0_softphy_encryption.v",
+    "usb/usb2_0_softphy/usb2_0_softphy.v",
     "usb/usb2_0_softphy/static_macro_define.v",
     "usb/uart/uart.v",
     "usb/sync_fifo/usb_fifo.v",

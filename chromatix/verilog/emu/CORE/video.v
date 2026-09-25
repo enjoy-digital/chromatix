@@ -196,7 +196,7 @@ reg [5:0] bgpi; //Bit 0-5   Index (00-3F)
 reg bgpi_ai;    //Bit 7     Auto Increment  (0=Disabled, 1=Increment after Writing)
 
 //FF69 - BCPD/BGPD - Background Palette Data
-reg[7:0] bgpd [63:0]; //64 bytes
+reg[7:0] bgpd [63:0] /* synthesis syn_ramstyle = "registers" */; //64 bytes
 wire [7:0] bug1 = bgpd[0];
 
 //FF6A - OCPS/OBPI - Sprite Palette Index
@@ -204,7 +204,7 @@ reg [5:0] obpi; //Bit 0-5   Index (00-3F)
 reg obpi_ai;    //Bit 7     Auto Increment  (0=Disabled, 1=Increment after Writing)
 
 //FF6B - OCPD/OBPD - Sprite Palette Data
-reg[7:0] obpd [63:0]; //64 bytes
+reg[7:0] obpd [63:0] /* synthesis syn_ramstyle = "registers" */; //64 bytes
 wire [7:0] bug2 = obpd[0];
 
 // Combined game palette data for games' default palette detection
