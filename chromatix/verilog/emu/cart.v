@@ -42,7 +42,11 @@ module cart
 
     wire [7:0]  CART_DIN; 
     assign CART_DIN = CART_D;
-    always@(negedge pclk)
+    // Sample cartridge data in the CPU clock domain (hclk). The original negedge pclk sampling
+    // left only half a pclk period (14.9ns) for the CART_DIN_r1 -> CPU path (~17ns of logic in the
+    // T80), which only worked depending on placement. Cartridge data is valid for several hclk
+    // cycles before the CPU captures it at the end of the bus cycle.
+    always@(posedge hclk)
     begin
         if (rd | DMA_on) CART_DIN_r1 <= CART_DIN;
     end

@@ -22,7 +22,6 @@ VERILOG_SOURCES = [
     "bsp/qspi_slave.v",
     "bsp/system_monitor.sv",
     "bsp/vid_system_top.sv",
-    "bsp/uart/fixed_point_divider/fixed_point_divider.v",
     "bsp/PSRAMBIST_Burst.vhd",
     "bsp/PSRAMController.vhd",
     "bsp/overlayBatteryBack.vhd",
@@ -68,9 +67,6 @@ VERILOG_SOURCES = [
 
     # USB: UVC + UAC + CDC (Gowin USB device controller + soft PHY).
     "usb/usbuvcuart_top.v",
-    "usb/Gowin_PLL_UVC/Gowin_PLL_UVC.v",
-    "usb/color_space_convertor/color_space_convertor.v",
-    "usb/fifo_video/fifo_video.v",
     "usb/usb_video/usb_defs.v",
     "usb/usb_video/usb_descriptor_video.v",
     "usb/usb_video/uvc_defs.v",
