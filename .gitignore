@@ -4,3 +4,5 @@ __pycache__
 .pytest_cache/
 *.egg-info/
 *.csv
+/doc/illustration/node_modules/
+/doc/illustration/package-lock.json

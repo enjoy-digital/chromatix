@@ -58,6 +58,7 @@ USB_CONTROLLER_SOURCES = {
     "v1.9.9": [
         "usb/usb_device_controller_v1.9.9/usb_device_controller.v",
     ],
+    "luna": [], # LUNA (Amaranth, converted to Verilog at build time).
 }
 
 def add_verilog_sources(platform, usb_controller="v1.9.9"):

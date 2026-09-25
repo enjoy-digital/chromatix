@@ -688,3 +688,145 @@ def test_uvc_video_late_start(monkeypatch):
     expected = [sum([yuyv_model(line) for line in frame], []) for frame in src_frames]
     complete = [expected.index(p) for p in payloads if p in expected]
     assert complete and complete[-1] == len(src_frames) - 1
+
+# UVC/UAC with LUNA -------------------------------------------------------------------------------
+
+class _LUNAIsoBench(LiteXModule):
+    """UVCVideo (LUNA mode) + the txact emulation of USBDeviceLUNA (requested -> finished)."""
+    def __init__(self, frames):
+        self.uvc       = uvc = UVCVideo(frames=frames, luna=True)
+        self.requested = Signal()
+        self.finished  = Signal()
+        self.ready     = Signal()
+        txact = Signal()
+        self.sync += If(self.requested, txact.eq(1)).Elif(self.finished, txact.eq(0))
+        self.comb += [uvc.txact.eq(txact), uvc.txpop.eq(self.ready)]
+        # pop() helper interface.
+        self.txpop = self.ready
+        self.txdat = uvc.txdat
+
+@pytest.mark.parametrize("frame_index, hbw", [(2, 0), (1, 1)])
+def test_uvc_video_framing_luna(monkeypatch, frame_index, hbw):
+    """UVC with LUNA: micro-frame length (next_len) latched at SOF, single transfer of up to 2048
+    bytes (LUNA splits it in 1024-byte DATA1/DATA0 packets), header once per transfer; payloads are
+    the YUYV conversion of the (upscaled) frames."""
+    height = 4
+    monkeypatch.setattr(usb_class, "UVC_HEIGHT", height)
+    frames = [(2*UVC_WIDTH, 2*height), (UVC_WIDTH, height)]
+    scale  = frames[frame_index - 1][0]//UVC_WIDTH
+    dut    = _LUNAIsoBench(frames)
+    dut.cd_video = ClockDomain(reset_less=True)
+    uvc    = dut.uvc
+    random.seed(0)
+    src_frames = [[[tuple(random.randrange(64) for _ in range(3)) for _ in range(UVC_WIDTH)]
+        for _ in range(height)] for _ in range(2)]
+    transfers = []
+    done      = []
+
+    def video():
+        for _ in range(20):
+            yield
+        for frame in src_frames:
+            yield uvc.frame_valid.eq(1)
+            for _ in range(10):
+                yield
+            for line in frame:
+                for p in line:
+                    yield uvc.data.eq(p[0] | (p[1] << 6) | (p[2] << 12))
+                    yield uvc.enable.eq(1)
+                    for _ in range(3):
+                        yield
+                yield uvc.enable.eq(0)
+                for _ in range(200):
+                    yield
+            yield uvc.frame_valid.eq(0)
+            for _ in range(600):
+                yield
+        done.append(1)
+
+    def luna():
+        yield uvc.frame_index.eq(frame_index)
+        yield uvc.hbw.eq(hbw)
+        yield uvc.reset.eq(1)
+        for _ in range(8):
+            yield
+        yield uvc.reset.eq(0)
+        extra = 16
+        while extra:
+            if done:
+                extra -= 1
+            # Micro-frame period: longer with high-bandwidth (the video must be produced faster
+            # than a single transaction drains it for 2048-byte transfers to be used).
+            for _ in range(6000 if hbw else 3000):
+                yield
+            # SOF: LUNA latches bytes_in_frame (next_len) in the SOF cycle.
+            yield uvc.sof.eq(1)
+            yield
+            length = (yield uvc.next_len)
+            yield uvc.sof.eq(0)
+            for _ in range(8):
+                yield
+            yield dut.requested.eq(1)
+            yield
+            yield dut.requested.eq(0)
+            for _ in range(4):
+                yield
+            data, remaining = [], length
+            while remaining:
+                n = min(remaining, UVC_PACKET_SIZE)
+                data += yield from pop(dut, n)
+                remaining -= n
+                for _ in range(20): # Next packet (IN token) / end of transfer.
+                    yield
+            yield dut.finished.eq(1)
+            yield
+            yield dut.finished.eq(0)
+            transfers.append(data)
+
+    run_simulation(dut, {"sys": luna(), "video": video()}, clocks={"sys": 10, "video": 70})
+
+    payloads, fids = [[]], []
+    for t in transfers:
+        assert t[0] == UVC_HEADER_SIZE and (t[1] & 0xfc) == 0x8c
+        assert len(t) <= (2 if hbw else 1)*UVC_PACKET_SIZE
+        if len(t) > UVC_HEADER_SIZE:
+            payloads[-1] += t[UVC_HEADER_SIZE:]
+            fids.append(t[1] & 0x01)
+        if t[1] & 0x02:
+            payloads.append([])
+    assert len(payloads) == 3 and payloads[-1] == []
+    for frame, payload in zip(src_frames, payloads):
+        lines    = [[p for p in line for _ in range(scale)] for line in frame for _ in range(scale)]
+        expected = sum([yuyv_model(line) for line in lines], [])
+        assert payload == expected
+    assert fids[0] == 0 and fids[-1] == 1
+    # High-bandwidth transfers (2048 bytes) used when enabled.
+    assert (2*UVC_PACKET_SIZE in [len(t) for t in transfers]) == bool(hbw)
+
+def test_uac_endpoint_luna():
+    """UAC with LUNA: complete samples (4 bytes, L/R little-endian) buffered, next_len is the number
+    of buffered sample bytes (<= 24) and the data is popped in capture order."""
+    dut = UACEndpoint(luna=True)
+    dut.cd_audio = ClockDomain("audio", reset_less=True)
+    lengths, data = [], []
+
+    def gen():
+        for i in range(60000):
+            yield dut.left.eq(0x1234)
+            yield dut.right.eq(0x5678)
+            if i % 7500 == 7499:
+                length = (yield dut.next_len)
+                lengths.append(length)
+                for _ in range(length):
+                    data.append((yield dut.txdat))
+                    yield dut.txpop.eq(1)
+                    yield
+                    yield dut.txpop.eq(0)
+                    yield
+            yield
+
+    run_simulation(dut, gen(), clocks={"sys": 10, "audio": 70})
+    assert all(l % 4 == 0 and l <= UACEndpoint.MAXBUFFER for l in lengths)
+    assert set(lengths[2:]) <= {20, 24} and 20 in lengths[2:] and 24 in lengths[2:]
+    samples = [data[i:i+4] for i in range(0, len(data), 4)]
+    assert samples[-8:] == [[0x34, 0x12, 0x78, 0x56]]*8

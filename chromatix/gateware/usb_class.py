@@ -413,9 +413,10 @@ class UACEndpoint(LiteXModule):
     SAMPLES_PER_MFRAME = (SAMPLE_RATE + 7999)//8000
     MAXBUFFER          = 16*2*SAMPLES_PER_MFRAME//8 # Bytes.
 
-    def __init__(self, sys_clk_freq=60e6):
+    def __init__(self, sys_clk_freq=60e6, luna=False):
         self.reset     = Signal()
         self.sof_rise  = Signal()
+        self.next_len  = Signal(12) # LUNA: bytes of the next micro-frame (latched at SOF).
         self.left      = Signal(16) # "audio" domain.
         self.right     = Signal(16) # "audio" domain.
         self.txpop     = Signal()
@@ -470,6 +471,35 @@ class UACEndpoint(LiteXModule):
             ),
             sample_ready.eq(aclk),
         ]
+
+        # LUNA: samples buffered in a byte FIFO, each micro-frame sends the complete samples available
+        # (up to MAXBUFFER bytes); txdat is the FIFO output, popped with txpop.
+        if luna:
+            self.converter = converter = stream.Converter(32, 8)
+            self.fifo      = fifo      = ResetInserter()(stream.SyncFIFO([("data", 8)], 64, buffered=True))
+            p_sample_ready = Signal()
+            pending        = Signal()
+            level          = Signal(8)
+            self.sync += [
+                p_sample_ready.eq(sample_ready),
+                If(sample_ready & ~p_sample_ready,
+                    pending.eq(1),
+                ).Elif(converter.sink.ready,
+                    pending.eq(0),
+                ),
+            ]
+            self.comb += [
+                fifo.reset.eq(self.reset),
+                converter.sink.valid.eq(pending),
+                converter.sink.data.eq(sample),
+                converter.source.connect(fifo.sink),
+                self.txdat.eq(fifo.source.data),
+                fifo.source.ready.eq(self.txpop),
+                level.eq(fifo.level & ~0x3),
+                self.next_len.eq(Mux(level >= n, n, level)),
+                self.txcork.eq(0),
+            ]
+            return
 
         # Micro-frame buffers.
         mem0            = Signal(8*n)
@@ -592,7 +622,7 @@ class UVCVideo(LiteXModule):
     to YCbCr, packed as YUYV in a FIFO and sent with one or two (high-bandwidth, alt setting >= 2)
     1024-byte transactions per micro-frame (12-byte UVC header per micro-frame payload transfer).
     """
-    def __init__(self, frames=VIDEO_FRAMES, n_buffers=4, fifo_depth=4096):
+    def __init__(self, frames=VIDEO_FRAMES, n_buffers=4, fifo_depth=4096, luna=False):
         assert all((w % UVC_WIDTH == 0) and (h % UVC_HEIGHT == 0) and (w//UVC_WIDTH == h//UVC_HEIGHT)
             for w, h in frames)
         max_scale = max(w//UVC_WIDTH for w, h in frames)
@@ -615,6 +645,7 @@ class UVCVideo(LiteXModule):
         self.txdat_len   = Signal(12)
         self.txcork      = Signal()
         self.txiso_pid   = Signal(4, reset=0b0011) # DATA1 (0b1011) when a 2nd transaction follows.
+        self.next_len    = Signal(12) # Length of the next micro-frame transfer (latched at SOF).
         self.sof_rise    = Signal() # SOF rising edge (also used by the UAC endpoint).
         # Statistics (sys).
         self.hbw_count   = Signal(16) # 2nd transactions sent.
@@ -979,6 +1010,34 @@ class UVCVideo(LiteXModule):
         # 2 transactions: header + 1012 bytes, then 1024 bytes (only when all are buffered).
         two_bytes    = 2*UVC_PACKET_SIZE - UVC_HEADER_SIZE
 
+        # Micro-frame transfer decision (latched at SOF). Note: the FIFO almost full triggers at 1012
+        # bytes, while 1011 are needed for a full packet (one extra byte is always kept at the FIFO
+        # output). High-bandwidth: 2 transactions (Gowin controller: 2 x 1024 with a re-armed 2nd
+        # transaction, LUNA: a single 2048-byte transfer split in DATA1/DATA0 packets by LUNA).
+        next_two         = Signal()
+        next_last_read   = Signal()
+        next_read_active = Signal()
+        self.comb += [
+            next_two.eq(0),
+            If(self.hbw & (fifo.Rnum >= two_bytes),
+                next_two.eq(1),
+                self.next_len.eq(2*UVC_PACKET_SIZE if luna else UVC_PACKET_SIZE),
+                next_last_read.eq(0),
+                next_read_active.eq(1),
+            ).Elif(fifo.Almost_Full,
+                self.next_len.eq(UVC_PACKET_SIZE),
+                next_last_read.eq(0),
+                next_read_active.eq(1),
+            ).Elif(last_packet,
+                self.next_len.eq(fifo.Rnum[:12] + UVC_HEADER_SIZE),
+                next_last_read.eq(1),
+                next_read_active.eq(1),
+            ).Else(
+                self.next_len.eq(UVC_HEADER_SIZE),
+                next_last_read.eq(0),
+                next_read_active.eq(0),
+            ),
+        ]
         self.comb += txact_fall.eq(txact_d1 & ~txact_d0)
         self.sync += [
             If(self.reset,
@@ -996,31 +1055,11 @@ class UVCVideo(LiteXModule):
                 self.txiso_pid.eq(DATA0),
                 second.eq(0),
             ).Elif(self.sof,
-                # Note: the FIFO almost full triggers at 1012 bytes, while 1011 are needed for a
-                # full packet (one extra byte is always kept at the FIFO output).
-                two.eq(0),
-                If(self.hbw & (fifo.Rnum >= two_bytes),
-                    self.txdat_len.eq(UVC_PACKET_SIZE),
-                    self.txiso_pid.eq(DATA1),
-                    two.eq(1),
-                    last_read.eq(0),
-                    read_active.eq(1),
-                ).Elif(fifo.Almost_Full,
-                    self.txdat_len.eq(UVC_PACKET_SIZE),
-                    self.txiso_pid.eq(DATA0),
-                    last_read.eq(0),
-                    read_active.eq(1),
-                ).Elif(last_packet,
-                    self.txdat_len.eq(fifo.Rnum[:12] + UVC_HEADER_SIZE),
-                    self.txiso_pid.eq(DATA0),
-                    last_read.eq(1),
-                    read_active.eq(1),
-                ).Else(
-                    self.txdat_len.eq(UVC_HEADER_SIZE),
-                    self.txiso_pid.eq(DATA0),
-                    last_read.eq(0),
-                    read_active.eq(0),
-                ),
+                self.txdat_len.eq(self.next_len),
+                self.txiso_pid.eq(Mux(next_two & ~luna, DATA1, DATA0)),
+                two.eq(next_two & ~luna),
+                last_read.eq(next_last_read),
+                read_active.eq(next_read_active),
                 second.eq(0),
                 self.txcork.eq(0),
                 state.eq(UNCORK),
@@ -1060,11 +1099,12 @@ class UVCVideo(LiteXModule):
                 pts_reg.eq(pts_counter),
             ),
         ]
+        last_data = (self.txdat_len - 1) if luna else (UVC_PACKET_SIZE - 1) # Last byte: no read.
         self.comb += If(second,
             rden.eq(preload | (self.txpop & (byte_count < (UVC_PACKET_SIZE - 1)))),
         ).Else(
             rden.eq(self.txpop & (byte_count >= (UVC_HEADER_SIZE - 1)) &
-                                 (byte_count <  (UVC_PACKET_SIZE - 1)) & read_active),
+                                 (byte_count <  last_data) & read_active),
         )
 
         # End of image.

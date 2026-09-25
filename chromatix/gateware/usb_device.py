@@ -38,7 +38,8 @@ class USBDevice(LiteXModule):
     USB composite device (UVC + UAC + CDC-ACM) with its own PLL (clk_24 -> 60MHz "phy" / 960MHz
     "usb_960"), Gowin USB 2.0 Device Controller and LiteX UTMI PHY (USB2PHY).
     """
-    def __init__(self, platform, clk_24, pads, uvc_frames=VIDEO_FRAMES, with_utmi_monitor=False):
+    def __init__(self, platform, clk_24, pads, uvc_frames=VIDEO_FRAMES, with_utmi_monitor=False,
+        with_luna_debug=False):
         self.reset       = Signal() # Held in reset (PLL too) when 1 (async).
         self.locked      = Signal()
         self.player_num  = Signal(8)
@@ -240,7 +241,7 @@ class USBDevice(LiteXModule):
             ("rxvalid", 1), ("rxerror",  1), ("linestate", 2), ("opmode", 2), ("xcvrselect", 2),
             ("termselect", 1), ("reset", 1),
         ])
-        if with_utmi_monitor:
+        if with_utmi_monitor and not with_luna_debug:
             self.utmi_monitor = UTMIMonitor(utmi)
         d = desc
         self.specials += Instance("USB_Device_Controller_Top", name="u_usb_device_controller_top",
@@ -314,40 +315,156 @@ class USBDevice(LiteXModule):
         # USB 2.0 PHY ------------------------------------------------------------------------------
         self.phy_crg = phy_crg = GW5AUSB2PHYCRG(cd_utmi="phy", cd_960="usb_960")
         self.phy = usb_phy = USB2PHY(pads, cd_utmi="phy", serdes_rst=phy_crg.serdes_rst)
+        phy_utmi = utmi
+        if with_luna_debug:
+            phy_utmi = self.add_luna_debug(platform, uvc_frames, utmi, rst)
         self.comb += [
-            usb_phy.reset.eq(utmi.reset | rst),
-            usb_phy.tx_data.eq(utmi.dataout),
-            usb_phy.tx_valid.eq(utmi.txvalid),
-            usb_phy.op_mode.eq(utmi.opmode),
-            usb_phy.xcvr_select.eq(utmi.xcvrselect),
-            usb_phy.term_select.eq(utmi.termselect),
-            utmi.datain.eq(usb_phy.rx_data),
-            utmi.txready.eq(usb_phy.tx_ready),
-            utmi.rxvalid.eq(usb_phy.rx_valid),
-            utmi.rxactive.eq(usb_phy.rx_active),
-            utmi.rxerror.eq(usb_phy.rx_error),
-            utmi.linestate.eq(usb_phy.line_state),
+            usb_phy.reset.eq(phy_utmi.reset | rst),
+            usb_phy.tx_data.eq(phy_utmi.dataout),
+            usb_phy.tx_valid.eq(phy_utmi.txvalid),
+            usb_phy.op_mode.eq(phy_utmi.opmode),
+            usb_phy.xcvr_select.eq(phy_utmi.xcvrselect),
+            usb_phy.term_select.eq(phy_utmi.termselect),
+            phy_utmi.datain.eq(usb_phy.rx_data),
+            phy_utmi.txready.eq(usb_phy.tx_ready),
+            phy_utmi.rxvalid.eq(usb_phy.rx_valid),
+            phy_utmi.rxactive.eq(usb_phy.rx_active),
+            phy_utmi.rxerror.eq(usb_phy.rx_error),
+            phy_utmi.linestate.eq(usb_phy.line_state),
         ]
+        if with_utmi_monitor and with_luna_debug:
+            self.utmi_monitor = UTMIMonitor(phy_utmi)
+
+    def add_luna_debug(self, platform, uvc_frames, utmi, rst):
+        """
+        Debug: LUNA device core (EP0 only) sharing the PHY with the Gowin controller. A write to
+        luna_run gives the PHY to LUNA for 5s (with 100ms disconnects before/after so that the host
+        re-enumerates), then back to the Gowin controller (the UTMI monitor records LUNA's traffic).
+        """
+        from types import SimpleNamespace
+        from chromatix.gateware.usb_luna import LUNAUSBController, USBDescriptorRequest
+
+        self._luna_run = CSRStorage(fields=[
+            CSRField("run", size=1, offset=0, pulse=True, description="Give the PHY to LUNA for 5s."),
+        ])
+        run_toggle   = Signal()
+        run_toggle_p = Signal()
+        run_toggle_d = Signal()
+        self.sync += If(self._luna_run.fields.run, run_toggle.eq(~run_toggle))
+        self.specials += MultiReg(run_toggle, run_toggle_p, odomain="phy")
+
+        # Window FSM (phy): GOWIN -> DISC -> LUNA (5s) -> DISC -> GOWIN.
+        GOWIN, DISC1, LUNA, DISC2 = range(4)
+        wstate = Signal(2)
+        wcount = Signal(29)
+        self.sync.phy += [
+            run_toggle_d.eq(run_toggle_p),
+            wcount.eq(wcount + 1),
+            Case(wstate, {
+                GOWIN: If(run_toggle_p != run_toggle_d, wstate.eq(DISC1), wcount.eq(0)),
+                DISC1: If(wcount == int(0.1*60e6), wstate.eq(LUNA),  wcount.eq(0)),
+                LUNA:  If(wcount == int(5.0*60e6), wstate.eq(DISC2), wcount.eq(0)),
+                DISC2: If(wcount == int(0.1*60e6), wstate.eq(GOWIN), wcount.eq(0)),
+            })
+        ]
+
+        # LUNA core (EP0 only, own descriptors ROM), held in reset outside of its window.
+        luna_rst = Signal()
+        self.comb += luna_rst.eq(rst | (wstate != LUNA))
+        self.luna = luna = ClockDomainsRenamer("phy")(LUNAUSBController(platform, reset=luna_rst,
+            iso_endpoints={}, bulk_endpoints={}, nak_endpoints=[1, 4]))
+        self.luna_desc = luna_desc = ClockDomainsRenamer("phy")(USBDescriptors(uvc_frames=uvc_frames))
+        setup = SimpleNamespace(
+            header_ready  = luna.ep0_header_ready,
+            bmRequestType = luna.ep0_bmRequestType,
+            bRequest      = luna.ep0_bRequest,
+            wValue        = luna.ep0_wValue,
+            wIndex        = luna.ep0_wIndex,
+            wLength       = luna.ep0_wLength,
+            cdata_ofs     = luna.ep0_cdata_ofs,
+        )
+        self.luna_ctrl_desc = ctrl_desc = ClockDomainsRenamer("phy")(USBDescriptorRequest(setup, luna_desc))
+        self.comb += [
+            luna_desc.reset.eq(rst),
+            luna_desc.player_num.eq(self.player_num),
+            luna.ep0_txval.eq(ctrl_desc.txval),
+            luna.ep0_txdat.eq(ctrl_desc.txdat),
+            luna.ep0_txlen.eq(ctrl_desc.txdat_len),
+            luna.ep0_inf_alt_i.eq(0),
+        ]
+
+        # UTMI mux (PHY side).
+        phy_utmi = Record([
+            ("dataout", 8), ("txvalid", 1), ("txready", 1), ("datain", 8), ("rxactive", 1),
+            ("rxvalid", 1), ("rxerror",  1), ("linestate", 2), ("opmode", 2), ("xcvrselect", 2),
+            ("termselect", 1), ("reset", 1),
+        ])
+        is_luna = wstate == LUNA
+        disc    = (wstate == DISC1) | (wstate == DISC2)
+        self.comb += [
+            # To the PHY.
+            If(is_luna,
+                phy_utmi.dataout.eq(luna.utmi_tx_data),
+                phy_utmi.txvalid.eq(luna.utmi_tx_valid),
+                phy_utmi.opmode.eq(luna.utmi_op_mode),
+                phy_utmi.xcvrselect.eq(luna.utmi_xcvr_select),
+                phy_utmi.termselect.eq(luna.utmi_term_select),
+                phy_utmi.reset.eq(0),
+            ).Elif(disc,
+                # Disconnected (no pull-up).
+                phy_utmi.opmode.eq(0),
+                phy_utmi.xcvrselect.eq(0b01),
+                phy_utmi.termselect.eq(0),
+                phy_utmi.reset.eq(1),
+            ).Else(
+                phy_utmi.dataout.eq(utmi.dataout),
+                phy_utmi.txvalid.eq(utmi.txvalid),
+                phy_utmi.opmode.eq(utmi.opmode),
+                phy_utmi.xcvrselect.eq(utmi.xcvrselect),
+                phy_utmi.termselect.eq(utmi.termselect),
+                phy_utmi.reset.eq(utmi.reset),
+            ),
+            # From the PHY.
+            luna.utmi_rx_data.eq(phy_utmi.datain),
+            luna.utmi_tx_ready.eq(phy_utmi.txready & is_luna),
+            luna.utmi_rx_valid.eq(phy_utmi.rxvalid & is_luna),
+            luna.utmi_rx_active.eq(phy_utmi.rxactive & is_luna),
+            luna.utmi_rx_error.eq(phy_utmi.rxerror),
+            luna.utmi_line_state.eq(phy_utmi.linestate),
+            utmi.datain.eq(phy_utmi.datain),
+            utmi.txready.eq(phy_utmi.txready & ~is_luna),
+            utmi.rxvalid.eq(phy_utmi.rxvalid & ~is_luna),
+            utmi.rxactive.eq(phy_utmi.rxactive & ~is_luna),
+            utmi.rxerror.eq(phy_utmi.rxerror),
+            utmi.linestate.eq(Mux(is_luna | disc, 0b00, phy_utmi.linestate)),
+        ]
+        return phy_utmi
 
 # UTMI Monitor -------------------------------------------------------------------------------------
 
 class UTMIMonitor(LiteXModule):
     """
-    Debug: records the transmitted data packets and received SOFs (PID, length, idle clocks before
-    the packet) after the first long (> 600 bytes, video) transmitted packet.
+    Debug: UTMI packet/state recorder (to check the USB traffic without a protocol analyzer).
 
-    Packets are captured in the "phy" domain; entries are read from the CSRs (sys domain) with
-    sel -> data.
+    - all = 0: records the transmitted data packets and received SOFs (PID, length, idle clocks
+      before the packet) after the first long (> 600 bytes, video) transmitted packet.
+    - all = 1: records every packet (both directions, handshakes included) and the UTMI state
+      changes between packets (op_mode/xcvr_select/term_select/line_state, PID field = 0xee) from
+      the first bus reset (SE0/no packet for 3ms) after the arming.
+
+    Entries are captured in the "phy" domain and read from the CSRs (sys domain) with sel -> data.
     """
-    def __init__(self, utmi, depth=32):
+    def __init__(self, utmi, depth=256):
         self._control = CSRStorage(fields=[
             CSRField("arm", size=1, offset=0, pulse=True, description="Re-arm the capture."),
+            CSRField("all", size=1, offset=1, description="Record all packets/state changes."),
+            CSRField("ep0", size=1, offset=2, description="Record the EP0 transactions only (from the arming)."),
             CSRField("sel", size=8, offset=8, description="Entry to read."),
         ])
         self._status = CSRStatus(fields=[
-            CSRField("count", size=8, offset=0, description="Captured entries."),
+            CSRField("count", size=9, offset=0, description="Captured entries."),
         ])
-        self._data = CSRStatus(32, description="Entry: [31] tx, [30:23] PID, [22:12] length, [11:0] idle clocks (sat.).")
+        self._data = CSRStatus(32, description="Entry: [31] tx, [30:23] PID (0xee: state), [22:12] length (state: {op_mode, xcvr_select, term_select, line_state}), [11:0] idle clocks (sat.).")
 
         # # #
 
@@ -359,12 +476,16 @@ class UTMIMonitor(LiteXModule):
         arm_toggle   = Signal()
         arm_toggle_p = Signal()
         arm_toggle_d = Signal()
+        all_p        = Signal()
+        ep0_p        = Signal()
         sel_p        = Signal(8)
-        count        = Signal(8)
+        count        = Signal(9)
         data_p       = Signal(32)
         self.sync += If(self._control.fields.arm, arm_toggle.eq(~arm_toggle))
         self.specials += [
             MultiReg(arm_toggle,                 arm_toggle_p, odomain="phy"),
+            MultiReg(self._control.fields.all,   all_p,        odomain="phy"),
+            MultiReg(self._control.fields.ep0,   ep0_p,        odomain="phy"),
             MultiReg(self._control.fields.sel,   sel_p,        odomain="phy"),
             MultiReg(count,                      self._status.fields.count),
             MultiReg(data_p,                     self._data.status),
@@ -381,14 +502,23 @@ class UTMIMonitor(LiteXModule):
         tx        = Signal()
         active    = Signal()
         record    = Signal()
+        state     = Signal(7)
+        state_d   = Signal(7)
+        se0_count = Signal(18)
+        tok_byte1 = Signal(8)
+        ep0_trans = Signal() # Current transaction on EP0 (last token).
+        is_token  = Signal()
         self.comb += [
             active.eq(utmi.txvalid | utmi.rxactive),
+            state.eq(Cat(utmi.linestate, utmi.termselect, utmi.xcvrselect, utmi.opmode)),
             rd.adr.eq(sel_p),
             data_p.eq(rd.dat_r),
             wr.adr.eq(count),
-            wr.dat_w.eq(Cat(gap, length, pid, tx)),
-            # Transmitted data packets (no handshakes) and received SOFs (micro-frame delimiters).
-            record.eq(Mux(tx, (pid != 0x5a) & (pid != 0xd2), pid == 0xa5)),
+            # Transmitted data packets (no handshakes) and received SOFs (micro-frame delimiters),
+            # or everything.
+            record.eq(Mux(ep0_p, ep0_trans & ~is_token | (is_token & (pid != 0xa5) & ep0_trans),
+                all_p | Mux(tx, (pid != 0x5a) & (pid != 0xd2), pid == 0xa5))),
+            is_token.eq(~tx & ((pid == 0x69) | (pid == 0xe1) | (pid == 0x2d) | (pid == 0xb4) | (pid == 0xa5))),
         ]
         self.sync.phy += [
             arm_toggle_d.eq(arm_toggle_p),
@@ -396,8 +526,19 @@ class UTMIMonitor(LiteXModule):
             rx_d.eq(utmi.rxactive),
             wr.we.eq(0),
             If(arm_toggle_p != arm_toggle_d,
-                triggered.eq(0),
+                triggered.eq(ep0_p),
                 count.eq(0),
+                state_d.eq(state),
+            ).Elif(all_p & ~triggered & (se0_count == 180000),
+                # Bus reset (SE0/no packet for 3ms, also true in HS where idle is SE0): start of the
+                # capture (all mode).
+                triggered.eq(1),
+                state_d.eq(state),
+            ),
+            If(active | (utmi.linestate != 0b00),
+                se0_count.eq(0),
+            ).Elif(se0_count != 180000,
+                se0_count.eq(se0_count + 1),
             ),
             If(active,
                 If(~tx_d & ~rx_d,
@@ -413,20 +554,35 @@ class UTMIMonitor(LiteXModule):
                 ),
                 If(utmi.rxactive & utmi.rxvalid,
                     If(first, pid.eq(utmi.datain), first.eq(0)),
+                    If(length == 1, tok_byte1.eq(utmi.datain)),
+                    If((length == 2) & ((pid == 0x69) | (pid == 0xe1) | (pid == 0x2d) | (pid == 0xb4)),
+                        # ENDP = {byte2[2:0], byte1[7]}.
+                        ep0_trans.eq(Cat(tok_byte1[7], utmi.datain[0:3]) == 0),
+                    ),
                     length.eq(length + 1),
                 ),
                 idle.eq(0),
             ).Else(
                 If(idle != 0xfff, idle.eq(idle + 1)),
                 If(tx_d | rx_d,
-                    # Packet end: record (trigger on the 1st long transmitted trigger PID).
+                    # Packet end: record (trigger on the 1st long transmitted packet).
                     If(triggered | (tx & (length > 600)),
                         triggered.eq(1),
                         If(record & (count < depth),
+                            wr.dat_w.eq(Cat(gap, length, pid, tx)),
                             wr.we.eq(1),
                             count.eq(count + 1),
                         )
                     ),
+                ).Elif(all_p & ~ep0_p & triggered & (state != state_d),
+                    # UTMI state change (between packets).
+                    state_d.eq(state),
+                    If(count < depth,
+                        wr.dat_w.eq(Cat(idle, state, Constant(0, 4), Constant(0xee, 8), Constant(0, 1))),
+                        wr.we.eq(1),
+                        count.eq(count + 1),
+                        idle.eq(0),
+                    )
                 ),
             ),
         ]
