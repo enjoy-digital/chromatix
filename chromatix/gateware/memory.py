@@ -36,7 +36,7 @@ class MultiPortRAMCtrl(LiteXModule):
     Round-robin arbiter in front of the PSRAM controller (ported from MultiPortRamCtrl.vhd).
 
     Requests are latched; when idle, the highest pending port is served, except when the round-robin
-    pointer points to a pending port. The granted port gets write_next/dout_valid/done until the
+    pointer points to a latched request. The granted port gets write_next/dout_valid/done until the
     burst completes. Read data (dout) and ready are shared by all ports.
     """
     def __init__(self, nports):
@@ -70,7 +70,7 @@ class MultiPortRAMCtrl(LiteXModule):
         dins     = Array(port.din          for port in ports)
         lengths  = Array(port.burst_length for port in ports)
 
-        # Request selection: highest pending port, round-robin pointer has priority.
+        # Request selection: highest pending port, round-robin pointer has priority (if latched).
         self.comb += active_request.eq((requests | latched) != 0)
         self.comb += active_index.eq(0)
         for i in range(nports):
@@ -442,8 +442,8 @@ class MemorySystem(LiteXModule):
     """
     PSRAM memory system (replaces mem_system_top.sv).
 
-    Clock domains: xclk (controller/arbiter), fclk (PSRAM 2x clock), hclk (video), qspi_n (QSPI_CLK
-    falling edge, created here).
+    Clock domains: xclk (controller/arbiter), fclk (PSRAM 2x clock), hclk (video), qspi/qspi_n
+    (QSPI_CLK rising/falling edges, created here).
     """
     def __init__(self, qspi_pads, psram_pads):
         self.reset        = Signal()
@@ -466,17 +466,21 @@ class MemorySystem(LiteXModule):
 
         # # #
 
-        # QSPI_CLK falling edge clock domain.
+        # QSPI_CLK rising/falling edges clock domains.
+        self.cd_qspi   = ClockDomain("qspi",   reset_less=True)
         self.cd_qspi_n = ClockDomain("qspi_n", reset_less=True)
-        self.comb += self.cd_qspi_n.clk.eq(~qspi_pads.clk)
-
-        # Arbiter + PSRAM Controller -----------------------------------------------------------
-        self.ctrl = ctrl = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT))
-        ports = ctrl.ports
-        self.comb += ctrl.reset.eq(self.reset)
-        self.phy = phy = ClockDomainsRenamer("xclk")(PSRAMGW5APHY(psram_pads))
-        self.psram = psram = ClockDomainsRenamer("xclk")(PSRAMController(phy))
         self.comb += [
+            self.cd_qspi.clk.eq(qspi_pads.clk),
+            self.cd_qspi_n.clk.eq(~qspi_pads.clk),
+        ]
+
+        # Arbiter + PSRAM Controller ---------------------------------------------------------------
+        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT))
+        self.phy   = phy   = ClockDomainsRenamer("xclk")(PSRAMGW5APHY(psram_pads))
+        self.psram = psram = ClockDomainsRenamer("xclk")(PSRAMController(phy))
+        ports = ctrl.ports
+        self.comb += [
+            ctrl.reset.eq(self.reset),
             psram.reset.eq(self.reset),
             psram.req_read.eq(ctrl.req_read),
             psram.req_write.eq(ctrl.req_write),
@@ -490,7 +494,7 @@ class MemorySystem(LiteXModule):
             ctrl.done.eq(psram.done),
         ]
 
-        # BIST ---------------------------------------------------------------------------------
+        # BIST -------------------------------------------------------------------------------------
         self.bist = bist = ClockDomainsRenamer("xclk")(PSRAMBIST(ports[PORT_BIST], ctrl))
         self.comb += [
             bist.reset.eq(self.reset),
@@ -498,27 +502,22 @@ class MemorySystem(LiteXModule):
             self.bist_failed.eq(bist.failed),
         ]
 
-        # QSPI Writes (ESP32) ------------------------------------------------------------------
+        # QSPI Writes (ESP32) ----------------------------------------------------------------------
         port = ports[PORT_QSPI]
-        self.cd_qspi = ClockDomain("qspi", reset_less=True)
-        self.comb += self.cd_qspi.clk.eq(qspi_pads.clk)
         self.qspi_slave = qspi_slave = QSPISlave(qspi_pads)
-        self.comb += self.menu_init.eq(qspi_slave.menu_init)
-        q_data_valid = qspi_slave.data_valid
-        q_data       = qspi_slave.data
-        q_address    = qspi_slave.address
         self.qspi_write = qspi_write = QSPIBurstWrite(port)
         self.comb += [
+            self.menu_init.eq(qspi_slave.menu_init),
             qspi_write.ram_ready.eq(self.bist_done),
             qspi_write.cs.eq(qspi_pads.cs_n),
-            qspi_write.address.eq(q_address),
-            qspi_write.data_valid.eq(q_data_valid),
-            qspi_write.data.eq(q_data),
+            qspi_write.address.eq(qspi_slave.address),
+            qspi_write.data_valid.eq(qspi_slave.data_valid),
+            qspi_write.data.eq(qspi_slave.data),
             port.rnw.eq(0),
             port.burst_length.eq(1024),
         ]
 
-        # Framebuffer / OSD Line Reads ---------------------------------------------------------
+        # Framebuffer / OSD Line Reads -------------------------------------------------------------
         h_vsync_d = Signal()
         h_hsync_d = Signal()
         h_valid_d = Signal()
@@ -546,7 +545,7 @@ class MemorySystem(LiteXModule):
                 data.eq(reader.data),
             ]
 
-        # Game Boy Framebuffer Write -----------------------------------------------------------
+        # Game Boy Framebuffer Write ---------------------------------------------------------------
         port = ports[PORT_FBWR]
         self.gb_burst_write = gb_burst_write = GBBurstWrite(port)
         self.comb += [

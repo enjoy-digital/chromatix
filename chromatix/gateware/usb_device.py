@@ -31,6 +31,10 @@ from chromatix.gateware.usb_fifo  import USBEndpointFIFO
 # USB Device ---------------------------------------------------------------------------------------
 
 class USBDevice(LiteXModule):
+    """
+    USB composite device (UVC + UAC + CDC-ACM) with its own PLL (clk_24 -> 60MHz "phy" / 960MHz
+    "usb_960"), Gowin USB 2.0 Device Controller and UTMI PHY (LiteX USB2PHY).
+    """
     def __init__(self, platform, clk_24, pads):
         self.reset       = Signal() # Held in reset (PLL too) when 1 (async).
         self.locked      = Signal()
@@ -51,7 +55,7 @@ class USBDevice(LiteXModule):
 
         # # #
 
-        # Clocking -------------------------------------------------------------------------------
+        # Clocking ---------------------------------------------------------------------------------
         self.cd_phy     = ClockDomain("phy",     reset_less=True)
         self.cd_usb_960 = ClockDomain("usb_960", reset_less=True)
         self.pll = pll = GW5APLL(devicename=platform.devicename, device=platform.device, name="usb_pll")
@@ -75,7 +79,7 @@ class USBDevice(LiteXModule):
         ]
         self.comb += rst.eq(rst_cnt < 32)
 
-        # USB Controller signals -----------------------------------------------------------------
+        # USB Controller signals -------------------------------------------------------------------
         usbrst    = Signal()
         txdat     = Signal(8)
         txval     = Signal()
@@ -104,7 +108,7 @@ class USBDevice(LiteXModule):
             desc.player_num.eq(self.player_num),
         ]
 
-        # Control transfers ----------------------------------------------------------------------
+        # Control transfers ------------------------------------------------------------------------
         self.setup = sp = ClockDomainsRenamer("phy")(USBSetupParser())
         self.comb += [
             sp.reset.eq(rst),
@@ -159,7 +163,7 @@ class USBDevice(LiteXModule):
             "default": alt_i.eq(0),
         })
 
-        # UVC ------------------------------------------------------------------------------------
+        # UVC --------------------------------------------------------------------------------------
         self.uvc = uvc = ClockDomainsRenamer({"sys": "phy", "video": "gclk"})(UVCVideo())
         self.comb += [
             uvc.reset.eq(rst),
@@ -172,7 +176,7 @@ class USBDevice(LiteXModule):
             uvc.txpop.eq(Mux(endpt == EP_VS, txpop, 0)),
         ]
 
-        # UAC ------------------------------------------------------------------------------------
+        # UAC --------------------------------------------------------------------------------------
         self.uac = uac = ClockDomainsRenamer({"sys": "phy", "audio": "gclk"})(UACEndpoint())
         self.comb += [
             uac.reset.eq(rst),
@@ -183,8 +187,8 @@ class USBDevice(LiteXModule):
             uac.txpop.eq(Mux(endpt == EP_UAC, txpop, 0)),
         ]
 
-        # CDC-ACM (EP3) + UART -------------------------------------------------------------------
-        self.ep3 = ep3 = ClockDomainsRenamer("phy")(USBEndpointFIFO())
+        # CDC-ACM (EP3) + UART ---------------------------------------------------------------------
+        self.ep3  = ep3  = ClockDomainsRenamer("phy")(USBEndpointFIFO())
         self.uart = uart = ClockDomainsRenamer("phy")(CDCUART())
         self.comb += [
             ep3.reset.eq(usbrst | rst),
@@ -209,7 +213,7 @@ class USBDevice(LiteXModule):
             self.uart_rts.eq(ctrl_uart.ctl_sig[1]),
         ]
 
-        # Endpoints -> Controller mux ------------------------------------------------------------
+        # Endpoints -> Controller mux --------------------------------------------------------------
         self.comb += [
             Case(endpt, {
                 EP_CTRL:   [txdat.eq(ep0_dat),   txdat_len.eq(ep0_len),       txcork.eq(0)],
@@ -222,7 +226,7 @@ class USBDevice(LiteXModule):
             rxrdy.eq(Mux(endpt == EP_UART, ep3.rxrdy, Mux(endpt == EP_CTRL, 1, 0))),
         ]
 
-        # Gowin USB 2.0 Device Controller --------------------------------------------------------
+        # Gowin USB 2.0 Device Controller ----------------------------------------------------------
         utmi = Record([
             ("dataout", 8), ("txvalid", 1), ("txready", 1), ("datain", 8), ("rxactive", 1),
             ("rxvalid", 1), ("rxerror",  1), ("linestate", 2), ("opmode", 2), ("xcvrselect", 2),
@@ -230,69 +234,69 @@ class USBDevice(LiteXModule):
         ])
         d = desc
         self.specials += Instance("USB_Device_Controller_Top", name="u_usb_device_controller_top",
-            i_clk_i                 = ClockSignal("phy"),
-            i_reset_i               = rst,
-            o_usbrst_o              = usbrst,
-            o_highspeed_o           = Signal(),
-            o_suspend_o             = Signal(),
-            o_online_o              = Signal(),
-            i_txdat_i               = txdat,
-            i_txval_i               = txval,
-            i_txdat_len_i           = txdat_len,
-            i_txiso_pid_i           = Constant(0b0011, 4), # DATA0 (HS, 1 packet per micro-frame).
-            i_txcork_i              = txcork,
-            o_txpop_o               = txpop,
-            o_txact_o               = txact,
-            o_txpktfin_o            = txpktfin,
-            o_rxdat_o               = rxdat,
-            o_rxval_o               = rxval,
-            o_rxact_o               = rxact,
-            i_rxrdy_i               = rxrdy,
-            o_rxpktval_o            = rxpktval,
-            o_setup_o               = setup,
-            o_endpt_o               = endpt,
-            o_sof_o                 = sof,
-            i_inf_alter_i           = alt_i,
-            o_inf_alter_o           = alt_o,
-            o_inf_sel_o             = alt_sel,
-            o_inf_set_o             = alt_set,
-            i_descrom_rdata_i       = d.descrom_rdat,
-            o_descrom_raddr_o       = d.descrom_raddr,
-            i_desc_dev_addr_i       = d.dev_addr,
-            i_desc_dev_len_i        = d.dev_len,
-            i_desc_qual_addr_i      = d.qual_addr,
-            i_desc_qual_len_i       = d.qual_len,
-            i_desc_fscfg_addr_i     = d.fscfg_addr,
-            i_desc_fscfg_len_i      = d.fscfg_len,
-            i_desc_hscfg_addr_i     = d.hscfg_addr,
-            i_desc_hscfg_len_i      = d.hscfg_len,
-            i_desc_oscfg_addr_i     = d.oscfg_addr,
-            i_desc_strlang_addr_i   = d.strlang_addr,
-            i_desc_strvendor_addr_i = d.strvendor_addr,
-            i_desc_strvendor_len_i  = d.strvendor_len,
-            i_desc_strproduct_addr_i= d.strproduct_addr,
-            i_desc_strproduct_len_i = d.strproduct_len,
-            i_desc_strserial_addr_i = d.strserial_addr,
-            i_desc_strserial_len_i  = d.strserial_len,
-            i_desc_have_strings_i   = d.have_strings,
-            i_desc_bos_addr_i       = Constant(0, 16),
-            i_desc_bos_len_i        = Constant(0, 16),
-            i_desc_hidrpt_addr_i    = Constant(0, 16),
-            i_desc_hidrpt_len_i     = Constant(0, 16),
-            o_desc_index_o          = Signal(8),
-            o_desc_type_o           = Signal(8),
-            o_utmi_dataout_o        = utmi.dataout,
-            o_utmi_txvalid_o        = utmi.txvalid,
-            i_utmi_txready_i        = utmi.txready,
-            i_utmi_datain_i         = utmi.datain,
-            i_utmi_rxactive_i       = utmi.rxactive,
-            i_utmi_rxvalid_i        = utmi.rxvalid,
-            i_utmi_rxerror_i        = utmi.rxerror,
-            i_utmi_linestate_i      = utmi.linestate,
-            o_utmi_opmode_o         = utmi.opmode,
-            o_utmi_xcvrselect_o     = utmi.xcvrselect,
-            o_utmi_termselect_o     = utmi.termselect,
-            o_utmi_reset_o          = utmi.reset,
+            i_clk_i                  = ClockSignal("phy"),
+            i_reset_i                = rst,
+            o_usbrst_o               = usbrst,
+            o_highspeed_o            = Signal(),
+            o_suspend_o              = Signal(),
+            o_online_o               = Signal(),
+            i_txdat_i                = txdat,
+            i_txval_i                = txval,
+            i_txdat_len_i            = txdat_len,
+            i_txiso_pid_i            = Constant(0b0011, 4), # DATA0 (HS, 1 packet per micro-frame).
+            i_txcork_i               = txcork,
+            o_txpop_o                = txpop,
+            o_txact_o                = txact,
+            o_txpktfin_o             = txpktfin,
+            o_rxdat_o                = rxdat,
+            o_rxval_o                = rxval,
+            o_rxact_o                = rxact,
+            i_rxrdy_i                = rxrdy,
+            o_rxpktval_o             = rxpktval,
+            o_setup_o                = setup,
+            o_endpt_o                = endpt,
+            o_sof_o                  = sof,
+            i_inf_alter_i            = alt_i,
+            o_inf_alter_o            = alt_o,
+            o_inf_sel_o              = alt_sel,
+            o_inf_set_o              = alt_set,
+            i_descrom_rdata_i        = d.descrom_rdat,
+            o_descrom_raddr_o        = d.descrom_raddr,
+            i_desc_dev_addr_i        = d.dev_addr,
+            i_desc_dev_len_i         = d.dev_len,
+            i_desc_qual_addr_i       = d.qual_addr,
+            i_desc_qual_len_i        = d.qual_len,
+            i_desc_fscfg_addr_i      = d.fscfg_addr,
+            i_desc_fscfg_len_i       = d.fscfg_len,
+            i_desc_hscfg_addr_i      = d.hscfg_addr,
+            i_desc_hscfg_len_i       = d.hscfg_len,
+            i_desc_oscfg_addr_i      = d.oscfg_addr,
+            i_desc_strlang_addr_i    = d.strlang_addr,
+            i_desc_strvendor_addr_i  = d.strvendor_addr,
+            i_desc_strvendor_len_i   = d.strvendor_len,
+            i_desc_strproduct_addr_i = d.strproduct_addr,
+            i_desc_strproduct_len_i  = d.strproduct_len,
+            i_desc_strserial_addr_i  = d.strserial_addr,
+            i_desc_strserial_len_i   = d.strserial_len,
+            i_desc_have_strings_i    = d.have_strings,
+            i_desc_bos_addr_i        = Constant(0, 16),
+            i_desc_bos_len_i         = Constant(0, 16),
+            i_desc_hidrpt_addr_i     = Constant(0, 16),
+            i_desc_hidrpt_len_i      = Constant(0, 16),
+            o_desc_index_o           = Signal(8),
+            o_desc_type_o            = Signal(8),
+            o_utmi_dataout_o         = utmi.dataout,
+            o_utmi_txvalid_o         = utmi.txvalid,
+            i_utmi_txready_i         = utmi.txready,
+            i_utmi_datain_i          = utmi.datain,
+            i_utmi_rxactive_i        = utmi.rxactive,
+            i_utmi_rxvalid_i         = utmi.rxvalid,
+            i_utmi_rxerror_i         = utmi.rxerror,
+            i_utmi_linestate_i       = utmi.linestate,
+            o_utmi_opmode_o          = utmi.opmode,
+            o_utmi_xcvrselect_o      = utmi.xcvrselect,
+            o_utmi_termselect_o      = utmi.termselect,
+            o_utmi_reset_o           = utmi.reset,
         )
 
         # USB 2.0 PHY ------------------------------------------------------------------------------

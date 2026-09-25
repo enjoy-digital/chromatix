@@ -84,3 +84,50 @@ def test_video_fifo_level_and_fwft():
 
     run_simulation(dut, {"write": writer(), "read": reader()}, clocks={"write": 20, "read": 7})
     assert reads == data
+
+def test_video_fifo_design_domains_reset():
+    """clock_pins=False (as integrated): Almost_Empty and Reset (resynchronized in both domains)."""
+    fifo = VideoFIFO(depth=64, clock_pins=False)
+
+    def read_level(n):
+        for _ in range(n):
+            yield
+        return ((yield fifo.Rnum), (yield fifo.Almost_Empty), (yield fifo.Empty))
+
+    def writer():
+        for _ in range(8):
+            yield
+        for d in [0x11, 0x22, 0x33]:
+            yield fifo.Data.eq(d)
+            yield fifo.WrEn.eq(1)
+            yield
+        yield fifo.WrEn.eq(0)
+        for _ in range(64):
+            yield
+        yield fifo.Reset.eq(1)
+        for _ in range(8):
+            yield
+        yield fifo.Reset.eq(0)
+        for _ in range(64):
+            yield
+        yield fifo.Data.eq(0x44)
+        yield fifo.WrEn.eq(1)
+        yield
+        yield fifo.WrEn.eq(0)
+
+    def reader():
+        assert (yield from read_level(40)) == (3, 0, 0)
+        assert (yield fifo.Q) == 0x11
+        yield fifo.RdEn.eq(1)
+        yield
+        yield
+        yield fifo.RdEn.eq(0)
+        assert (yield from read_level(4)) == (1, 1, 0)
+        assert (yield fifo.Q) == 0x33
+        # Reset (FIFO flushed, level cleared).
+        assert (yield from read_level(60)) == (0, 1, 1)
+        # Operational again after reset.
+        assert (yield from read_level(80)) == (1, 1, 0)
+        assert (yield fifo.Q) == 0x44
+
+    run_simulation(fifo, {"write": writer(), "read": reader()}, clocks={"write": 10, "read": 10})

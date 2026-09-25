@@ -25,9 +25,9 @@ class DebugControl(LiteXModule):
     """
     def __init__(self):
         # Inputs (resynchronized to sys when needed).
-        self.bist_done       = Signal() # xClk.
-        self.bist_failed     = Signal() # xClk.
-        self.lcd_init_done   = Signal() # pClk.
+        self.bist_done       = Signal()  # xClk.
+        self.bist_failed     = Signal()  # xClk.
+        self.lcd_init_done   = Signal()  # pClk.
         self.menu_disabled   = Signal()
         self.low_battery     = Signal()
         self.system_control  = Signal(16)
@@ -35,10 +35,8 @@ class DebugControl(LiteXModule):
         self.adc_value       = Signal(14)
         self.bat_is_li       = Signal()
         self.volume          = Signal(8) # hClk.
-        self.headphones      = Signal() # hClk.
+        self.headphones      = Signal()  # hClk.
         self.pmic_sys_status = Signal(8) # hClk.
-
-        # # #
 
         # Virtual Buttons.
         self._buttons = CSRStorage(len(BUTTONS), fields=[
@@ -62,6 +60,8 @@ class DebugControl(LiteXModule):
         self._adc_value       = CSRStatus(14, description="Battery ADC value (last raw sample).")
         self._volume          = CSRStatus(8,  description="Codec volume.")
         self._pmic_sys_status = CSRStatus(8,  description="PMIC system status.")
+
+        # # #
 
         self.specials += [
             MultiReg(self.bist_done,       self._status.fields.bist_done),

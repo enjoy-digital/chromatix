@@ -17,7 +17,7 @@ from migen import *
 
 from litex.gen.sim import run_simulation
 
-from chromatix.gateware.usb_fifo import USBEndpointFIFO
+from chromatix.gateware.usb_fifo import USBEndpointFIFO, _CrossFIFO, _TXPacketFIFO, _RXPacketFIFO
 from test.eqcheck import export_migen, eqcheck
 
 # Helpers ------------------------------------------------------------------------------------------
@@ -250,7 +250,201 @@ def test_usb_fifo_loopback():
     tx_packets[0][1] = tx_data[1]
     assert sum(tx_packets, []) == tx_data
 
-# Formal Equivalence (reduced buffers) ------------------------------------------------------------
+# Unit Simulations ---------------------------------------------------------------------------------
+
+class _FIFOBench(Module):
+    """FIFO helper with its reset input exposed."""
+    def __init__(self, cls, **kwargs):
+        self.reset = Signal()
+        self.submodules.dut = cls(self.reset, **kwargs)
+
+def read_monitor(dut, fire, data, out, cycles):
+    """Collect data the cycle after each fire (registered read)."""
+    prev = False
+    for _ in range(cycles):
+        yield
+        if prev:
+            out.append((yield data))
+        prev = (yield fire)
+
+def test_cross_fifo():
+    """_CrossFIFO: data order, full (extra writes dropped), almost_full level and empty flags."""
+    bench = _FIFOBench(_CrossFIFO, asize=3, afull=4)
+    dut   = bench.dut
+    out   = []
+    res   = {}
+
+    def gen():
+        res["empty0"] = (yield dut.empty)
+        for d in range(1, 11): # 10 writes, capacity 8.
+            yield dut.din.eq(d)
+            yield dut.we.eq(1)
+            yield
+        yield dut.we.eq(0)
+        for _ in range(4):
+            yield
+        res["full"] = [(yield dut.empty), (yield dut.full), (yield dut.almost_full)]
+        yield dut.re.eq(1)
+        for _ in range(12):
+            yield
+        yield dut.re.eq(0)
+        for _ in range(4):
+            yield
+        res["empty1"] = [(yield dut.empty), (yield dut.full), (yield dut.almost_full)]
+
+    def mon():
+        yield from read_monitor(dut, dut.re & ~dut.empty, dut.dout, out, 40)
+
+    run_simulation(bench, [gen(), mon()])
+    assert res["empty0"] == 1
+    assert res["full"]   == [0, 1, 1]
+    assert res["empty1"] == [1, 0, 0]
+    assert out == list(range(1, 9))
+
+def test_tx_packet_fifo_rewind():
+    """_TXPacketFIFO: bytes popped during a transfer without pktfin (NAK) are popped again after
+    the txact falling edge; pktfin releases them (wrnum/empty)."""
+    bench = _FIFOBench(_TXPacketFIFO, asize=4)
+    dut   = bench.dut
+    res   = {}
+
+    def pops(n):
+        # Single (non back-to-back) pops: dout sampled with read.
+        data = []
+        for _ in range(n):
+            yield dut.read.eq(1)
+            yield
+            data.append((yield dut.dout))
+            yield dut.read.eq(0)
+            yield
+            yield
+        return data
+
+    def transfer(n, ack):
+        yield dut.txact.eq(1)
+        yield
+        data = yield from pops(n)
+        yield dut.pktfin.eq(ack)
+        yield
+        yield dut.pktfin.eq(0)
+        yield dut.txact.eq(0)
+        for _ in range(3):
+            yield
+        return data
+
+    def gen():
+        for d in range(1, 11):
+            yield dut.din.eq(d)
+            yield dut.write.eq(1)
+            yield
+        yield dut.write.eq(0)
+        for _ in range(3):
+            yield
+        res["wrnum0"] = (yield dut.wrnum)
+        res["nak"]    = yield from transfer(4, ack=False)
+        res["wrnum1"] = (yield dut.wrnum)
+        res["ack0"]   = yield from transfer(4, ack=True)
+        res["wrnum2"] = (yield dut.wrnum)
+        res["ack1"]   = yield from transfer(6, ack=True)
+        res["end"]    = [(yield dut.wrnum), (yield dut.empty)]
+
+    run_simulation(bench, gen())
+    assert res["wrnum0"] == 10
+    assert res["nak"]    == [1, 2, 3, 4]
+    assert res["wrnum1"] == 10
+    assert res["ack0"]   == [1, 2, 3, 4]
+    assert res["wrnum2"] == 6
+    assert res["ack1"]   == [5, 6, 7, 8, 9, 10]
+    assert res["end"]    == [0, 1]
+
+def test_rx_packet_fifo_drop():
+    """_RXPacketFIFO: bytes are only readable once validated by pktval, a non-validated packet is
+    dropped at the next packet start (rxact rising edge)."""
+    bench   = _FIFOBench(_RXPacketFIFO, asize=4)
+    dut     = bench.dut
+    packets = [([1, 2, 3], True), ([0xaa, 0xbb], False), ([4, 5], True)]
+    out     = []
+    res     = {}
+
+    def gen():
+        for n, (data, ok) in enumerate(packets):
+            yield dut.rxact.eq(1)
+            for _ in range(3):
+                yield
+            for d in data:
+                yield dut.din.eq(d)
+                yield dut.write.eq(1)
+                yield
+            yield dut.write.eq(0)
+            yield
+            yield
+            res[f"empty{n}"] = (yield dut.empty)
+            yield dut.pktval.eq(ok)
+            yield
+            yield dut.pktval.eq(0)
+            yield dut.rxact.eq(0)
+            for _ in range(3):
+                yield
+        res["wrnum"] = (yield dut.wrnum)
+        yield dut.read.eq(1)
+        for _ in range(8):
+            yield
+        yield dut.read.eq(0)
+        yield
+        res["end"] = [(yield dut.empty), (yield dut.wrnum)]
+
+    def mon():
+        yield from read_monitor(dut, dut.read & ~dut.empty, dut.dout, out, 80)
+
+    run_simulation(bench, [gen(), mon()])
+    assert res["empty0"] == 1 # Not validated yet.
+    assert res["empty1"] == 0 # 1st packet validated.
+    assert res["wrnum"]  == 3 + 2 # 2nd packet dropped (write pointer rewound).
+    assert out == [1, 2, 3, 4, 5]
+    assert res["end"] == [1, 0]
+
+def test_usb_fifo_endpoint_mux():
+    """Status outputs: reset values while reset, EP0/EP3/disabled endpoints txcork/rxrdy/txlen."""
+    dut = USBEndpointFIFO()
+    res = {}
+
+    def status():
+        return [(yield dut.txcork), (yield dut.rxrdy), (yield dut.txlen)]
+
+    def gen():
+        yield dut.reset.eq(1)
+        yield dut.endpt.eq(3)
+        yield
+        yield
+        res["reset"] = yield from status()
+        yield dut.reset.eq(0)
+        for ep in [0, 1, 2, 3, 4, 15]:
+            yield dut.endpt.eq(ep)
+            yield
+            yield
+            res[ep] = yield from status()
+        # EP3 with IN data: uncorked, txlen = min(level, tx_max).
+        yield dut.endpt.eq(3)
+        for d in range(70):
+            yield dut.tx_data.eq(d)
+            yield dut.tx_valid.eq(1)
+            yield
+        yield dut.tx_valid.eq(0)
+        for _ in range(8):
+            yield
+        res["data"] = yield from status()
+
+    run_simulation(dut, gen())
+    assert res["reset"] == [0, 0, 32]
+    assert res[0]  == [0, 1, 0]
+    assert res[1]  == [1, 1, 0]
+    assert res[2]  == [1, 1, 0]
+    assert res[3]  == [1, 1, 0] # Empty: corked.
+    assert res[4]  == [1, 0, 0]
+    assert res[15] == [1, 0, 0]
+    assert res["data"] == [0, 1, 64]
+
+# Formal Equivalence (reduced buffers) -------------------------------------------------------------
 
 # Reduced buffers: packet FIFOs 2**asize bytes (RX almost-full at afull), clock-cross FIFOs
 # 2**cross_asize bytes (almost-full at cross_afull), i_ep3_tx_max = tx_max. The same reduction is
@@ -527,6 +721,7 @@ def test_usb_fifo_cosim():
         "--top-module", "tb", "-Mdir", "obj", "-o", "tb", f"-GCYCLES={COSIM_CYCLES}", *files, tb],
         capture_output=True, text=True, cwd=workdir)
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    tx_full = rx_full = 0
     for seed in COSIM_SEEDS:
         r = subprocess.run([os.path.join(workdir, "obj", "tb"), f"+seed={seed}"],
             capture_output=True, text=True, cwd=workdir)
@@ -539,4 +734,7 @@ def test_usb_fifo_cosim():
         assert errors == 0, r.stdout
         # Coverage: traffic in both directions, NAK/resend and OUT buffer almost full reached.
         assert rx_dval > 1000 and pops > 1000 and acks > 100 and naks > 10 and rxrdy_low > 0
-        assert re.search(r"tx_full=[1-9]", r.stdout) and re.search(r"rx_full=[1-9]", r.stdout)
+        tx_full += int(re.search(r"tx_full=(\d+)", r.stdout).group(1))
+        rx_full += int(re.search(r"rx_full=(\d+)", r.stdout).group(1))
+    # Buffers full reached (over all seeds: the random streams depend on the Verilator version).
+    assert tx_full > 0 and rx_full > 0

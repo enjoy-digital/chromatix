@@ -18,7 +18,6 @@ setup(
     author_email                  = "florent@enjoy-digital.fr",
     url                           = "https://github.com/enjoy-digital/chromatic_fpga_test",
     download_url                  = "https://github.com/enjoy-digital/chromatic_fpga_test",
-    test_suite                    = "test",
     license                       = "BSD",
     python_requires               = "~=3.7",
     install_requires              = ["litex", "litei2c"],

@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 import os
+import shutil
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from chromatix.gateware.usb_class import *
 from test.eqcheck import export_migen, eqcheck
 
 # Helpers ------------------------------------------------------------------------------------------
+
+requires_yosys = pytest.mark.skipif(shutil.which("yosys") is None, reason="Yosys not available")
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
@@ -105,6 +108,7 @@ def check(tmp_path, gold_top, gate, depth, ignore_outputs=[]):
 
 # Equivalence --------------------------------------------------------------------------------------
 
+@requires_yosys
 def test_setup_parser_equivalence(tmp_path):
     """USBSetupParser == setup header capture of usbuvcuart_top.v (checked through a gold wrapper)."""
     gold = fetch_original(str(tmp_path))
@@ -145,12 +149,14 @@ def test_setup_parser_equivalence(tmp_path):
     ok, log = eqcheck([wrapper], "setup_parser", [gate_v], "setup_parser", depth=24, workdir=str(tmp_path))
     assert ok, log[-2000:]
 
+@requires_yosys
 def test_ctrl_uart_equivalence(tmp_path):
     """CDCACMControl == ctrl_uart."""
     w = control_wrapper(CDCACMControl, [("s_ctl_sig", "ctl_sig"), ("s_dte1_rate", "dte_rate"),
         ("s_char1_format", "char_format"), ("s_parity1_type", "parity_type"), ("s_data1_bits", "data_bits")])
     check(tmp_path, "ctrl_uart", w, depth=16)
 
+@requires_yosys
 def test_ctrl_uvc_equivalence(tmp_path):
     """UVCControl == ctrl_uvc (probe control outputs are constants and unused)."""
     w = control_wrapper(UVCControl)
@@ -159,11 +165,13 @@ def test_ctrl_uvc_equivalence(tmp_path):
         "dwClockFrequency", "bmFramingInfo", "bPreferedVersion", "bMinVersion", "bMaxVersion"]
     check(tmp_path, "ctrl_uvc", w, depth=16, ignore_outputs=probe)
 
+@requires_yosys
 def test_ctrl_uac_equivalence(tmp_path):
     """UACControl == ctrl_uac."""
     w = control_wrapper(UACControl)
     check(tmp_path, "ctrl_uac", w, depth=16)
 
+@requires_yosys
 def test_interface_alt_select_equivalence(tmp_path):
     """InterfaceAltSelect == interface_alt_select."""
     w   = _Wrapper()
@@ -205,6 +213,7 @@ def test_cdc_uart_loopback():
     run_simulation(dut, gen())
     assert rx == data
 
+@requires_yosys
 def test_uac_endpoint_equivalence(tmp_path):
     """UACEndpoint == usbuac_ep (bounded: the 44.1kHz accumulator is only partially covered)."""
     w   = _Wrapper()

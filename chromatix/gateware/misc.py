@@ -14,17 +14,21 @@ class TickGenerator(LiteXModule):
     """
     1s / 0.5s / 1% enable pulses (from a 2**23 cycles period, ~1s at ~8.39MHz).
 
-    The 1% counter is re-aligned on each 1s pulse.
+    - second:      one pulse every `second_cycles` cycles.
+    - half_second: one pulse every `second_cycles/2` cycles (also asserted with second).
+    - percent:     one pulse every `percent_cycles + 1` cycles, re-aligned on each 1s pulse (so 99
+                   pulses per second with the defaults, the 100th hundredth being the 1s pulse).
+    - counter:     free-running 1s counter (low bits also used as a LED PWM source).
     """
     def __init__(self, second_cycles=2**23, percent_cycles=83886):
         self.second      = Signal()
         self.half_second = Signal()
         self.percent     = Signal()
-        self.counter     = counter = Signal(max=second_cycles, reset=0)
+        self.counter     = counter = Signal(max=second_cycles)
 
         # # #
 
-        percent_counter = Signal(max=percent_cycles + 1, reset=0)
+        percent_counter = Signal(max=percent_cycles + 1)
 
         self.sync += [
             self.percent.eq(0),
@@ -56,10 +60,14 @@ class StatusLed(LiteXModule):
     """
     RGB status LED (active-low).
 
-    Flashes white three times after configuration (so a custom build is obvious on hardware), then
-    shows the system monitor status with priority: white > green > yellow (blinking) > red.
+    Flashes white three times after configuration/reset (so a custom build is obvious on hardware,
+    each flash/off phase lasting `boot_phase_cycles` cycles), then shows the system monitor status
+    with priority: white > green > yellow > red.
+
+    Yellow is red + green, green being modulated by `blink` (a fast toggling signal: 50% duty cycle
+    PWM, ~262kHz with counter[4] at ~8.39MHz) to balance the color.
     """
-    def __init__(self, pads):
+    def __init__(self, pads, boot_phase_cycles=2**23):
         self.reset  = Signal()
         self.white  = Signal()
         self.green  = Signal()
@@ -69,7 +77,9 @@ class StatusLed(LiteXModule):
 
         # # #
 
-        boot_counter = Signal(26)
+        boot_bits    = log2_int(boot_phase_cycles)
+        boot_counter = Signal(boot_bits + 3)
+        boot_phase   = boot_counter[boot_bits:]
         boot_active  = Signal()
         boot_white   = Signal()
 
@@ -78,13 +88,13 @@ class StatusLed(LiteXModule):
         self.sync += [
             If(self.reset,
                 boot_counter.eq(0),
-            ).Elif(boot_counter[23:26] != 6,
+            ).Elif(boot_phase != 6,
                 boot_counter.eq(boot_counter + 1),
             )
         ]
         self.comb += [
-            boot_active.eq(boot_counter[23:26] < 6),
-            boot_white.eq(~boot_counter[23]),
+            boot_active.eq(boot_phase < 6),
+            boot_white.eq(~boot_phase[0]),
         ]
 
         self.sync += [
@@ -112,7 +122,11 @@ class ESP32Control(LiteXModule):
     ESP32 UART passthrough and boot control from the USB CDC DTR/RTS lines (esptool style).
 
     - "phy" domain (USB PHY clock): resynchronizes the UART and computes EN/IO0 from RTS/DTR.
-    - "sys" domain: EN release delayed/filtered through a shift register (IO0 is registered).
+    - "sys" domain: EN release delayed/filtered through a shift register (IO0 is registered): EN is
+      cleared as soon as the internal EN is low and only released once it has been sampled high 8
+      times (one sample every 4096 cycles, ~3.9ms at ~8.39MHz).
+
+    Note: As in the original design, the "phy" -> "sys" EN/IO0 crossing is not resynchronized.
     """
     def __init__(self, esp32_pads, uart_pads):
         self.usb_locked = Signal()
@@ -142,8 +156,8 @@ class ESP32Control(LiteXModule):
         ]
 
         # Sys domain: ESP32 boot delay (shift register debounces EN toggle).
-        delay_cnt   = Signal(12, reset=0)
-        delay_shift = Signal(8,  reset=0)
+        delay_cnt   = Signal(12)
+        delay_shift = Signal(8)
         self.sync += [
             esp32_pads.io0.eq(io0_int),
             delay_cnt.eq(delay_cnt + 1),

@@ -42,11 +42,12 @@ class CRG(LiteXModule):
         )
         self.comb += pll.reset.eq(0)
         pll.register_clkin(clk_fpga, 33.55432e6)
-        pll.create_clkout(self.cd_fclk, 33.55432e6 * 4, with_reset=False)  # ~134.22 MHz (ODIV=6)
-        pll.create_clkout(self.cd_pclk, 33.55432e6,     with_reset=False)  # ~33.55 MHz  (ODIV=24)
-        pll.create_clkout(self.cd_hclk, 33.55432e6 / 2, with_reset=False)  # ~16.78 MHz  (ODIV=48)
-        pll.create_clkout(self.cd_gclk, 33.55432e6 / 4, with_reset=False)  # ~8.39 MHz   (ODIV=96)
-        pll.create_clkout(self.cd_xclk, 33.55432e6 * 2, with_reset=False)  # ~67.11 MHz  (ODIV=12)
+        # Exact integer ratios (CLKOUT0..4 order is used by the SDC generated clocks).
+        pll.create_clkout(self.cd_fclk, 33.55432e6 * 4, with_reset=False)  # ~134.22 MHz (CLKOUT0).
+        pll.create_clkout(self.cd_pclk, 33.55432e6,     with_reset=False)  # ~33.55 MHz  (CLKOUT1).
+        pll.create_clkout(self.cd_hclk, 33.55432e6 / 2, with_reset=False)  # ~16.78 MHz  (CLKOUT2).
+        pll.create_clkout(self.cd_gclk, 33.55432e6 / 4, with_reset=False)  # ~8.39 MHz   (CLKOUT3).
+        pll.create_clkout(self.cd_xclk, 33.55432e6 * 2, with_reset=False)  # ~67.11 MHz  (CLKOUT4).
 
         # Sys: alias of gClk.
         self.comb += [

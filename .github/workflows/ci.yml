@@ -5,18 +5,29 @@ on: [push, pull_request]
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     steps:
-      # Checkout Repository (with the MiSTer Game Boy core submodule).
+      # Checkout Repository (with the MiSTer Game Boy core submodule and the full history: some
+      # equivalence tests read the original Verilog sources from git history).
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       # Install Tools.
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y wget build-essential python3 python3-pip
+          python3 -m pip install --user pytest pytest-xdist
+
+      # Install Yosys/Yosys-ABC/Verilator (formal equivalence and Verilator tests, Ubuntu packages
+      # are too old).
+      - name: Install OSS CAD Suite
+        uses: YosysHQ/setup-oss-cad-suite@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Install (n)Migen / LiteX / Cores.
       - name: Install LiteX
@@ -24,14 +35,22 @@ jobs:
           wget https://raw.githubusercontent.com/enjoy-digital/litex/master/litex_setup.py
           python3 litex_setup.py --config=standard --init --install --user
 
-      # Install ChromatiX.
+      # Install ChromatiX (same as litex_setup.py for LiteX repositories).
       - name: Install ChromatiX
-        run: python3 -m pip install --user -e .
+        run: python3 -m pip install --user --no-build-isolation -e .
+
+      # Show Tools versions.
+      - name: Tools versions
+        run: |
+          which python3 yosys yosys-abc verilator
+          python3 --version
+          yosys -V
+          verilator --version
 
       # Elaborate design (Verilog/constraints generation, no Gowin toolchain).
       - name: Elaborate
         run: python3 chromatix.py --build --no-compile
 
-      # Run simulation tests.
+      # Run simulation/formal tests.
       - name: Test
-        run: python3 -m pytest -v test
+        run: python3 -m pytest -v -rs -n auto test

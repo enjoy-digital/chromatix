@@ -210,7 +210,8 @@ def _build_io_constraints(toolchain):
 
     Same as the default LiteX Gowin generation, except that:
     - Analog battery ADC pins only get an IO_LOC (no IO_TYPE).
-    - Differential pairs (_p/_n) are merged into a single IO_LOC and the _n side is skipped.
+    - Differential pairs (_p/_n with a differential IOStandard) are merged into a single IO_LOC and
+      the _n side is skipped (single-ended _p/_n pins, ex HDMI debug pins, are constrained as is).
     """
     cst = []
 
@@ -228,6 +229,12 @@ def _build_io_constraints(toolchain):
                 return (entry_name, entry_pin, entry_other)
         return (None, None, None)
 
+    def is_differential(constraints):
+        for c in constraints:
+            if isinstance(c, IOStandard) and (c.name.endswith("D") or "LVDS" in c.name):
+                return True
+        return False
+
     for name, pin, other in flat_sc:
         if name in {"vbat_adc_p", "vbat_adc_n"}:
             if pin != "X":
@@ -237,7 +244,9 @@ def _build_io_constraints(toolchain):
         if pin != "X":
             t_name   = name.split('[')
             tmp_name = t_name[0]
-            if tmp_name[-2:] == "_p":
+            if not is_differential(other):
+                pass
+            elif tmp_name[-2:] == "_p":
                 pn = tmp_name[:-2] + "_n"
                 if len(t_name) > 1:
                     pn += '[' + t_name[1]

@@ -14,7 +14,8 @@ class BatteryADC(LiteXModule):
     """
     Battery voltage measurement with the GW5A hard ADC (voltage mode, port of adc_wrap.v).
 
-    A conversion is started on each req pulse; ready pulses with the 14-bit value.
+    A conversion is started on each req pulse; ready pulses for one cycle when the 14-bit value is
+    updated. Scaling/averaging is done by the system monitor (SystemMonitorControl).
     """
     def __init__(self, pads):
         self.enable = Signal()   # Held in reset when 0.
@@ -27,7 +28,10 @@ class BatteryADC(LiteXModule):
         adc_ready = Signal()
         adc_value = Signal(14)
         adc_en    = Signal()
-        state     = Signal(2)
+        state     = Signal(2) # 0: Idle, 1: Request, 2: Wait Ready, 3: Done.
+
+        # Note: The primitives are explicitly named (adc_ibuf/adc_inst): an instance named like its
+        # primitive (ex: "ADC") broke the I2C on hardware.
 
         # Analog input buffer.
         self.specials += Instance("TLVDS_IBUF_ADC", name="adc_ibuf",
@@ -70,7 +74,7 @@ class BatteryADC(LiteXModule):
             o_MDRP_RDATA  = Signal(8),
         )
 
-        # Request / Ready FSM.
+        # Request / Ready FSM (ADCREQI held until ADCRDY is deasserted, value captured on ADCRDY).
         self.sync += [
             adc_en.eq(self.enable),
             self.ready.eq(0),

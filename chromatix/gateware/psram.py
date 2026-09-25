@@ -155,7 +155,7 @@ class PSRAMController(LiteXModule):
 
         # # #
 
-        # Shift register (16 bits = 2 DDR beats sent per sys cycle).
+        # Command/address/data shift register: [63:48] (2 DDR beats) sent to the PHY each sys cycle.
         dq_sr      = Signal(64)
         step       = Signal(4)
         startup    = Signal(max=startup_cycles + 1)
@@ -250,7 +250,13 @@ class PSRAMController(LiteXModule):
                 NextValue(dq_sr, 2**64 - 1),
             ).Else(
                 # Mode register write: 0xC0 0xC0, address, data.
-                NextValue(dq_sr, Cat(Constant(0, 8), cfg_value, cfg_waddr, Constant(0, 28), Constant(0xc0c0, 16))),
+                NextValue(dq_sr, Cat(
+                    Constant(0, 8),      # [ 7: 0].
+                    cfg_value,           # [15: 8]: Data.
+                    cfg_waddr,           # [19:16]: Address.
+                    Constant(0, 28),     # [47:20].
+                    Constant(0xc0c0, 16) # [63:48]: Command.
+                )),
             ),
         )
         fsm.act("CONFIGWRITE",
@@ -278,7 +284,12 @@ class PSRAMController(LiteXModule):
         fsm.act("CONFIGREAD_START",
             NextState("CONFIGREAD"),
             # Mode register read: 0x40 0x40, address.
-            NextValue(dq_sr, Cat(Constant(0, 16), cfg_raddr, Constant(0, 28), Constant(0x4040, 16))),
+            NextValue(dq_sr, Cat(
+                Constant(0, 16),     # [15: 0].
+                cfg_raddr,           # [19:16]: Address.
+                Constant(0, 28),     # [47:20].
+                Constant(0x4040, 16) # [63:48]: Command.
+            )),
             NextValue(phy.dq_oe_n, 0),
             NextValue(phy.clk_en, 1),
         )
@@ -386,7 +397,12 @@ class PSRAMController(LiteXModule):
             NextValue(phy.cs_n, 1),
             If(step == 4,
                 NextState("WRITING"),
-                NextValue(dq_sr, Cat(Constant(0, 16), Constant(0, 10), next_row, Constant(0, 9), Constant(0xa0a0, 16))),
+                NextValue(dq_sr, Cat(
+                    Constant(0, 26),     # [25: 0].
+                    next_row,            # [38:26]: Address (row, byte address 1kB aligned).
+                    Constant(0, 9),      # [47:39].
+                    Constant(0xa0a0, 16) # [63:48]: Command.
+                )),
                 NextValue(phy.cs_n, 0),
                 NextValue(phy.clk_en, 1),
                 NextValue(phy.dq_oe_n, 0),
@@ -396,10 +412,23 @@ class PSRAMController(LiteXModule):
 
 # PSRAM BIST ---------------------------------------------------------------------------------------
 
+def next_pattern_nv(testtype, din, addr_cnt, from_counter):
+    """Next BIST data pattern (as NextValue statements)."""
+    return Case(testtype, {
+        0: NextValue(din, ~din),
+        1: NextValue(din, addr_cnt[:16] if from_counter else din + 1),
+        2: NextValue(din, 0xffff),
+        3: NextValue(din, 0x0000),
+    })
+
+
 class PSRAMBIST(LiteXModule):
     """
     Short PSRAM BIST (port of PSRAMBIST_Burst.vhd, SHORTTEST): write/read bursts with alternating,
-    counting, ones and zeros patterns.
+    counting, ones and zeros patterns. Each pattern is written then read back with bursts spread over
+    the lower 4MB (word address stepping by 512*burst_words + 1 until bit 21 is set: 8 bursts).
+
+    `ctrl` provides the arbiter shared ready/dout.
     """
     def __init__(self, port, ctrl, burst_words=512):
         self.reset    = Signal()
@@ -434,7 +463,10 @@ class PSRAMBIST(LiteXModule):
                 self.failed.eq(0),
             )
         ]
-        for start, wait, req in [("WRITE_START", "WRITE_WAIT", req_wr), ("READ_START", "READ_WAIT", req_read)]:
+        for start, wait, req in [
+            ("WRITE_START", "WRITE_WAIT", req_wr),
+            ("READ_START",  "READ_WAIT",  req_read),
+        ]:
             fsm.act(start,
                 If(ctrl.ready,
                     NextState(wait),
@@ -483,12 +515,3 @@ class PSRAMBIST(LiteXModule):
         fsm.act("TESTDONE",
             NextValue(self.finished, 1),
         )
-
-def next_pattern_nv(testtype, din, addr_cnt, from_counter):
-    """Next BIST data pattern (as NextValue statements)."""
-    return Case(testtype, {
-        0: NextValue(din, ~din),
-        1: NextValue(din, addr_cnt[:16] if from_counter else din + 1),
-        2: NextValue(din, 0xffff),
-        3: NextValue(din, 0x0000),
-    })

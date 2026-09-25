@@ -64,24 +64,29 @@ GLYPHS_HEX = GLYPHS_DIGITS + [
     ["111", "100", "111", "100", "100"], # F
 ]
 
+# Helpers ------------------------------------------------------------------------------------------
+
 def bitmap_lookup(bitmap, x, y):
     """Combinational bitmap[y][x] lookup (bitmap as a list of strings)."""
-    bits = [int(c) for row in bitmap for c in row]
+    bits  = [int(c) for row in bitmap for c in row]
     width = len(bitmap[0])
     return Array(Constant(b, 1) for b in bits)[y*width + x]
 
 def glyph_lookup(glyphs, number, x, y):
     """Combinational glyph pixel lookup (3x5 glyphs, x < 3, y < 5)."""
-    bits = []
-    for glyph in glyphs:
-        for row in glyph:
-            bits += [int(c) for c in row]
+    bits = [int(c) for glyph in glyphs for row in glyph for c in row]
     return Array(Constant(b, 1) for b in bits)[number*15 + y*3 + x]
 
 # Color Correction ---------------------------------------------------------------------------------
 
 class ColorCorrection(LiteXModule):
-    """GBC LCD color correction (port of color_correction in vid_system_top.sv)."""
+    """
+    GBC color correction (port of color_correction in vid_system_top.sv).
+
+    Two corrections of the same RGB666 pixel, registered (1 cycle latency, syncs delayed to match):
+    - LCD: GBC LCD color matrix (5-bit precision, x/128 fixed point, saturated to 6-bit).
+    - UVC: lighter matrix for the USB video capture (x/16 fixed point).
+    """
     def __init__(self):
         self.correct_lcd = Signal()
         self.correct_uvc = Signal()
@@ -102,7 +107,7 @@ class ColorCorrection(LiteXModule):
         g = self.pixel[6:12]
         b = self.pixel[12:18]
 
-        # UVC correction.
+        # UVC correction (max values fit: r10 <= 1008, g8 <= 252, b10 <= 1008).
         r10 = Signal(10)
         g8  = Signal(8)
         b10 = Signal(10)
@@ -112,7 +117,7 @@ class ColorCorrection(LiteXModule):
             b10.eq(r*3 + g*2 + b*11),
         ]
 
-        # LCD correction.
+        # LCD correction (red: negative blue contribution floored at 0).
         rlcd1 = Signal(16)
         rlcd2 = Signal(16)
         rlcd3 = Signal(16)
@@ -126,6 +131,7 @@ class ColorCorrection(LiteXModule):
             blcd.eq(r[1:]*21 + g[1:]*24  + b[1:]*125),
         ]
         def clamp(v):
+            # /128, saturated to 6-bit when bit 13 is set (as the original; never set in practice).
             return Mux(v[13], 0x3f, v[7:13])
 
         self.sync += [
@@ -143,7 +149,13 @@ class ST7785PanelMaster(LiteXModule):
     ST7785 RGB666 panel timing generator with Game Boy line buffer (port of ST7785_panel_master.v).
 
     Lines are written in hClk (160 pixels) and scanned out in gClk, each pixel over 3 dot clocks
-    (B, G, R phases on the 6-bit bus). A UVC copy (18-bit) is output alongside.
+    (R, G then B on the 6-bit bus), OFFSET pixels after the start of the DE window. A UVC copy
+    (18-bit) is output alongside. Line: H_LW + H_VALID + H_FP + H_BP + 1 dot clocks, frame:
+    V_LW + V_VALID + V_FP + V_BP lines (+1 dot clock); the counters are re-aligned FINE_OFFSET dot
+    clocks after each Game Boy vsync (genlock) and held in reset while the Game Boy LCD is off.
+
+    Note: hClk -> gClk signals (vsync, lcd_on) and nrst are sampled without synchronizers, as in
+    the original design.
     """
     H_LW, H_VALID, H_FP, H_BP = 30, 720, 129, 32
     V_LW, V_VALID, V_FP, V_BP = 2, 144, 2, 10
@@ -175,14 +187,14 @@ class ST7785PanelMaster(LiteXModule):
         pixel_for_hs = self.H_LW + self.H_VALID + self.H_FP + self.H_BP
         pixel_for_vs = self.V_VALID + self.V_FP + self.V_BP
 
-        # Line Buffer.
+        # Line Buffer (1024 x {UVC, LCD} pixels, write/read addresses wrap independently).
         # Note: not an attribute, so the memory isn't exposed on the CSR bus by AutoCSR.
         mem     = Memory(36, self.DEPTH)
         wr_port = mem.get_port(write_capable=True, clock_domain="hclk")
         rd_port = mem.get_port(clock_domain="gclk")
         self.specials += mem, wr_port, rd_port
 
-        # hClk: write side.
+        # hClk: write side (160 pixels per line, address reset on vsync rising edge).
         hg_vs_r1 = Signal()
         hg_vs_r2 = Signal()
         hs_sr    = Signal(16)
@@ -197,7 +209,7 @@ class ST7785PanelMaster(LiteXModule):
         ]
         self.comb += [
             gb_vsync.eq(hg_vs_r1 & ~hg_vs_r2),
-            gb_hsync.eq(hs_sr[15] & ~hs_sr[14]),
+            gb_hsync.eq(hs_sr[15] & ~hs_sr[14]), # hsync rising edge, delayed by 15 cycles.
         ]
         self.sync.hclk += [
             If(gb_vsync,
@@ -232,8 +244,6 @@ class ST7785PanelMaster(LiteXModule):
         hoffset     = Signal(8)
         p_vs        = Signal()
         p_vs_r1     = Signal()
-        g_vs_r1     = Signal()
-        g_vs_r2     = Signal()
         fine_delay  = Signal(11)
         delayed     = Signal()
         on_aligned  = Signal()
@@ -257,14 +267,13 @@ class ST7785PanelMaster(LiteXModule):
         pixel_lcd = rd_port.dat_r[0:18]
         pixel_uvc = rd_port.dat_r[18:36]
 
+        # Game Boy vsync (hClk) sampled in gClk (the original has two identical copies, merged).
         self.sync.gclk += [
             p_vs.eq(self.vsync),
             p_vs_r1.eq(p_vs),
-            g_vs_r1.eq(self.vsync),
-            g_vs_r2.eq(g_vs_r1),
         ]
 
-        # Line buffer read.
+        # Line buffer read (address advances on phase 1 once OFFSET pixels of DE have elapsed).
         self.sync.gclk += [
             If(p_vs & ~p_vs_r1,
                 ra.eq(0),
@@ -298,9 +307,11 @@ class ST7785PanelMaster(LiteXModule):
             )
         ]
 
-        # LCD on/off alignment (scanout is several rows behind the emulator).
+        # LCD on/off alignment (scanout is several rows behind the emulator): lcd_on is only taken
+        # into account between frames; counters are re-aligned FINE_OFFSET cycles after a Game Boy
+        # vsync or a lcd_on rising edge.
         self.sync.gclk += [
-            If((g_vs_r1 & ~g_vs_r2) | (on_aligned1 & ~on_aligned2),
+            If((p_vs & ~p_vs_r1) | (on_aligned1 & ~on_aligned2),
                 fine_delay.eq(0),
             ).Elif(fine_delay != self.FINE_OFFSET,
                 fine_delay.eq(fine_delay + 1),
@@ -369,6 +380,9 @@ class VideoPipeline(LiteXModule):
     Chromatic video pipeline (port of vid_system_top.sv).
 
     Clock domains: hclk (Game Boy pixels), gclk (panel timing, timers).
+
+    Note: the timer digits and low battery blink state (gClk) are read by the hClk overlays without
+    synchronizers, as in the original design (display only).
     """
     def __init__(self, lcd_pads):
         # Game Boy LCD (hClk).
@@ -413,7 +427,8 @@ class VideoPipeline(LiteXModule):
         # Dot clock (gClk forwarded).
         self.specials += DDROutput(i1=1, i2=0, o=lcd_pads.dotclk, clk=ClockSignal("gclk"))
 
-        # Frame buffer addressing / screen position (hClk).
+        # Frame buffer addressing / screen position (hClk): frame at 0x10000, +320 per line (160
+        # 16-bit pixels); screen_y counts hsync rising edges since vsync.
         hsync    = self.gb_mode[1]
         vsync    = self.gb_vsync
         hsync_r1 = Signal()
@@ -445,7 +460,7 @@ class VideoPipeline(LiteXModule):
             self.fb_data.eq(self.gb_data),
         ]
 
-        # Frame blend (with previous frame).
+        # Frame blend: RGB555 -> RGB666, averaged with the previous frame pixel when enabled.
         game = []
         for i in range(3):
             prev = self.fb_prev[5*i:5*(i+1)]
@@ -459,8 +474,8 @@ class VideoPipeline(LiteXModule):
 
         # Timer / low battery blink (gClk).
         t_pl, t_ph, t_sl, t_sh, t_ml, t_mh, t_hl = [Signal(4) for _ in range(7)]
-        lbb_state      = Signal()
-        show_low_batt  = Signal()
+        lbb_state     = Signal()
+        show_low_batt = Signal()
         self.sync.gclk += [
             If(self.run_timer & self.percent,
                 If(t_pl == 9,
@@ -543,10 +558,10 @@ class VideoPipeline(LiteXModule):
         ]
 
         # Timer digits: [HL] ':' [MH ML] ':' [SH SL] '.' [PH PL].
-        num_x   = Signal(2)
-        num_y   = Signal(3)
-        number  = Signal(4)
-        digits  = [
+        num_x  = Signal(2)
+        num_y  = Signal(3)
+        number = Signal(4)
+        digits = [ # (x start, x end, glyph): 3x5 glyphs on a 4 pixel pitch.
             (4,  6,  t_hl), (8,  8,  10), (10, 13, t_mh), (14, 17, t_ml), (18, 18, 10),
             (20, 23, t_sh), (24, 27, t_sl), (28, 28, 11), (30, 33, t_ph), (34, 37, t_pl),
         ]
@@ -573,8 +588,7 @@ class VideoPipeline(LiteXModule):
             stmt  = [dbg_x.eq(x - start), dbg_number.eq(self.debug_system[4*(7-i):4*(8-i)])]
             cond  = (x >= start) & (x <= start + 3)
             dbg_cases = If(cond, *stmt) if dbg_cases is None else dbg_cases.Elif(cond, *stmt)
-        dbg_cases = dbg_cases.Else(dbg_x.eq(3), dbg_number.eq(15))
-        self.comb += dbg_cases
+        self.comb += dbg_cases.Else(dbg_x.eq(3), dbg_number.eq(15))
         self.comb += [
             dbg_y.eq(Mux(y >= 136, y - 136, 7)),
             If((dbg_x < 3) & (dbg_y < 5),
@@ -582,7 +596,8 @@ class VideoPipeline(LiteXModule):
             ),
         ]
 
-        # OSD / Overlay compositing (hClk).
+        # OSD / Overlay compositing (hClk, registered: aligned with the color correction output).
+        # OSD (menu) has priority; when disabled: debug > low battery > timer > shadows (crush).
         osd_transparent = Signal()
         overlay_color   = Signal(18)
         overlay_active  = Signal()
@@ -596,13 +611,13 @@ class VideoPipeline(LiteXModule):
             overlay_crush.eq(self.draw_osd & osd_transparent),
             If(~self.draw_osd,
                 If(self.debug_on & debug_digit,
-                    overlay_color.eq(Cat(Constant(0, 6), Constant(0, 6), Constant(0, 6))), # Black.
+                    overlay_color.eq(0x00000), # Black.
                     overlay_active.eq(1),
                 ).Elif(self.debug_on & (x <= 31) & (y >= 136),
                     overlay_color.eq(0x3ffff), # White.
                     overlay_active.eq(1),
                 ).Elif(self.voltage_low & show_low_batt & battery_front,
-                    overlay_color.eq(Cat(Constant(0x3f, 6), Constant(0, 6), Constant(0, 6))), # Red.
+                    overlay_color.eq(0x0003f), # Red.
                     overlay_active.eq(1),
                 ).Elif(self.show_timer & (timer_front | timer_number),
                     overlay_color.eq(0x3ffff), # White.
@@ -624,6 +639,7 @@ class VideoPipeline(LiteXModule):
             cc.pixel.eq(pixel),
         ]
         def crush(p):
+            # Darken (/4 per channel): shadow behind overlays / transparent OSD pixels.
             return Cat(p[2:6], Constant(0, 2), p[8:12], Constant(0, 2), p[14:18], Constant(0, 2))
         pixel_lcd = Signal(18)
         pixel_uvc = Signal(18)

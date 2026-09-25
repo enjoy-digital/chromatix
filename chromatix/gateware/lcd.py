@@ -10,10 +10,13 @@ from migen import *
 
 from litex.gen import *
 
+# Helpers ------------------------------------------------------------------------------------------
+
 ST7785_REGS_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "st7785_regs.bin")
 
 def load_st7785_sequence(path=ST7785_REGS_PATH):
-    with open(path) as f:
+    """Load the ST7785 init sequence (one 9-bit {D/C, data} word per line, in binary)."""
+    with open(path, encoding="utf-8") as f:
         sequence = [int(line.strip(), 2) for line in f if line.strip()]
     if not sequence:
         raise ValueError(f"No ST7785 init values found in {path}")
@@ -22,6 +25,16 @@ def load_st7785_sequence(path=ST7785_REGS_PATH):
 # ST7785 Init --------------------------------------------------------------------------------------
 
 class ST7785Init(LiteXModule):
+    """
+    ST7785 LCD init sequencer (port of ST7785_init.v).
+
+    Pulses the LCD reset, waits, then shifts the init sequence out on the 3-wire SPI (9-bit words,
+    D/C bit first, SCK = sys_clk / (2*clk_div_2n), SDA sampled on SCK rising edges). The first
+    len(sequence) - 5 words are sent, then a pause (delay_end 10-SCK word slots), then the following
+    words; lcd_init_done rises when the before-last word is loaded (it is truncated and the last
+    word is never sent, as in the original: the sequence ends with NOP padding). Delays are in SCK
+    periods (shortened by issimu).
+    """
     def __init__(self, sequence, issimu=False, clk_div_2n=6):
         self.reset         = Signal()
         self.lcd_sck       = Signal()
@@ -30,14 +43,16 @@ class ST7785Init(LiteXModule):
         self.lcd_rst       = Signal(reset=1)
         self.lcd_init_done = Signal()
 
+        # # #
+
         data_max_cnt = len(sequence) - 1
         reset_start  = 2000 if issimu else 0
         reset_end    = 3000 if issimu else 80000
         delay_max    = 5000 if issimu else 90000
         delay_end    = 500 if issimu else 2560
 
-        div_counter  = Signal(max=clk_div_2n, reset=0)
-        sck          = Signal(reset=0)
+        div_counter  = Signal(max=clk_div_2n)
+        sck          = Signal()
         tick         = Signal()
         cs           = Signal(reset=1)
         data_cnt     = Signal(max=len(sequence) + 1)
@@ -48,11 +63,14 @@ class ST7785Init(LiteXModule):
         max_cnt      = Signal(max=len(sequence) + 1, reset=max(data_max_cnt - 4, 0))
         txdata       = Signal(9)
 
+        # Sequence ROM / SCK gated by CS (Mux(cs, 0, sck) rather than Mux(~cs, sck, 0): the Migen
+        # simulator doesn't truncate ~cs in a Mux selector).
         self.comb += [
             txdata.eq(Array(Constant(value, 9) for value in sequence)[data_cnt]),
-            self.lcd_sck.eq(Mux(~cs, sck, 0)),
+            self.lcd_sck.eq(Mux(cs, 0, sck)),
         ]
 
+        # SCK divider (tick: first cycle of each SCK high phase).
         self.sync += [
             tick.eq(0),
             If(self.reset,
@@ -71,6 +89,7 @@ class ST7785Init(LiteXModule):
             )
         ]
 
+        # Reset pulse, delays and SPI shifter.
         self.sync += [
             If(self.reset,
                 self.lcd_rst.eq(1),

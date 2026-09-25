@@ -12,10 +12,13 @@ from litex.gen import *
 
 from litei2c import LiteI2CPHYCore
 
+# Helpers ------------------------------------------------------------------------------------------
+
 TLV320_REGS_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "tlv320_regs.hex")
 
 def load_tlv320_registers(path=TLV320_REGS_PATH):
-    with open(path) as f:
+    """Load the TLV320 register image: one 16-bit hex word per line, (register << 8) | value."""
+    with open(path, encoding="utf-8") as f:
         registers = [int(line.strip(), 16) for line in f if line.strip()]
     if not registers:
         raise ValueError(f"No TLV320 register values found in {path}")
@@ -24,6 +27,12 @@ def load_tlv320_registers(path=TLV320_REGS_PATH):
 # TLV320 Init --------------------------------------------------------------------------------------
 
 class TLV320Init(LiteXModule):
+    """
+    TLV320 codec initialization (port of tlv320_init.v).
+
+    Writes each (register << 8) | value word of the register image to the codec, one I2C write per
+    word, through the enable/busy I2C interface; done is asserted once all words are written.
+    """
     def __init__(self, registers, device_address=0x18):
         self.reset                = Signal()
         self.done                 = Signal()
@@ -33,6 +42,8 @@ class TLV320Init(LiteXModule):
         self.i2c_mosi_data        = Signal(8)
         self.i2c_register_address = Signal(8)
         self.i2c_device_address   = Signal(7)
+
+        # # #
 
         regindex   = Signal(max=len(registers))
         reg_word   = Signal(16)
@@ -86,6 +97,14 @@ class TLV320Init(LiteXModule):
 # Codec/PMIC Polling Master ------------------------------------------------------------------------
 
 class PollingMaster(LiteXModule):
+    """
+    Codec/PMIC polling (port of polling_master.v).
+
+    Once enabled, loops over a fixed list of I2C transactions: reads the codec volume wheel (R117)
+    and GPIO (R51, bit1: headphones), routes the output to the speaker or the headphones (page 1
+    writes), applies the software mute, then reads the PMIC status/fault/input limit registers and
+    sets the charge current.
+    """
     def __init__(self, codec_address=0x18, pmic_address=0x6b):
         self.reset                = Signal()
         self.enable               = Signal()
@@ -103,6 +122,8 @@ class PollingMaster(LiteXModule):
         self.i2c_mosi_data        = Signal(8)
         self.i2c_register_address = Signal(8)
         self.i2c_device_address   = Signal(7)
+
+        # # #
 
         step       = Signal(max=13)
         state      = Signal(3, reset=0)
@@ -129,17 +150,20 @@ class PollingMaster(LiteXModule):
             self.i2c_register_address.eq(tx_reg),
             self.i2c_device_address.eq(tx_addr),
         ]
+        # Transactions (default: Codec R117 read). 0/1: Codec volume/GPIO reads, 2-7: Codec speaker/
+        # headphones routing (page 1) and software mute, 8-10: PMIC status/fault/input limit reads,
+        # 11/12: PMIC charge current write/read.
         self.comb += Case(step, {
-            0: [],
-            1: [tx_reg.eq(51)],
-            2: [tx_is_read.eq(0), tx_reg.eq(0x00), tx_data.eq(0x01)],
-            3: [tx_is_read.eq(0), tx_reg.eq(0x26), tx_data.eq(Mux(self.gpio[1], 0x7F, 0x00))],
-            4: [tx_is_read.eq(0), tx_reg.eq(0x1F), tx_data.eq(Mux(self.gpio[1], 0xC4, 0x04))],
-            5: [tx_is_read.eq(0), tx_reg.eq(0x2E), tx_data.eq(Mux(self.mute, 0x80, 0x00))],
-            6: [tx_is_read.eq(0), tx_reg.eq(0x00), tx_data.eq(0x00)],
-            7: [tx_is_read.eq(0), tx_reg.eq(0x3F), tx_data.eq(Mux(self.gpio[1], 0xD4, 0x90))],
-            8: [tx_reg.eq(0x08), tx_addr.eq(pmic_address)],
-            9: [tx_reg.eq(0x09), tx_addr.eq(pmic_address)],
+             0: [],
+             1: [tx_reg.eq(51)],
+             2: [tx_is_read.eq(0), tx_reg.eq(0x00), tx_data.eq(0x01)],
+             3: [tx_is_read.eq(0), tx_reg.eq(0x26), tx_data.eq(Mux(self.gpio[1], 0x7F, 0x00))],
+             4: [tx_is_read.eq(0), tx_reg.eq(0x1F), tx_data.eq(Mux(self.gpio[1], 0xC4, 0x04))],
+             5: [tx_is_read.eq(0), tx_reg.eq(0x2E), tx_data.eq(Mux(self.mute, 0x80, 0x00))],
+             6: [tx_is_read.eq(0), tx_reg.eq(0x00), tx_data.eq(0x00)],
+             7: [tx_is_read.eq(0), tx_reg.eq(0x3F), tx_data.eq(Mux(self.gpio[1], 0xD4, 0x90))],
+             8: [tx_reg.eq(0x08), tx_addr.eq(pmic_address)],
+             9: [tx_reg.eq(0x09), tx_addr.eq(pmic_address)],
             10: [tx_reg.eq(0x00), tx_addr.eq(pmic_address)],
             11: [tx_is_read.eq(0), tx_reg.eq(0x02), tx_data.eq(0x20), tx_addr.eq(pmic_address)],
             12: [tx_reg.eq(0x02), tx_addr.eq(pmic_address)],
@@ -184,10 +208,10 @@ class PollingMaster(LiteXModule):
                     ],
                     S_CAPTURE: [
                         Case(step, {
-                            0: [self.volume.eq(self.i2c_miso_data)],
-                            1: [self.gpio.eq(self.i2c_miso_data)],
-                            8: [self.pmic_sys_status.eq(self.i2c_miso_data)],
-                            9: [self.new_fault.eq(self.i2c_miso_data)],
+                             0: [self.volume.eq(self.i2c_miso_data)],
+                             1: [self.gpio.eq(self.i2c_miso_data)],
+                             8: [self.pmic_sys_status.eq(self.i2c_miso_data)],
+                             9: [self.new_fault.eq(self.i2c_miso_data)],
                             10: [self.inlim.eq(self.i2c_miso_data)],
                             12: [self.charge_current.eq(self.i2c_miso_data)],
                         }),
@@ -215,7 +239,7 @@ class CodecI2S(LiteXModule):
     headphones are detected, a mono mix is sent on the left channel (speaker).
     """
     def __init__(self, pads):
-        self.enable     = Signal() # Held in reset when 0 (PLL not locked).
+        self.enable     = Signal() # Codec/serializer held in reset when 0 (PLL not locked).
         self.left       = Signal(16)
         self.right      = Signal(16)
         self.mute       = Signal()
@@ -247,7 +271,7 @@ class CodecI2S(LiteXModule):
         ]
         self.comb += clk_half_re.eq(clk_half & ~clk_half_d)
 
-        # Serializer.
+        # Serializer (MSB first, WCLK high for the first 16 bits of the frame).
         self.sync += [
             If(~self.enable,
                 count.eq(0),

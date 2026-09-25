@@ -108,6 +108,7 @@ def descriptor(dtype, *fields):
     return [2 + len(body), dtype] + body
 
 def string_descriptor(s):
+    """String descriptor (UTF-16LE, ASCII only)."""
     return descriptor(USB_DESCTYPE_STRING, *[[ord(c), 0x00] for c in s])
 
 def ascii_hex(nibble):
@@ -388,7 +389,8 @@ class USBDescriptors(LiteXModule):
             updated.eq(~self.reset & player_num_updated),
         ]
 
-        # Descriptor ROM (asynchronous read, out of range reads return 0).
+        # Descriptor ROM (asynchronous read). The address is decoded on addr_width bits: reads past
+        # the ROM end return 0 up to 2**addr_width, then alias (undefined in the original).
         rom   = layout.rom
         raddr = self.descrom_raddr[:layout.addr_width]
         cases = {addr: self.descrom_rdat.eq(data) for addr, data in enumerate(rom)}

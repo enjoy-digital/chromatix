@@ -28,18 +28,18 @@ from litex.soc.integration.builder import Builder
 
 from chromatix import Platform
 
-from chromatix.gateware.crg     import CRG
-from chromatix.gateware.sources import add_verilog_sources
+from chromatix.gateware.crg        import CRG
+from chromatix.gateware.sources    import add_verilog_sources
 from chromatix.gateware.usb_device import USBDevice
-from chromatix.gateware.misc    import TickGenerator, StatusLed, ESP32Control
-from chromatix.gateware.buttons import Buttons
-from chromatix.gateware.debug   import DebugControl
-from chromatix.gateware.memory  import MemorySystem
-from chromatix.gateware.video   import VideoPipeline
-from chromatix.gateware.lcd     import ST7785Init, load_st7785_sequence
-from chromatix.gateware.codec   import CodecControl, CodecI2S, load_tlv320_registers
-from chromatix.gateware.sysmon  import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
-from chromatix.gateware.adc     import BatteryADC
+from chromatix.gateware.misc       import TickGenerator, StatusLed, ESP32Control
+from chromatix.gateware.buttons    import Buttons, BUTTONS
+from chromatix.gateware.debug      import DebugControl
+from chromatix.gateware.memory     import MemorySystem
+from chromatix.gateware.video      import VideoPipeline
+from chromatix.gateware.lcd        import ST7785Init, load_st7785_sequence
+from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_registers
+from chromatix.gateware.sysmon     import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
+from chromatix.gateware.adc        import BatteryADC
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -94,6 +94,7 @@ class BaseSoC(SoCMini):
     """
     def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200):
         gclk_freq = int(33.55432e6 / 4)
+        hclk_freq = int(33.55432e6 / 2)
 
         # SoCMini (CSR bus in the sys domain = gClk) -----------------------------------------------
 
@@ -102,12 +103,10 @@ class BaseSoC(SoCMini):
             ident         = "ChromatiX SoC",
             ident_version = True,
         )
-        hclk_freq = int(33.55432e6 / 2)
 
         # CRG --------------------------------------------------------------------------------------
 
         self.crg = crg = CRG(platform)
-
 
         # Platform Resources -----------------------------------------------------------------------
 
@@ -280,7 +279,7 @@ class BaseSoC(SoCMini):
         # Debug control: virtual buttons OR'ed with the physical ones, status registers.
         self.debug_ctrl = debug_ctrl = DebugControl()
         btns = SimpleNamespace()
-        for name in ["a", "b", "dpad_down", "dpad_left", "dpad_right", "dpad_up", "sel", "start"]:
+        for name in BUTTONS:
             btn = Signal(name=f"btn_{name}")
             self.comb += btn.eq(getattr(btns_phy, name) | getattr(debug_ctrl, name))
             setattr(btns, name, btn)
@@ -634,7 +633,7 @@ class BaseSoC(SoCMini):
             sm_payloads.lowpower_backlight.eq(sm_ctrl.lowpower_backlight),
         ]
 
-        # Debug Control Status -------------------------------------------------------------------
+        # Debug Control Status ---------------------------------------------------------------------
 
         self.comb += [
             debug_ctrl.bist_done.eq(memory.bist_done),
@@ -655,14 +654,20 @@ class BaseSoC(SoCMini):
 
 def main():
     parser = argparse.ArgumentParser(description="ChromatiX: LiteX based FPGA design for the ModRetro Chromatic.")
+
+    # Build/Load/Flash.
     parser.add_argument("--build",      action="store_true", help="Build bitstream.")
     parser.add_argument("--no-compile", action="store_true", help="Generate build files without running the toolchain.")
     parser.add_argument("--load",       action="store_true", help="Load bitstream (to SRAM, USB will not enumerate).")
     parser.add_argument("--flash",      action="store_true", help="Flash bitstream (to SPI Flash) and reboot.")
-    parser.add_argument("--toolchain",  default="gowin",     help="FPGA toolchain (gowin).")
-    parser.add_argument("--gowin-path", default=os.environ.get("GOWIN_PATH", None), help="Gowin IDE install directory (or GOWIN_PATH env variable, ex: ~/tools/gowin_1.9.12.04/IDE).")
-    parser.add_argument("--with-debug-bridge",     action="store_true", help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
-    parser.add_argument("--debug-bridge-baudrate", default=115200, type=int, help="Debug bridge baudrate.")
+
+    # Toolchain.
+    parser.add_argument("--toolchain",  default="gowin",                    help="FPGA toolchain (gowin).")
+    parser.add_argument("--gowin-path", default=os.environ.get("GOWIN_PATH"), help="Gowin IDE install directory (or GOWIN_PATH env variable, ex: ~/tools/gowin_1.9.12.04/IDE).")
+
+    # SoC.
+    parser.add_argument("--with-debug-bridge",     action="store_true",                      help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
+    parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,                 help="Debug bridge baudrate.")
     args = parser.parse_args()
 
     # Gowin IDE selection (bundled libs/Qt are required for the standalone gw_sh).

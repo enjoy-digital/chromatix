@@ -16,6 +16,12 @@ from migen.genlib.cdc import MultiReg
 
 from litex.gen import *
 
+from litex.soc.interconnect import stream
+
+from litex.soc.cores.uart import RS232PHYTX, RS232PHYRX
+
+from chromatix.gateware.usb import ColorSpaceConvertor, VideoFIFO, CSC_LATENCY
+
 # Constants ----------------------------------------------------------------------------------------
 
 # Interfaces.
@@ -60,7 +66,10 @@ SET_LINE_CODING        = 0x20
 GET_LINE_CODING        = 0x21
 SET_CONTROL_LINE_STATE = 0x22
 
+# Helpers ------------------------------------------------------------------------------------------
+
 def byte(value, n):
+    """Byte n (little-endian) of value."""
     return (value >> (8*n)) & 0xff
 
 # Setup Parser -------------------------------------------------------------------------------------
@@ -146,6 +155,11 @@ class USBSetupParser(LiteXModule):
 # Control Request Handler (base) -------------------------------------------------------------------
 
 class _ControlHandler(LiteXModule):
+    """
+    Common interface of the EP0 class request handlers: requests are decoded from the USBSetupParser
+    outputs, IN data stage bytes are provided on txdat (next byte loaded on each txpop) while txval
+    is set.
+    """
     def __init__(self, setup):
         self.reset     = Signal()
         self.rxdat     = Signal(8)
@@ -155,10 +169,10 @@ class _ControlHandler(LiteXModule):
         self.txval     = Signal()
         self.txdat_len = Signal(12)
         self.txdat     = Signal(8)
+        self.last      = Signal() # Last byte of the data stage.
 
-        # Last byte of the data stage ((usb_txdat_len - 16'd1) == cdata_ofs, 16-bit).
-        self.last      = Signal()
-        last_ofs       = Signal(16)
+        # (usb_txdat_len - 16'd1) == cdata_ofs, on 16-bit (as the original).
+        last_ofs = Signal(16)
         self.comb += [
             last_ofs.eq(self.txdat_len - 1),
             self.last.eq(last_ofs == setup.cdata_ofs),
@@ -280,7 +294,7 @@ class UACControl(_ControlHandler):
         # # #
 
         s = setup
-        freq  = [byte(UAC_FREQUENCY, n) for n in range(4)]
+        freq   = [byte(UAC_FREQUENCY, n) for n in range(4)]
         range_ = [0x01, 0x00] + freq + freq + [0, 0, 0, 0] # wNumSubRanges=1, MIN, MAX, RES.
         self.sync += [
             If(self.reset,
@@ -289,7 +303,7 @@ class UACControl(_ControlHandler):
                 If((s.bmRequestType == 0xa1) & (s.wLength != 0),
                     If((s.wValue[0:8] == 0) & (s.wValue[8:16] == CS_SAM_FREQ_CONTROL) &
                        (s.wIndex[8:16] == UAC_CLOCK_ID),
-                        If((s.bRequest == UAC_CUR_ATTR) & (s.wLength != 0),
+                        If(s.bRequest == UAC_CUR_ATTR,
                             If(self.txpop,
                                 Case(s.cdata_ofs, {
                                     **{i: self.txdat.eq(freq[i + 1]) for i in range(3)},
@@ -365,6 +379,7 @@ class UACEndpoint(LiteXModule):
 
         # # #
 
+        # Note: reset and txact are unused (as the original, usbuac_ep ignores them).
         n = self.MAXBUFFER
 
         # Audio clock generator (44.1kHz frame clock, phase accumulator).
@@ -455,7 +470,7 @@ class UACEndpoint(LiteXModule):
             )
         ]
 
-# CDC UART ---------------------------------------------------------------------------------------
+# CDC UART -----------------------------------------------------------------------------------------
 
 class CDCUART(LiteXModule):
     """
@@ -479,9 +494,6 @@ class CDCUART(LiteXModule):
         self.rxd      = Signal()
 
         # # #
-
-        from litex.soc.interconnect import stream
-        from litex.soc.cores.uart   import RS232PHYTX, RS232PHYRX
 
         # Tuning word (fixed point: 2**48/sys_clk_freq with 16 fractional bits).
         # Note: explicit 64-bit product (Verilog would evaluate the product in the 32-bit context of
@@ -531,7 +543,7 @@ class UVCVideo(LiteXModule):
     def __init__(self):
         self.reset       = Signal() # sys.
         # Video input ("video" domain).
-        self.line_valid  = Signal()
+        self.line_valid  = Signal() # Unused.
         self.enable      = Signal()
         self.frame_valid = Signal()
         self.data        = Signal(18) # {B, G, R}, 6-bit each.
@@ -542,12 +554,11 @@ class UVCVideo(LiteXModule):
         self.txdat       = Signal(8)
         self.txdat_len   = Signal(12)
         self.txcork      = Signal()
+        self.sof_rise    = Signal() # SOF rising edge (also used by the UAC endpoint).
 
         # # #
 
-        from chromatix.gateware.usb import ColorSpaceConvertor, VideoFIFO, CSC_LATENCY
-
-        # Video: Color space conversion (and sync delays to match the CSC latency). -------------
+        # Video: Color Space Conversion ------------------------------------------------------------
         csc = ColorSpaceConvertor(clock_pins=False)
         csc = ClockDomainsRenamer("video")(csc)
         self.csc = csc
@@ -562,25 +573,20 @@ class UVCVideo(LiteXModule):
         ]
         y_enable  = csc.O_doutvalid
         y, cb, cr = csc.O_dout0, csc.O_dout1, csc.O_dout2
-        y_line_valid  = Signal()
+        # Frame valid delayed to match the CSC latency (line_valid is unused: lines are delimited
+        # by enable).
         y_frame_valid = Signal()
-        lv_sr = Signal(CSC_LATENCY)
-        fv_sr = Signal(CSC_LATENCY)
+        fv_sr         = Signal(CSC_LATENCY)
         self.sync.video += [
             If(reset_v,
-                lv_sr.eq(0),
                 fv_sr.eq(0),
             ).Else(
-                lv_sr.eq(Cat(self.line_valid,  lv_sr[:-1])),
                 fv_sr.eq(Cat(self.frame_valid, fv_sr[:-1])),
             )
         ]
-        self.comb += [
-            y_line_valid.eq(lv_sr[-1]),
-            y_frame_valid.eq(fv_sr[-1]),
-        ]
+        self.comb += y_frame_valid.eq(fv_sr[-1])
 
-        # Video: YUYV packing. --------------------------------------------------------------------
+        # Video: YUYV Packing ----------------------------------------------------------------------
         y_frame_valid_r1 = Signal()
         y_enable_r1      = Signal()
         h_sof            = Signal()
@@ -655,7 +661,7 @@ class UVCVideo(LiteXModule):
             If(store_v, mv.eq(cr)),
         ]
 
-        # FIFO (video -> sys). --------------------------------------------------------------------
+        # FIFO (video -> sys) ----------------------------------------------------------------------
         fifo = VideoFIFO(clock_pins=False)
         fifo = ClockDomainsRenamer({"write": "video", "read": "sys"})(fifo)
         self.fifo = fifo
@@ -668,7 +674,7 @@ class UVCVideo(LiteXModule):
             fifo.AlmostFullTh.eq(UVC_PACKET_SIZE - UVC_HEADER_SIZE),
         ]
 
-        # USB: Packetizer (sys). ------------------------------------------------------------------
+        # USB: Packetizer (sys) --------------------------------------------------------------------
         txact_d0     = Signal()
         txact_d1     = Signal()
         txact_fall   = Signal()
@@ -762,7 +768,7 @@ class UVCVideo(LiteXModule):
         ]
 
         # SOF counter (1ms frames = 8 micro-frames).
-        sof_rise = Signal()
+        sof_rise = self.sof_rise
         self.comb += sof_rise.eq(sof_d0 & ~sof_d1)
         self.sync += [
             If(self.reset,
@@ -783,7 +789,6 @@ class UVCVideo(LiteXModule):
                 )
             )
         ]
-        self.sof_rise = sof_rise
 
         # Packet data: UVC payload header, then FIFO data.
         self.comb += len_m1.eq(self.txdat_len - 1)

@@ -17,7 +17,6 @@ from migen.genlib.cdc  import MultiReg, GrayCounter
 
 from litex.gen import *
 
-
 # Color Space Convertor ----------------------------------------------------------------------------
 
 # SDTV Computer RGB to YCbCr (BT.601), 10-bit fractional coefficients (Gowin CSC Color Model 1).
@@ -120,7 +119,9 @@ class VideoFIFO(LiteXModule):
         # # #
 
         # Clock domains (write/read) from the WrClk/RdClk pins (standalone module) or from the design,
-        # reset from Reset (resynchronized in each domain).
+        # reset from Reset: resynchronized in the write domain, then in the read domain from the write
+        # reset, so that the read side is released after the write pointer has been reset (otherwise
+        # the read side can load a stale word from the synchronized pointer of the previous frame).
         rst_write = Signal()
         rst_read  = Signal()
         if clock_pins:
@@ -134,7 +135,7 @@ class VideoFIFO(LiteXModule):
             ]
         self.specials += [
             MultiReg(self.Reset, rst_write, odomain="write", reset=1),
-            MultiReg(self.Reset, rst_read,  odomain="read",  reset=1),
+            MultiReg(rst_write,  rst_read,  odomain="read",  reset=1),
         ]
 
         # FIFO.
@@ -156,14 +157,19 @@ class VideoFIFO(LiteXModule):
         cnt_bits  = log2_int(depth) + 1
         wr_count  = ClockDomainsRenamer("write")(ResetInserter()(GrayCounter(cnt_bits)))
         self.submodules += wr_count
-        self.comb += wr_count.ce.eq(fifo.we & fifo.writable)
-        self.comb += wr_count.reset.eq(rst_write)
+        self.comb += [
+            wr_count.ce.eq(fifo.we & fifo.writable),
+            wr_count.reset.eq(rst_write),
+        ]
         wr_gray_r = Signal(cnt_bits)
         self.specials += MultiReg(wr_count.q, wr_gray_r, "read")
         wr_bin_r  = Signal(cnt_bits)
-        self.comb += wr_bin_r[-1].eq(wr_gray_r[-1])
+        bits      = [wr_gray_r[-1]] # Gray -> binary (MSB first), one Signal per bit.
         for i in reversed(range(cnt_bits - 1)):
-            self.comb += wr_bin_r[i].eq(wr_bin_r[i + 1] ^ wr_gray_r[i])
+            bit = Signal()
+            self.comb += bit.eq(bits[-1] ^ wr_gray_r[i])
+            bits.append(bit)
+        self.comb += wr_bin_r.eq(Cat(*reversed(bits)))
         rd_count  = Signal(cnt_bits)
         self.sync.read += If(rst_read, rd_count.eq(0)).Elif(fifo.re & fifo.readable, rd_count.eq(rd_count + 1))
         level = Signal(cnt_bits)

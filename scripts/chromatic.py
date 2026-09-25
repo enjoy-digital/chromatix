@@ -72,7 +72,7 @@ class Chromatic:
         return r
 
     # Buttons.
-    def set_buttons(self, buttons=[]):
+    def set_buttons(self, buttons=()):
         value = 0
         for button in buttons:
             if button not in BUTTONS:
@@ -131,9 +131,9 @@ def run_sequence(chromatic, sequence, default_duration=0.1):
 
 def main():
     parser = argparse.ArgumentParser(description="ChromatiX control/test utility.")
-    parser.add_argument("--host",    default="localhost", help="LiteX server host.")
+    parser.add_argument("--host",    default="localhost",    help="LiteX server host.")
     parser.add_argument("--port",    default=1234, type=int, help="LiteX server port.")
-    parser.add_argument("--csr-csv", default=None,        help="CSR configuration file.")
+    parser.add_argument("--csr-csv", default=None,           help="CSR configuration file.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("ident",  help="Print the SoC identifier.")
@@ -144,13 +144,13 @@ def main():
     p.add_argument("--duration", default=0.1, type=float, help="Press duration (s).")
 
     p = subparsers.add_parser("capture", help="Capture UVC frame(s) (no debug bridge needed).")
-    p.add_argument("filename")
-    p.add_argument("--frames", default=1, type=int, help="Number of frames (tiled horizontally).")
+    p.add_argument("filename",                          help="Output image file.")
+    p.add_argument("--frames", default=1, type=int,   help="Number of frames (tiled horizontally).")
     p.add_argument("--fps",    default=2, type=float, help="Capture rate for multiple frames.")
     p.add_argument("--scale",  default=1, type=int,   help="Scale factor.")
 
     p = subparsers.add_parser("sequence", help="Run a sequence (ex: \"press:start wait:2 capture:x.png\").")
-    p.add_argument("sequence")
+    p.add_argument("sequence", help="Space-separated steps (press:a+b[@duration], buttons:a+b, wait:s, capture:file).")
 
     args = parser.parse_args()
 
@@ -170,7 +170,9 @@ def main():
         elif args.command == "sequence":
             run_sequence(chromatic, args.sequence)
     finally:
-        chromatic.set_buttons([]) if args.command in ["press", "sequence"] else None
+        # Release the virtual buttons (also on errors/Ctrl-C).
+        if args.command in ["press", "sequence"]:
+            chromatic.set_buttons([])
         chromatic.close()
 
 if __name__ == "__main__":

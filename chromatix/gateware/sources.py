@@ -12,10 +12,6 @@ VERILOG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ve
 
 # Subsystems still integrated as Verilog/VHDL Instances (see README migration table).
 VERILOG_SOURCES = [
-    # Gowin IP.
-
-    # BSP: Video, Memory, System Monitor, Battery ADC.
-
     # EMU: Emulation system.
     "emu/audio_filter.v",
     "emu/cart.v",

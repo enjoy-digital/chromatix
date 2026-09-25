@@ -13,6 +13,13 @@ from litex.soc.cores.uart import RS232PHY
 # System Monitor RX Packet -------------------------------------------------------------------------
 
 class SystemMonitorRxPacket(LiteXModule):
+    """
+    ESP32 -> FPGA packet decoder (port of uart_packet_wrapper_rx.sv).
+
+    Packet: 0x8F (SOF), address, byte count, payload, CRC-8 (SAE J1850: poly 0x1D, init 0xFF, over
+    SOF..payload). rx_data holds the last 10 payload bytes (last byte in LSBs); rx_data_val pulses
+    when the CRC matches.
+    """
     def __init__(self):
         self.reset        = Signal()
         self.uart_rx_data = Signal(8)
@@ -20,6 +27,8 @@ class SystemMonitorRxPacket(LiteXModule):
         self.rx_address   = Signal(7)
         self.rx_data      = Signal(80)
         self.rx_data_val  = Signal()
+
+        # # #
 
         rx_state  = Signal(3, reset=1)
         rx_count  = Signal(8)
@@ -33,6 +42,7 @@ class SystemMonitorRxPacket(LiteXModule):
         RX_CRC   = 5
         RX_ERROR = 6
 
+        # CRC: XOR each received byte, then shift it bit-serially over the next 8 cycles.
         self.sync += [
             If(self.reset,
                 crc.eq(0xFF),
@@ -53,6 +63,7 @@ class SystemMonitorRxPacket(LiteXModule):
             )
         ]
 
+        # FSM.
         self.sync += [
             self.rx_data_val.eq(0),
             If(self.reset,
@@ -102,6 +113,8 @@ class SystemMonitorRxPacket(LiteXModule):
                     RX_ERROR: [
                         rx_state.eq(RX_IDLE),
                     ],
+                    # Recover from unused states (as the original).
+                    "default": rx_state.eq(RX_IDLE),
                 })
             )
         ]
@@ -109,6 +122,13 @@ class SystemMonitorRxPacket(LiteXModule):
 # System Monitor Arbiter ---------------------------------------------------------------------------
 
 class SystemMonitorArbiterBridge(LiteXModule):
+    """
+    FPGA -> ESP32 channel arbiter (port of system_monitor_arbiter.sv).
+
+    Latches the per-channel refresh requests and round-robins over the pending channels, issuing
+    one packet write per channel (Buttons, channel 2, are interleaved every other packet). When the
+    menu is closed, uart_disabled pulses after each packet to return the TX framer to idle/sleep.
+    """
     def __init__(self, num_channels=10):
         self.reset                   = Signal()
         self.channels_new_data_valid = Signal(num_channels)
@@ -119,6 +139,8 @@ class SystemMonitorArbiterBridge(LiteXModule):
         self.tx_channel              = Signal(max=num_channels)
         self.tx_address              = Signal(7)
         self.write                   = Signal()
+
+        # # #
 
         channels_refresh = Signal(num_channels)
         active_channel   = Signal(max=num_channels)
@@ -200,6 +222,13 @@ class SystemMonitorArbiterBridge(LiteXModule):
 # System Monitor TX Packet -------------------------------------------------------------------------
 
 class SystemMonitorTxPacket(LiteXModule):
+    """
+    FPGA -> ESP32 packet framer (port of uart_packet_wrapper_tx.sv).
+
+    Sends SOF (0x8F), address, byte count, payload (tx_senddata for each tx_bytepos) and CRC-8 (same
+    format as SystemMonitorRxPacket), one byte every 16 cycles at most. When the menu is closed
+    (ESP32 may be asleep), each packet is preceded by 0x00 bytes to wake the ESP32 UART up.
+    """
     def __init__(self):
         self.reset         = Signal()
         self.uart_tx_busy  = Signal()
@@ -214,7 +243,9 @@ class SystemMonitorTxPacket(LiteXModule):
         self.uart_tx_val   = Signal()
         self.write_done    = Signal()
 
-        cnt       = Signal(4)
+        # # #
+
+        cnt       = Signal(4) # Rate limiter between UART bytes.
         tx_state  = Signal(5, reset=1)
         bytecount = Signal(8)
         crc       = Signal(8, reset=0xFF)
@@ -275,6 +306,7 @@ class SystemMonitorTxPacket(LiteXModule):
             )
         ]
 
+        # CRC: XOR each sent byte (SOF..payload, not the wake-up bytes), then shift it bit-serially.
         self.sync += [
             If(self.reset,
                 crc.eq(0xFF),
@@ -367,6 +399,8 @@ class SystemMonitorTxPacket(LiteXModule):
                                 tx_state.eq(TX_ADDR),
                             )
                         ],
+                        # Recover from unused states (as the original).
+                        "default": tx_state.eq(TX_IDLE),
                     })
                 )
             )
@@ -375,6 +409,11 @@ class SystemMonitorTxPacket(LiteXModule):
 # System Monitor Bridge ----------------------------------------------------------------------------
 
 class SystemMonitorBridge(LiteXModule):
+    """
+    System monitor packet transport: RX decoder, channel arbiter and TX framer.
+
+    Payload bytes are provided externally (see SystemMonitorPayloads) from tx_channel/tx_bytepos.
+    """
     def __init__(self, num_channels=10):
         self.reset                   = Signal()
         self.menu_disabled           = Signal()
@@ -393,13 +432,15 @@ class SystemMonitorBridge(LiteXModule):
         self.tx_bytepos              = Signal(8)
         self.write_done              = Signal()
 
+        # # #
+
         uart_disabled = Signal()
         tx_address    = Signal(7)
         write         = Signal()
 
-        self.submodules.rx_packet = rx_packet = SystemMonitorRxPacket()
-        self.submodules.arbiter   = arbiter   = SystemMonitorArbiterBridge(num_channels=num_channels)
-        self.submodules.tx_packet = tx_packet = SystemMonitorTxPacket()
+        self.rx_packet = rx_packet = SystemMonitorRxPacket()
+        self.arbiter   = arbiter   = SystemMonitorArbiterBridge(num_channels=num_channels)
+        self.tx_packet = tx_packet = SystemMonitorTxPacket()
 
         self.comb += [
             rx_packet.reset.eq(self.reset),
@@ -436,6 +477,14 @@ class SystemMonitorBridge(LiteXModule):
 # System Monitor Payloads --------------------------------------------------------------------------
 
 class SystemMonitorPayloads(LiteXModule):
+    """
+    System monitor TX payloads (per channel byte count and data, from system_monitor.sv).
+
+    Channels: 0/1: AA/Li-ion voltage, 2: Buttons, 3: Audio + Brightness, 4: System Control, 5: PMIC
+    status, 6: Version, 7: Reserved, 8: System Status Extended, 9: Game Palette Data. 14-bit values
+    are sent as upper 6 bits then lower 8 bits.
+    """
+    # Version: 1 bit reserved, 1 bit LiteX build marker, 6 bits minor (42), 6 bits major (63).
     VERSION = (1 << 12) | (42 << 6) | 63
 
     def __init__(self, num_channels=10):
@@ -470,6 +519,8 @@ class SystemMonitorPayloads(LiteXModule):
         self.channels_new_data_valid        = Signal(num_channels)
         self.tx_byte_count                  = Signal(8)
         self.tx_senddata                    = Signal(8)
+
+        # # #
 
         buttons          = Signal(14)
         audio_brightness = Signal(14)
@@ -579,22 +630,20 @@ class SystemMonitorUART(LiteXModule):
         # PHY.
         self.phy = phy = RS232PHY(pads, clk_freq=clk_freq, baudrate=baudrate)
 
-        # TX.
+        # TX: the PHY latches the byte on valid and acks (ready) at the end of the stop bit.
         tx_active = Signal()
-        tx_data   = Signal(8)
         self.sync += [
             If(~self.enable,
                 tx_active.eq(0),
             ).Elif(~tx_active & self.tx_val,
                 tx_active.eq(1),
-                tx_data.eq(self.tx_data),
             ).Elif(tx_active & phy.sink.ready,
                 tx_active.eq(0),
             )
         ]
         self.comb += [
             phy.sink.valid.eq(~tx_active & self.tx_val),
-            phy.sink.data.eq(Mux(tx_active, tx_data, self.tx_data)),
+            phy.sink.data.eq(self.tx_data),
             self.tx_busy.eq(tx_active),
         ]
 
@@ -618,8 +667,8 @@ class SystemMonitorControl(LiteXModule):
       low power backlight mode (AA).
     """
     def __init__(self, num_channels=10, adc_interval=41946, adc_sel_lead=1000):
-        # adc_interval: ADC sampling interval (41946: 5ms at 8.388608MHz).
-        # adc_sel_lead: ADC_SEL mux toggle lead time before a measurement.
+        # adc_interval: ADC sampling interval in cycles (41946: 5ms at 8.388608MHz).
+        # adc_sel_lead: ADC_SEL mux toggle lead time (cycles) before a measurement.
         self.reset              = Signal()
 
         # Buttons (1 = pressed, except menu: 0 = pressed).
@@ -851,6 +900,8 @@ class SystemMonitorControl(LiteXModule):
         ]
 
         # Battery: type detection, averaging (256 samples), status/LEDs.
+        # Type detection only counts samples >= 700 (~1.8V) and volt is only updated once the type
+        # is detected (|startup_select| > 127): with a disconnected/low ADC input, volt stays at 0.
         volt_sum      = Signal(22)
         volt_cnt      = Signal(9)
         blink         = Signal()

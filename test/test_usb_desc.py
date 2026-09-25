@@ -88,6 +88,104 @@ def test_usb_desc_sim():
     assert string(results["product2c"])[0] == "Chromatic - Player 2C"
     assert string(results["serial"])[0]    == "012345678"
 
+def parse_descriptors(data):
+    """Split a descriptor set in (bDescriptorType, descriptor) using bLength."""
+    out = []
+    while data:
+        length = data[0]
+        assert 2 <= length <= len(data)
+        out.append((data[1], data[:length]))
+        data = data[length:]
+    return out
+
+def test_usb_desc_configuration():
+    """Configuration descriptor read from the ROM is well formed: descriptor lengths add up to
+    wTotalLength, bNumInterfaces matches the interfaces, each interface/alt setting declares its
+    endpoints, IADs group the UVC/UAC/CDC functions; qualifier and other-speed are consistent."""
+    dut    = USBDescriptors()
+    layout = dut.layout
+    res    = {}
+
+    def gen():
+        yield dut.reset.eq(1)
+        yield
+        yield dut.reset.eq(0)
+        yield
+        res["cfg"]   = yield from read_rom(dut, layout.fscfg_addr, layout.fscfg_len)
+        res["qual"]  = yield from read_rom(dut, layout.qual_addr, layout.qual_len)
+        res["other"] = yield from read_rom(dut, layout.oscfg_addr, 1)
+        res["have_strings"] = (yield dut.have_strings)
+        res["hs"] = [(yield dut.hscfg_addr), (yield dut.hscfg_len)]
+        # Out of range (past the ROM end, within the decoded address space): 0.
+        res["oor"] = yield from read_rom(dut, len(layout.rom), 1)
+
+    run_simulation(dut, gen())
+    cfg   = res["cfg"]
+    descs = parse_descriptors(cfg)
+    assert sum(len(d) for _, d in descs) == len(cfg) == cfg[2] | (cfg[3] << 8)
+    assert descs[0][0] == 0x02 and descs[0][1][4] == 6 # 6 interfaces.
+    interfaces = [d for t, d in descs if t == 0x04]
+    assert sorted({d[2] for d in interfaces}) == list(range(6))
+    # Endpoints following each interface descriptor match its bNumEndpoints.
+    endpoints = {}
+    current   = None
+    for t, d in descs[1:]:
+        if t == 0x04:
+            current = (d[2], d[3])
+            endpoints[current] = []
+        elif t == 0x05:
+            endpoints[current].append((d[2], d[3] & 0x3, d[4] | (d[5] << 8)))
+    for d in interfaces:
+        assert len(endpoints[(d[2], d[3])]) == d[4]
+    assert endpoints[(0, 0)] == [(0x81, 0x3, 64)]   # UVC interrupt.
+    assert endpoints[(1, 0)] == []                  # UVC zero-bandwidth.
+    assert endpoints[(1, 1)] == [(0x82, 0x1, 1024)] # UVC isochronous.
+    assert endpoints[(2, 0)] == [(0x84, 0x3, 8)]    # CDC notification.
+    assert endpoints[(3, 0)] == [(0x83, 0x2, 512), (0x03, 0x2, 512)] # CDC bulk.
+    assert endpoints[(5, 1)] == [(0x85, 0x1, 24)]   # UAC isochronous.
+    # IADs: (bFirstInterface, bInterfaceCount, bFunctionClass).
+    iads = [(d[2], d[3], d[4]) for t, d in descs if t == 0x0b]
+    assert iads == [(0, 2, 0x0e), (4, 2, 0x01), (2, 2, 0x02)]
+    # Qualifier (bcdUSB 2.00, 64-byte EP0) and other-speed hack.
+    assert res["qual"][:8] == [0x0a, 0x06, 0x00, 0x02, 0x01, 0x00, 0x00, 0x40]
+    assert res["other"] == [0x07]
+    assert res["have_strings"] == 1
+    assert res["hs"] == [layout.fscfg_addr, layout.fscfg_len]
+    assert res["oor"] == [0]
+
+def test_usb_desc_player_num_reset():
+    """While reset is asserted the dynamic bytes read their reset values (idProduct low byte 0x00,
+    product string "XX", as the asynchronous reset of the original), then follow playerNum again
+    (it differs from the reset value 0)."""
+    dut    = USBDescriptors()
+    layout = dut.layout
+    pid    = layout.pid_lo_addr
+    hi, lo = layout.player_hi_addr, layout.player_lo_addr
+    res    = {}
+
+    def read(addr):
+        yield dut.descrom_raddr.eq(addr)
+        yield
+        return (yield dut.descrom_rdat)
+
+    def gen():
+        yield dut.player_num.eq(0x5a)
+        for _ in range(3):
+            yield
+        res["set"]   = [(yield from read(pid)), (yield from read(hi)), (yield from read(lo))]
+        yield dut.reset.eq(1)
+        yield
+        res["reset"] = [(yield from read(pid)), (yield from read(hi)), (yield from read(lo))]
+        yield dut.reset.eq(0)
+        for _ in range(3):
+            yield
+        res["after"] = [(yield from read(pid)), (yield from read(hi)), (yield from read(lo))]
+
+    run_simulation(dut, gen())
+    assert res["set"]   == [0x5a, ord("5"), ord("A")]
+    assert res["reset"] == [0x00, ord("X"), ord("X")]
+    assert res["after"] == [0x5a, ord("5"), ord("A")]
+
 # Equivalence --------------------------------------------------------------------------------------
 
 VERILOG_DIR   = "chromatix/verilog/usb/usb_video"
