@@ -8,8 +8,9 @@
 Chromatic USB composite device: UVC (video) + UAC (audio) + CDC-ACM (UART bridge), port of
 usbuvcuart_top.v.
 
-Only the Gowin USB 2.0 Device Controller and SoftPHY IPs are still instantiated; the PLL, descriptors,
-class handlers, endpoint buffers, UVC/UAC data paths and CDC UART are LiteX/Migen.
+Only the Gowin USB 2.0 Device Controller IP is still instantiated; the PLL, UTMI PHY (LiteX
+USB2PHY), descriptors, class handlers, endpoint buffers, UVC/UAC data paths and CDC UART are
+LiteX/Migen.
 
 Clock domains: "phy" (60MHz UTMI clock, created here), "usb_960" (960MHz PHY oversampling clock,
 created here), "gclk" (video and audio samples).
@@ -20,6 +21,8 @@ from migen import *
 from litex.gen import *
 
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
+from litex.soc.cores.usb2_phy.phy        import USB2PHY
+from litex.soc.cores.usb2_phy.gowin_gw5a import GW5AUSB2PHYCRG
 
 from chromatix.gateware.usb_class import *
 from chromatix.gateware.usb_desc  import USBDescriptors
@@ -292,28 +295,20 @@ class USBDevice(LiteXModule):
             o_utmi_reset_o          = utmi.reset,
         )
 
-        # Gowin USB 2.0 SoftPHY ------------------------------------------------------------------
-        self.specials += Instance("USB2_0_SoftPHY_Top", name="u_USB_SoftPHY_Top",
-            i_clk_i             = ClockSignal("phy"),
-            i_rst_i             = utmi.reset | rst,
-            i_fclk_i            = ClockSignal("usb_960"),
-            i_pll_locked_i      = pll.locked,
-            i_utmi_data_out_i   = utmi.dataout,
-            i_utmi_txvalid_i    = utmi.txvalid,
-            i_utmi_op_mode_i    = utmi.opmode,
-            i_utmi_xcvrselect_i = utmi.xcvrselect,
-            i_utmi_termselect_i = utmi.termselect,
-            o_utmi_data_in_o    = utmi.datain,
-            o_utmi_txready_o    = utmi.txready,
-            o_utmi_rxvalid_o    = utmi.rxvalid,
-            o_utmi_rxactive_o   = utmi.rxactive,
-            o_utmi_rxerror_o    = utmi.rxerror,
-            o_utmi_linestate_o  = utmi.linestate,
-            io_usb_dxp_io       = pads.dxp,
-            io_usb_dxn_io       = pads.dxn,
-            i_usb_rxdp_i        = pads.rxdp,
-            i_usb_rxdn_i        = pads.rxdn,
-            o_usb_pullup_en_o   = pads.pullup,
-            io_usb_term_dp_io   = pads.term_dp,
-            io_usb_term_dn_io   = pads.term_dn,
-        )
+        # USB 2.0 PHY ------------------------------------------------------------------------------
+        self.phy_crg = phy_crg = GW5AUSB2PHYCRG(cd_utmi="phy", cd_960="usb_960")
+        self.phy = usb_phy = USB2PHY(pads, cd_utmi="phy", serdes_rst=phy_crg.serdes_rst)
+        self.comb += [
+            usb_phy.reset.eq(utmi.reset | rst),
+            usb_phy.tx_data.eq(utmi.dataout),
+            usb_phy.tx_valid.eq(utmi.txvalid),
+            usb_phy.op_mode.eq(utmi.opmode),
+            usb_phy.xcvr_select.eq(utmi.xcvrselect),
+            usb_phy.term_select.eq(utmi.termselect),
+            utmi.datain.eq(usb_phy.rx_data),
+            utmi.txready.eq(usb_phy.tx_ready),
+            utmi.rxvalid.eq(usb_phy.rx_valid),
+            utmi.rxactive.eq(usb_phy.rx_active),
+            utmi.rxerror.eq(usb_phy.rx_error),
+            utmi.linestate.eq(usb_phy.line_state),
+        ]

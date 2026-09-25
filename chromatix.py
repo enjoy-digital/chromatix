@@ -62,12 +62,13 @@ TIMING_CONSTRAINTS = [
     'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_cs}] 14',
     'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {link_sd}] 14',
     'set_max_delay -from [get_clocks {hclk}] -to  [get_ports {cart_d[*]}] 14',
-    # USB clocks (USB PLL and Gowin USB SoftPHY).
+    # USB clocks (USB PLL and USB PHY SerDes clock divider, 120MHz).
     'create_generated_clock -name PHY_CLKOUT -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 16 -multiply_by 40 [get_pins {usb_pll/CLKOUT1}]',
     'create_generated_clock -name fclk_960M  -source [get_ports {clk_24}] -master_clock clk_24 -divide_by 1  -multiply_by 40 [get_pins {usb_pll/CLKOUT0}]',
-    'create_clock -name usbintsclk -period 8 -waveform {0 4} [get_nets {u_USB_SoftPHY_Top/usb2_0_softphy/u_usb_20_phy_utmi/u_usb2_0_softphy/u_usb_phy_hs/sclk}] -add',
+    'create_clock -name usbintsclk -period 8.333 [get_nets {usb_hs_clk}]',
     'set_clock_groups -asynchronous -group [get_clocks {PHY_CLKOUT}] -group [get_clocks {fclk_960M}]',
     'set_clock_groups -asynchronous -group [get_clocks {PHY_CLKOUT}] -group [get_clocks {usbintsclk}]',
+    'set_clock_groups -asynchronous -group [get_clocks {fclk_960M}] -group [get_clocks {usbintsclk}]',
 ]
 
 def add_timing_constraints(platform):

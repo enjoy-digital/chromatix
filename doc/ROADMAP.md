@@ -167,6 +167,9 @@ UVC + UAC + CDC. LiteX only has full-speed CDC-ACM (LUNA, through Amaranth) and 
   - High speed needs a UTMI/ULPI PHY. No open-source GW5A soft PHY exists, so this is a long-term
     effort.
   - Decide after measuring what users actually rely on (UVC capture vs CDC).
+- **F3 (done).** The Gowin USB 2.0 SoftPHY is replaced by LiteX's USB2PHY (HS + FS UTMI),
+  validated on hardware (480M enumeration, UVC/UAC/CDC). Next: the device
+  controller, using the synthesized netlist as a co-simulation reference.
 
 ## Phase G — Optional / long term
 
@@ -181,7 +184,7 @@ UVC + UAC + CDC. LiteX only has full-speed CDC-ACM (LUNA, through Amaranth) and 
 - The MiSTer Game Boy core (`gb.v`, T80, `gbc_snd`, ...): third-party GPL IP, instantiated from the
   submodule.
 - The GW5A hard ADC primitive.
-- The USB device controller and soft PHY, until F2 produces a replacement.
+- The USB device controller, until it is ported (the soft PHY is done, see F3).
 
 ## Verification (every step)
 

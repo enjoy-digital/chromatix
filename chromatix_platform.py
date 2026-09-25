@@ -169,13 +169,15 @@ _io = [
 
     # USB FS PHY pins.
     ("usb", 0,
-        Subsignal("dxp",     Pins("B11"), IOStandard("LVCMOS33D"), Misc("PULL_MODE=NONE"), Misc("DRIVE=2")),
-        Subsignal("dxn",     Pins("A11"), IOStandard("LVCMOS33D"), Misc("PULL_MODE=NONE"), Misc("DRIVE=2")),
-        Subsignal("rxdp",    Pins("B12"), IOStandard("LVDS25"),    Misc("PULL_MODE=NONE"), Misc("DRIVE=OFF")),
-        Subsignal("rxdn",    Pins("B10"), IOStandard("LVDS25"),    Misc("PULL_MODE=NONE"), Misc("DRIVE=OFF")),
-        Subsignal("pullup",  Pins("B13"), IOStandard("LVCMOS33"),  Misc("PULL_MODE=NONE"), Misc("DRIVE=4")),
-        Subsignal("term_dp", Pins("A13"), IOStandard("LVCMOS33"),  Misc("PULL_MODE=NONE"), Misc("DRIVE=4")),
-        Subsignal("term_dn", Pins("A9"),  IOStandard("LVCMOS33"),  Misc("PULL_MODE=NONE"), Misc("DRIVE=4")),
+        # USB 2.0 soft PHY circuit (LiteX USB2PHY): HS driver/receiver pair, HS level inputs, FS
+        # transceiver (HS terminations) and 1.5K pull-up.
+        Subsignal("d_p",    Pins("B11"), IOStandard("LVCMOS33D"), Misc("PULL_MODE=NONE"), Misc("DRIVE=2")),
+        Subsignal("d_n",    Pins("A11"), IOStandard("LVCMOS33D"), Misc("PULL_MODE=NONE"), Misc("DRIVE=2")),
+        Subsignal("se_dp",  Pins("B12"), IOStandard("LVDS25"),    Misc("PULL_MODE=NONE"), Misc("DRIVE=OFF")),
+        Subsignal("se_dn",  Pins("B10"), IOStandard("LVDS25"),    Misc("PULL_MODE=NONE"), Misc("DRIVE=OFF")),
+        Subsignal("fs_dp",  Pins("A13"), IOStandard("LVCMOS33"),  Misc("PULL_MODE=NONE"), Misc("DRIVE=4")),
+        Subsignal("fs_dn",  Pins("A9"),  IOStandard("LVCMOS33"),  Misc("PULL_MODE=NONE"), Misc("DRIVE=4")),
+        Subsignal("pullup", Pins("B13"), IOStandard("LVCMOS33"),  Misc("PULL_MODE=NONE"), Misc("DRIVE=4")),
     ),
 
     # HDMI pins.
@@ -209,7 +211,6 @@ def _build_io_constraints(toolchain):
     Same as the default LiteX Gowin generation, except that:
     - Analog battery ADC pins only get an IO_LOC (no IO_TYPE).
     - Differential pairs (_p/_n) are merged into a single IO_LOC and the _n side is skipped.
-    - usb_dxn (LVCMOS33D pair of usb_dxp) gets no IO_PORT.
     """
     cst = []
 
@@ -251,9 +252,6 @@ def _build_io_constraints(toolchain):
                 if p_name is not None:
                     continue
             cst.append(f'IO_LOC "{name}" {pin};')
-
-        if name == "usb_dxn":
-            continue
 
         other_cst = []
         for constraint in other:

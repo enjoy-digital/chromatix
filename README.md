@@ -81,13 +81,14 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **Video pipeline**: frame buffer addressing, frame blending, OSD/overlays (battery, timer, debug), GBC color correction (LCD/UVC), line buffer and ST7785 RGB666 panel timing, dot clock.
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
 - **Memory system**: AP Memory OPI x8 PSRAM controller with GW5A OSER4/IDES4/IODELAY PHY, startup BIST, ESP32 QSPI slave (GW5A DFFC for the CS asynchronous reset), multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs), framebuffer/OSD line readers.
+- **USB 2.0 PHY**: LiteX USB2PHY (UTMI, High-Speed 480Mbps + Full-Speed, GW5A SerDes).
 - **USB composite device** (UVC + UAC + CDC-ACM): USB PLL, descriptors, control/class requests, EP3 CDC buffers, UVC YUYV packing/packetizer (color space convertor + video FIFO), UAC endpoint, CDC UART at the host baudrate.
 - **SoC**: LiteX SoCMini (CSR bus in the sys = gClk domain) with debug/automation registers (virtual buttons, status) and an optional UARTBone debug bridge over the USB CDC port.
 
 ### What's in Verilog (Instance black boxes)
 
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
-- **Gowin USB 2.0 Device Controller + SoftPHY** (V1.9.12.04 IPs, encrypted): the only vendor IP left.
+- **Gowin USB 2.0 Device Controller** (V1.9.12.04 IP, encrypted): the only vendor IP left.
 
 ## Migration Steps
 
@@ -119,8 +120,9 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | 24 | PSRAM controller/PHY, BIST and line readers → LiteX/Migen | `PSRAMController.vhd`, `PSRAMBIST_Burst.vhd`, `mm_burst_read_to_stream.v` |
 | 25 | QSPI slave → LiteX/Migen | `qspi_slave.v` |
 | 26 | USB class/device logic → LiteX/Migen (formally checked against the originals) | `usbuvcuart_top.v`, `usb_descriptor_video.v` + defs, `usb_fifo.v`, `sync_rx/tx_pkt_fifo.v`, `uart.v`, `uart_rx.vhd`, `uart_tx.vhd` |
+| 27 | USB 2.0 PHY (HS + FS) → LiteX USB2PHY | `usb2_0_softphy*.v` (encrypted IP) |
 
-**Remaining non-LiteX logic**: the MiSTer Game Boy emulation core (`chromatix/verilog/emu`, kept by design) and the encrypted Gowin USB 2.0 Device Controller/SoftPHY IPs (`chromatix/verilog/usb`).
+**Remaining non-LiteX logic**: the MiSTer Game Boy emulation core (`chromatix/verilog/emu`, kept by design) and the encrypted Gowin USB 2.0 Device Controller IP (`chromatix/verilog/usb`).
 
 Ports are checked with simulations, formal equivalence checks against the original Verilog (`test/eqcheck.py`, Yosys) and on hardware (automated through the debug bridge + UVC capture).
 

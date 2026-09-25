@@ -48,13 +48,9 @@ VERILOG_SOURCES = [
     "Gameboy_MiSTer/rtl/hdma.v",
     "Gameboy_MiSTer/rtl/timer.v",
 
-    # USB: Gowin USB 2.0 Device Controller + SoftPHY (class logic in gateware/usb_*.py).
+    # USB: Gowin USB 2.0 Device Controller (class logic in gateware/usb_*.py).
     "usb/usb_device_controller/usb_device_controller_top.v",
     "usb/usb_device_controller/usb_device_controller.v",
-    "usb/usb2_0_softphy/usb2_0_softphy_top.v",
-    "usb/usb2_0_softphy/usb2_0_softphy_name.v",
-    "usb/usb2_0_softphy/usb2_0_softphy.v",
-    "usb/usb2_0_softphy/static_macro_define.v",
 ]
 
 def add_verilog_sources(platform):
