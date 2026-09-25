@@ -35,7 +35,8 @@ jobs:
           wget https://raw.githubusercontent.com/enjoy-digital/litex/master/litex_setup.py
           python3 litex_setup.py --config=standard --init --install --user
 
-      # Install ChromatiX (same as litex_setup.py for LiteX repositories).
+      # Install ChromatiX (same as litex_setup.py for LiteX repositories, also installs the
+      # pinned Amaranth/LUNA USB device core).
       - name: Install ChromatiX
         run: python3 -m pip install --user --no-build-isolation -e .
 

@@ -22,6 +22,87 @@ from chromatix.gateware import usb_class
 from chromatix.gateware.usb_class import *
 from chromatix.gateware.usb import CSC_COEFFICIENTS, CSC_FRAC_BITS
 
+# Setup Parser (harness) ----------------------------------------------------------------------------
+
+class USBSetupParser(LiteXModule):
+    """Control transfers harness: SETUP header capture and data stage offset tracking (setup fields
+    of the class request handlers, as provided by the EP0 request bridge of the USB core)."""
+    def __init__(self):
+        self.reset         = Signal()
+        self.setup_active  = Signal()
+        self.endpt         = Signal(4)
+        self.rxdat         = Signal(8)
+        self.rxval         = Signal()
+        self.rxact         = Signal()
+        self.txact         = Signal()
+        self.txpop         = Signal()
+
+        self.header_ready  = Signal()
+        self.bmRequestType = Signal(8)
+        self.bRequest      = Signal(8)
+        self.wValue        = Signal(16)
+        self.wIndex        = Signal(16)
+        self.wLength       = Signal(16)
+        self.cdata_ofs     = Signal(16)
+
+        # # #
+
+        hdr_len      = Signal(3)
+        cdata_rxtx   = Signal()
+        cdata_active = Signal()
+        clength      = Signal(16)
+        self.comb += [
+            self.header_ready.eq(hdr_len == 7),
+            clength.eq(Cat(self.wLength[:8], self.rxdat)),
+        ]
+        self.sync += [
+            If(self.reset,
+                hdr_len.eq(0),
+                cdata_rxtx.eq(0),
+                cdata_active.eq(0),
+            ).Elif(self.setup_active,
+                If(self.rxval,
+                    If(~self.header_ready,
+                        hdr_len.eq(hdr_len + 1),
+                    ),
+                    Case(hdr_len, {
+                        0: [
+                            self.bmRequestType.eq(self.rxdat),
+                            cdata_rxtx.eq(0),
+                            cdata_active.eq(0),
+                            self.cdata_ofs.eq(0),
+                        ],
+                        1: self.bRequest.eq(self.rxdat),
+                        2: self.wValue[0:8].eq(self.rxdat),
+                        3: self.wValue[8:16].eq(self.rxdat),
+                        4: self.wIndex[0:8].eq(self.rxdat),
+                        5: self.wIndex[8:16].eq(self.rxdat),
+                        6: self.wLength[0:8].eq(self.rxdat),
+                        7: [
+                            self.wLength[8:16].eq(self.rxdat),
+                            cdata_active.eq(0),
+                            cdata_rxtx.eq(clength != 0),
+                        ],
+                    })
+                )
+            ).Elif(self.header_ready & (self.endpt == EP_CTRL),
+                If(cdata_rxtx,
+                    If((self.rxact & self.rxval) | (self.txact & self.txpop),
+                        self.cdata_ofs.eq(self.cdata_ofs + 1),
+                    ),
+                    If(self.rxact | self.txact,
+                        cdata_active.eq(1),
+                    ).Elif(cdata_active,
+                        cdata_active.eq(0),
+                        cdata_rxtx.eq(0),
+                        hdr_len.eq(0),
+                    )
+                ).Else(
+                    hdr_len.eq(0),
+                )
+            )
+        ]
+
 # Control Transfers Helpers ------------------------------------------------------------------------
 
 class ControlBench(LiteXModule):
@@ -332,9 +413,20 @@ def test_interface_alt_select():
 
 # UAC Endpoint -------------------------------------------------------------------------------------
 
+def uac_pop(dut, n):
+    """n bytes from the sample FIFO (txdat = FIFO output, consumed with txpop)."""
+    data = []
+    for _ in range(n):
+        data.append((yield dut.txdat))
+        yield dut.txpop.eq(1)
+        yield
+        yield dut.txpop.eq(0)
+        yield
+    return data
+
 def test_uac_endpoint_packets():
-    """Each micro-frame (sof_rise), the samples captured at 44.1kHz are sent as 20 or 24-byte
-    packets of stereo 16-bit little-endian samples, in capture order."""
+    """Each micro-frame, the complete samples captured at 44.1kHz are sent (next_len: 20 or 24
+    bytes) as stereo 16-bit little-endian samples, in capture order."""
     # Reduced sys clock (6MHz): 136 cycles per sample, 750 cycles per micro-frame.
     dut     = UACEndpoint(sys_clk_freq=6e6)
     dut.cd_audio = ClockDomain(reset_less=True)
@@ -347,16 +439,13 @@ def test_uac_endpoint_packets():
 
     def controller():
         for mframe in range(8):
-            for _ in range(749):
+            for _ in range(750 - 4*UACEndpoint.MAXBUFFER):
                 yield
-            yield dut.sof_rise.eq(1)
-            yield
-            yield dut.sof_rise.eq(0)
-            for _ in range(8):
+            length = (yield dut.next_len)
+            assert length % 4 == 0 and length <= UACEndpoint.MAXBUFFER
+            packets.append((yield from uac_pop(dut, length)))
+            for _ in range(4*(UACEndpoint.MAXBUFFER - length)):
                 yield
-            length = (yield dut.txdat_len)
-            assert (yield dut.txcork) == 0
-            packets.append((yield from pop(dut, length)))
 
     run_simulation(dut, controller(), clocks={"sys": 10, "audio": 70})
     lengths = [len(p) for p in packets[1:]]
@@ -488,128 +577,6 @@ def yuyv_model(pixels):
         out += [y0, (cb0 + cb1) >> 1, y1, (cr0 + cr1) >> 1]
     return out
 
-@pytest.mark.parametrize("frame_index, hbw", [(2, 0), (1, 1), (1, 0)])
-def test_uvc_video_framing(monkeypatch, frame_index, hbw):
-    """UVC payload transfers (one per micro-frame): 12-byte header (bHeaderLength, bmHeaderInfo
-    with FID/EOF), full transfers when enough data is buffered, header-only transfers otherwise, a
-    last transfer with the remaining bytes and EOF; with high-bandwidth (alt setting 2) two 1024-byte
-    transactions (DATA1 -> DATA0, header in the 1st only) when enough data is buffered. Payloads
-    carry the YUYV conversion of the frame, upscaled 2x2 for frame 1 (320x288); FID toggles
-    between frames. Reduced frame height (4 source lines) to keep the simulation short."""
-    height = 4
-    monkeypatch.setattr(usb_class, "UVC_HEIGHT", height)
-    frames = [(2*UVC_WIDTH, 2*height), (UVC_WIDTH, height)]
-    scale  = frames[frame_index - 1][0]//UVC_WIDTH
-    dut = UVCVideo(frames=frames)
-    dut.cd_video = ClockDomain(reset_less=True)
-    random.seed(0)
-    src_frames = [[[tuple(random.randrange(64) for _ in range(3)) for _ in range(UVC_WIDTH)]
-        for _ in range(height)] for _ in range(2)]
-    transfers = []
-    pids      = []
-    done      = []
-
-    def video():
-        for _ in range(20):
-            yield
-        for frame in src_frames:
-            yield dut.frame_valid.eq(1)
-            for _ in range(10):
-                yield
-            for line in frame:
-                yield dut.line_valid.eq(1)
-                for p in line:
-                    yield dut.data.eq(p[0] | (p[1] << 6) | (p[2] << 12))
-                    yield dut.enable.eq(1)
-                    for _ in range(3):
-                        yield
-                yield dut.enable.eq(0)
-                yield dut.line_valid.eq(0)
-                for _ in range(200):
-                    yield
-            yield dut.frame_valid.eq(0)
-            for _ in range(600):
-                yield
-        done.append(1)
-
-    def transaction():
-        length = (yield dut.txdat_len)
-        pid    = (yield dut.txiso_pid)
-        assert (yield dut.txcork) == 0
-        yield dut.txact.eq(1)
-        yield
-        data = yield from pop(dut, length)
-        yield
-        yield dut.txact.eq(0)
-        for _ in range(8):
-            yield
-        return pid, data
-
-    def controller():
-        yield dut.frame_index.eq(frame_index)
-        yield dut.hbw.eq(hbw)
-        yield dut.reset.eq(1)
-        for _ in range(8):
-            yield
-        yield dut.reset.eq(0)
-        extra = 16 # Micro-frames after the end of the video (to send the buffered data).
-        while extra:
-            if done:
-                extra -= 1
-            # Micro-frame period: shorter than on hardware (7500 clocks) to keep the simulation
-            # short, but long enough for the replay to buffer 2 transactions.
-            for _ in range(3000):
-                yield
-            yield dut.sof.eq(1)
-            yield
-            yield dut.sof.eq(0)
-            for _ in range(4):
-                yield
-            pid, data = yield from transaction()
-            if pid == 0b1011: # DATA1: 2nd transaction (DATA0).
-                assert hbw and len(data) == UVC_PACKET_SIZE
-                pid2, data2 = yield from transaction()
-                assert pid2 == 0b0011 and len(data2) == UVC_PACKET_SIZE
-                data = data + data2
-            else:
-                assert pid == 0b0011
-            pids.append(pid)
-            transfers.append(data)
-
-    run_simulation(dut, {"sys": controller(), "video": video()}, clocks={"sys": 10, "video": 70})
-
-    # Headers.
-    for t in transfers:
-        assert t[0] == UVC_HEADER_SIZE
-        assert t[1] & 0xfc == 0x8c
-    # Split transfers in frames (EOF = bit 1 of bmHeaderInfo).
-    payloads = [[]]
-    fids     = []
-    for t in transfers:
-        if len(t) > UVC_HEADER_SIZE:
-            assert len(t) <= (2 if hbw else 1)*UVC_PACKET_SIZE
-            payloads[-1] += t[UVC_HEADER_SIZE:]
-            fids.append(t[1] & 0x01)
-            # Non-last transfers are full.
-            assert (t[1] & 0x02) or len(t) in [UVC_PACKET_SIZE, 2*UVC_PACKET_SIZE]
-        if t[1] & 0x02:
-            payloads.append([])
-    assert len(payloads) == 3 and payloads[-1] == []
-    # All bytes checked (including the 1st byte of the following frames: no stale word from the
-    # previous frame after the per-frame VideoFIFO reset).
-    for frame, payload in zip(src_frames, payloads):
-        lines    = [[p for p in line for _ in range(scale)] for line in frame for _ in range(scale)]
-        expected = sum([yuyv_model(line) for line in lines], [])
-        assert len(payload) == len(expected)
-        mismatch = [i for i, (a, b) in enumerate(zip(payload, expected)) if a != b]
-        assert not mismatch, (len(payload), mismatch[:8], len(mismatch))
-    # FID toggles after each frame.
-    assert fids[0] == 0 and fids[-1] == 1 and fids == sorted(fids)
-    # Header-only transfers are sent while waiting for data.
-    assert any(len(t) == UVC_HEADER_SIZE for t in transfers)
-    # High-bandwidth transfers are used (only) when enabled.
-    assert (0b1011 in pids) == bool(hbw and scale == 2)
-
 def test_uvc_video_late_start(monkeypatch):
     """Host starting the stream late (the FIFO fills, lines are dropped in the first frame): the
     broken frame must not stall the pipeline, the following frames are sent complete and correct."""
@@ -689,12 +656,10 @@ def test_uvc_video_late_start(monkeypatch):
     complete = [expected.index(p) for p in payloads if p in expected]
     assert complete and complete[-1] == len(src_frames) - 1
 
-# UVC/UAC with LUNA -------------------------------------------------------------------------------
-
-class _LUNAIsoBench(LiteXModule):
-    """UVCVideo (LUNA mode) + the txact emulation of USBDeviceLUNA (requested -> finished)."""
+class _UVCIsoBench(LiteXModule):
+    """UVCVideo + the txact emulation of USBDevice (LUNA endpoint requested -> finished)."""
     def __init__(self, frames):
-        self.uvc       = uvc = UVCVideo(frames=frames, luna=True)
+        self.uvc       = uvc = UVCVideo(frames=frames)
         self.requested = Signal()
         self.finished  = Signal()
         self.ready     = Signal()
@@ -705,16 +670,20 @@ class _LUNAIsoBench(LiteXModule):
         self.txpop = self.ready
         self.txdat = uvc.txdat
 
-@pytest.mark.parametrize("frame_index, hbw", [(2, 0), (1, 1)])
-def test_uvc_video_framing_luna(monkeypatch, frame_index, hbw):
-    """UVC with LUNA: micro-frame length (next_len) latched at SOF, single transfer of up to 2048
-    bytes (LUNA splits it in 1024-byte DATA1/DATA0 packets), header once per transfer; payloads are
-    the YUYV conversion of the (upscaled) frames."""
+@pytest.mark.parametrize("frame_index, hbw", [(2, 0), (1, 1), (1, 0)])
+def test_uvc_video_framing(monkeypatch, frame_index, hbw):
+    """UVC payload transfers (one per micro-frame, length next_len latched at SOF by the USB core):
+    12-byte header (bHeaderLength, bmHeaderInfo with FID/EOF), full transfers when enough data is
+    buffered, header-only transfers otherwise, a last transfer with the remaining bytes and EOF;
+    with high-bandwidth (alt setting 2), 2048-byte transfers (split in 1024-byte DATA1/DATA0
+    packets by the USB core). Payloads carry the YUYV conversion of the frame, upscaled 2x2 for
+    frame 1 (320x288); FID toggles between frames. Reduced frame height (4 source lines) to keep
+    the simulation short."""
     height = 4
     monkeypatch.setattr(usb_class, "UVC_HEIGHT", height)
     frames = [(2*UVC_WIDTH, 2*height), (UVC_WIDTH, height)]
     scale  = frames[frame_index - 1][0]//UVC_WIDTH
-    dut    = _LUNAIsoBench(frames)
+    dut    = _UVCIsoBench(frames)
     dut.cd_video = ClockDomain(reset_less=True)
     uvc    = dut.uvc
     random.seed(0)
@@ -744,7 +713,7 @@ def test_uvc_video_framing_luna(monkeypatch, frame_index, hbw):
                 yield
         done.append(1)
 
-    def luna():
+    def usb():
         yield uvc.frame_index.eq(frame_index)
         yield uvc.hbw.eq(hbw)
         yield uvc.reset.eq(1)
@@ -759,7 +728,7 @@ def test_uvc_video_framing_luna(monkeypatch, frame_index, hbw):
             # than a single transaction drains it for 2048-byte transfers to be used).
             for _ in range(6000 if hbw else 3000):
                 yield
-            # SOF: LUNA latches bytes_in_frame (next_len) in the SOF cycle.
+            # SOF: the USB core latches bytes_in_frame (next_len) in the SOF cycle.
             yield uvc.sof.eq(1)
             yield
             length = (yield uvc.next_len)
@@ -783,7 +752,7 @@ def test_uvc_video_framing_luna(monkeypatch, frame_index, hbw):
             yield dut.finished.eq(0)
             transfers.append(data)
 
-    run_simulation(dut, {"sys": luna(), "video": video()}, clocks={"sys": 10, "video": 70})
+    run_simulation(dut, {"sys": usb(), "video": video()}, clocks={"sys": 10, "video": 70})
 
     payloads, fids = [[]], []
     for t in transfers:
@@ -799,34 +768,8 @@ def test_uvc_video_framing_luna(monkeypatch, frame_index, hbw):
         lines    = [[p for p in line for _ in range(scale)] for line in frame for _ in range(scale)]
         expected = sum([yuyv_model(line) for line in lines], [])
         assert payload == expected
-    assert fids[0] == 0 and fids[-1] == 1
-    # High-bandwidth transfers (2048 bytes) used when enabled.
-    assert (2*UVC_PACKET_SIZE in [len(t) for t in transfers]) == bool(hbw)
-
-def test_uac_endpoint_luna():
-    """UAC with LUNA: complete samples (4 bytes, L/R little-endian) buffered, next_len is the number
-    of buffered sample bytes (<= 24) and the data is popped in capture order."""
-    dut = UACEndpoint(luna=True)
-    dut.cd_audio = ClockDomain("audio", reset_less=True)
-    lengths, data = [], []
-
-    def gen():
-        for i in range(60000):
-            yield dut.left.eq(0x1234)
-            yield dut.right.eq(0x5678)
-            if i % 7500 == 7499:
-                length = (yield dut.next_len)
-                lengths.append(length)
-                for _ in range(length):
-                    data.append((yield dut.txdat))
-                    yield dut.txpop.eq(1)
-                    yield
-                    yield dut.txpop.eq(0)
-                    yield
-            yield
-
-    run_simulation(dut, gen(), clocks={"sys": 10, "audio": 70})
-    assert all(l % 4 == 0 and l <= UACEndpoint.MAXBUFFER for l in lengths)
-    assert set(lengths[2:]) <= {20, 24} and 20 in lengths[2:] and 24 in lengths[2:]
-    samples = [data[i:i+4] for i in range(0, len(data), 4)]
-    assert samples[-8:] == [[0x34, 0x12, 0x78, 0x56]]*8
+    assert fids[0] == 0 and fids[-1] == 1 and fids == sorted(fids)
+    # Header-only transfers are sent while waiting for data.
+    assert any(len(t) == UVC_HEADER_SIZE for t in transfers)
+    # High-bandwidth transfers (2048 bytes) used (only) when enabled.
+    assert (2*UVC_PACKET_SIZE in [len(t) for t in transfers]) == bool(hbw and scale == 2)

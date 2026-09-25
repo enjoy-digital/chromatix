@@ -31,7 +31,6 @@ from chromatix import Platform
 from chromatix.gateware.crg        import CRG
 from chromatix.gateware.sources    import add_verilog_sources
 from chromatix.gateware.usb_device import USBDevice
-from chromatix.gateware.usb_luna   import USBDeviceLUNA
 from chromatix.gateware.misc       import TickGenerator, StatusLed, ESP32Control
 from chromatix.gateware.buttons    import Buttons, BUTTONS
 from chromatix.gateware.debug      import DebugControl
@@ -96,8 +95,7 @@ class BaseSoC(SoCMini):
     pipeline, audio I2S with TLV320 codec, Game Boy emulation core, memory controller, USB
     UVC+UART, ESP32 MCU communication, battery ADC, button debouncing, and system monitoring.
     """
-    def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200, uvc_frames=None,
-        usb_controller="v1.9.9", with_usb_luna_debug=False):
+    def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200, uvc_frames=None):
         gclk_freq = int(33.55432e6 / 4)
         hclk_freq = int(33.55432e6 / 2)
 
@@ -507,11 +505,9 @@ class BaseSoC(SoCMini):
 
         # USB UVC+UAC+UART System ------------------------------------------------------------------
 
-        usb_device_cls = USBDeviceLUNA if usb_controller == "luna" else USBDevice
-        self.usb = usb_dev = usb_device_cls(platform, clk_24, usb,
+        self.usb = usb_dev = USBDevice(platform, clk_24, usb,
             with_utmi_monitor = with_debug_bridge,
-            **({} if uvc_frames is None else {"uvc_frames": uvc_frames}),
-            **({"with_luna_debug": True} if with_usb_luna_debug else {}))
+            **({} if uvc_frames is None else {"uvc_frames": uvc_frames}))
         self.comb += [
             usb_dev.reset.eq(usb_rst),
             esp32_ctrl.usb_locked.eq(usb_dev.locked),
@@ -683,8 +679,6 @@ def main():
     # SoC.
     parser.add_argument("--with-debug-bridge",     action="store_true",                      help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
     parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,                 help="Debug bridge baudrate.")
-    parser.add_argument("--usb-controller", default="v1.9.9", choices=["v1.9.9", "v3.4", "luna"], help="USB 2.0 Device Controller: Gowin (v1.9.9: high-bandwidth isochronous, required for UVC 320x288, v3.4) or LUNA.")
-    parser.add_argument("--usb-luna-debug", action="store_true", help="Debug: LUNA core (EP0) sharing the USB PHY with the Gowin controller (usb_luna_run CSR).")
     parser.add_argument("--uvc-sizes", default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
     args = parser.parse_args()
 
@@ -709,7 +703,7 @@ def main():
                 else:
                     os.environ["LD_LIBRARY_PATH"] = ld_library_path
         platform.toolchain.run_script = run_script_with_gowin_libs
-    add_verilog_sources(platform, usb_controller=args.usb_controller)
+    add_verilog_sources(platform)
     add_timing_constraints(platform)
 
     # SoC.
@@ -717,8 +711,6 @@ def main():
         with_debug_bridge     = args.with_debug_bridge,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
-        usb_controller        = args.usb_controller,
-        with_usb_luna_debug   = args.usb_luna_debug,
     )
 
     # Build.

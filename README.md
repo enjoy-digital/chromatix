@@ -82,14 +82,16 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 - **Buttons**: 8-channel debouncer (3-stage sampling + 15-bit counter).
 - **Memory system**: AP Memory OPI x8 PSRAM controller with GW5A OSER4/IDES4/IODELAY PHY, startup BIST, ESP32 QSPI slave (GW5A DFFC for the CS asynchronous reset), multi-port round-robin arbiter, Game Boy framebuffer and ESP32 QSPI burst writers (LiteX async FIFOs), framebuffer/OSD line readers.
 - **USB 2.0 PHY**: LiteX USB2PHY (UTMI, High-Speed 480Mbps + Full-Speed, GW5A SerDes).
-- **USB composite device** (UVC + UAC + CDC-ACM): USB PLL, descriptors, control/class requests, EP3 CDC buffers, UVC YUYV packing/packetizer (color space convertor + video FIFO), UAC endpoint, CDC UART at the host baudrate.
-- **UVC 320x288**: the UVC stream is offered at **320x288** (default, 2x2 integer upscale: each YUY2 chroma pair is a single source pixel, so colors are exact) and at native 160x144, selected by the host (bFrameIndex). Lines are replayed at 60MHz from line buffers; 320x288 uses high-bandwidth isochronous transfers (2x1024 bytes per micro-frame, DATA1 -> DATA0, alternate setting 2) and runs at 60 fps. Sizes are selected with `--uvc-sizes` (ex: `--uvc-sizes 160x144` for the original single size).
+- **USB 2.0 device core**: [LUNA](https://github.com/greatscottgadgets/luna)'s USB 2.0 device (Amaranth, BSD-3, converted to Verilog at build time with LiteX's Amaranth2VConverter): High-Speed reset/chirp, packets, CRC, data toggles/handshakes, standard requests, control/isochronous (high-bandwidth)/bulk endpoints, with a request bridge to the Migen EP0 handlers.
+- **USB composite device** (UVC + UAC + CDC-ACM): USB PLL, descriptors, class requests, UVC YUYV packing/packetizer (color space convertor + video FIFO), UAC endpoint, CDC UART at the host baudrate.
+- **UVC 320x288**: the UVC stream is offered at **320x288** (default, 2x2 integer upscale: each YUY2 chroma pair is a single source pixel, so colors are exact) and at native 160x144, selected by the host (bFrameIndex). Lines are replayed at 60MHz from line buffers; 320x288 uses high-bandwidth isochronous transfers (2048 bytes per micro-frame, DATA1 -> DATA0, alternate setting 2) and runs at 60 fps. Sizes are selected with `--uvc-sizes` (ex: `--uvc-sizes 160x144` for the original single size).
 - **SoC**: LiteX SoCMini (CSR bus in the sys = gClk domain) with debug/automation registers (virtual buttons, status) and an optional UARTBone debug bridge over the USB CDC port.
 
 ### What's in Verilog (Instance black boxes)
 
 - **emu_system_top**: MiSTer Game Boy core (Z80 CPU, graphics, sound, cartridge).
-- **Gowin USB 2.0 Device Controller** (encrypted): the only vendor IP left. The V1.9.9 netlist is used by default (`--usb-controller v1.9.9`): the V3.4 sources from Gowin V1.9.12.04 (`--usb-controller v3.4`) ignore the isochronous PID input (always DATA0), which rules out the high-bandwidth transfers needed by 320x288 (checked on the wire with the UTMI monitor).
+
+No vendor (Gowin) IP is left: the only hard primitives used are the GW5A PLLs, SerDes/IO primitives and ADC.
 
 ## Migration Steps
 
@@ -122,9 +124,10 @@ ChromatiX demonstrates how LiteX can progressively simplify and modernize an exi
 | 25 | QSPI slave → LiteX/Migen | `qspi_slave.v` |
 | 26 | USB class/device logic → LiteX/Migen (formally checked against the originals) | `usbuvcuart_top.v`, `usb_descriptor_video.v` + defs, `usb_fifo.v`, `sync_rx/tx_pkt_fifo.v`, `uart.v`, `uart_rx.vhd`, `uart_tx.vhd` |
 | 27 | USB 2.0 PHY (HS + FS) → LiteX USB2PHY | `usb2_0_softphy*.v` (encrypted IP) |
-| 28 | UVC 320x288 (2x2 upscale, high-bandwidth isochronous) alongside 160x144; V1.9.9 controller netlist as default | |
+| 28 | UVC 320x288 (2x2 upscale, high-bandwidth isochronous) alongside 160x144 | |
+| 29 | Gowin USB 2.0 Device Controller → LUNA USB 2.0 device core (Amaranth, converted at build time) + Migen EP0 bridge | `usb_device_controller*` (encrypted IP / pre-synthesized netlist) |
 
-**Remaining non-LiteX logic**: the MiSTer Game Boy emulation core (`chromatix/verilog/emu`, kept by design) and the encrypted Gowin USB 2.0 Device Controller IP (`chromatix/verilog/usb`).
+**Remaining non-LiteX logic**: the MiSTer Game Boy emulation core (`chromatix/verilog/emu`, kept by design) and the LUNA USB 2.0 device core (Amaranth, open source; a native Migen port is planned).
 
 Ports are checked with simulations, formal equivalence checks against the original Verilog (`test/eqcheck.py`, Yosys) and on hardware (automated through the debug bridge + UVC capture).
 
@@ -140,7 +143,7 @@ chromatix_platform.py     # Chromatic platform (IOs, Gowin options, programmer).
 chromatix/
   gateware/                   # LiteX/Migen cores (CRG, LCD, codec, system monitor, sources).
   data/                       # ST7785 / TLV320 register images.
-  verilog/                    # Remaining non-LiteX RTL: emu/ (Game Boy core) + Gameboy_MiSTer submodule, usb/ (Gowin IPs).
+  verilog/                    # Remaining non-LiteX RTL: emu/ (Game Boy core) + Gameboy_MiSTer submodule.
 scripts/                      # Host tools (chromatic.py: debug bridge control, buttons, UVC capture).
 test/                         # Simulation/elaboration tests (pytest).
 doc/                          # Roadmap.
@@ -226,4 +229,5 @@ the first video packet), to check the USB traffic without a protocol analyzer.
 - [LiteX](https://github.com/enjoy-digital/litex) (with Gowin backend)
 - [LiteI2C](https://github.com/enjoy-digital/litei2c)
 - [Migen](https://github.com/m-labs/migen)
+- [Amaranth](https://github.com/amaranth-lang/amaranth) 0.5.8 + [LUNA](https://github.com/greatscottgadgets/luna) 0.2.3 + usb-protocol 0.9.2 (USB 2.0 device core, installed by `pip3 install -e .`)
 - Gowin EDA (for synthesis/P&R; Apicula does not support the GW5A yet)

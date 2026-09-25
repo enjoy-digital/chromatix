@@ -19,8 +19,15 @@ setup(
     url                           = "https://github.com/enjoy-digital/chromatix",
     download_url                  = "https://github.com/enjoy-digital/chromatix",
     license                       = "BSD",
-    python_requires               = "~=3.7",
-    install_requires              = ["litex", "litei2c"],
+    python_requires               = ">=3.8",
+    install_requires              = [
+        "litex",
+        "litei2c",
+        # LUNA USB 2.0 device core (Amaranth, converted to Verilog at build time).
+        "amaranth==0.5.8",
+        "luna-usb==0.2.3",
+        "usb-protocol==0.9.2",
+    ],
     packages                      = find_packages(exclude=["test*"]),
     py_modules                    = ["chromatix_platform"],
     include_package_data          = True,

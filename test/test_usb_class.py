@@ -7,7 +7,6 @@
 import os
 import shutil
 import subprocess
-import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -109,47 +108,6 @@ def check(tmp_path, gold_top, gate, depth, ignore_outputs=[]):
 # Equivalence --------------------------------------------------------------------------------------
 
 @requires_yosys
-def test_setup_parser_equivalence(tmp_path):
-    """USBSetupParser == setup header capture of usbuvcuart_top.v (checked through a gold wrapper)."""
-    gold = fetch_original(str(tmp_path))
-    # Gold wrapper: extract the setup parser always block into a module.
-    src = open(gold).read()
-    start = src.index("    reg  [ 7:0] bmRequestType;")
-    end   = src.index("    ctrl_uart uart_if_ctrl(")
-    body  = src[start:end]
-    wrapper = os.path.join(str(tmp_path), "gold_setup.v")
-    with open(wrapper, "w") as f:
-        f.write("module setup_parser(input pClk, input RESET_IN, input setup_active, input [3:0] endpt_sel,\n"
-                "  input [7:0] usb_rxdat, input usb_rxval, input usb_rxact, input usb_txact, input usb_txpop,\n"
-                "  output header_ready_o, output [7:0] bmRequestType_o, output [7:0] bRequest_o,\n"
-                "  output [15:0] wValue_o, output [15:0] wIndex_o, output [15:0] wLength_o, output [15:0] cdata_ofs_o);\n"
-                "  localparam EP_CTRL = 4'd0;\n"
-                + "\n".join(l for l in body.split("\n") if not any(k in l for k in ["s_ctl_sig", "s_dte1_rate", "s_char1_format",
-                   "s_parity1_type", "s_data1_bits", "uart_dte_rate", "uart_char_format", "uart_parity_type", "uart_data_bits"])) +
-                "\n  assign header_ready_o = header_ready; assign bmRequestType_o = bmRequestType; assign bRequest_o = bRequest;\n"
-                "  assign wValue_o = wValue; assign wIndex_o = wIndex; assign wLength_o = wLength; assign cdata_ofs_o = cdata_ofs;\n"
-                "endmodule\n")
-    w   = _Wrapper()
-    dut = USBSetupParser()
-    w.submodules.dut = dut
-    w.comb += [
-        dut.reset.eq(w.i("RESET_IN")),
-        dut.setup_active.eq(w.i("setup_active")),
-        dut.endpt.eq(w.i("endpt_sel", 4)),
-        dut.rxdat.eq(w.i("usb_rxdat", 8)),
-        dut.rxval.eq(w.i("usb_rxval")),
-        dut.rxact.eq(w.i("usb_rxact")),
-        dut.txact.eq(w.i("usb_txact")),
-        dut.txpop.eq(w.i("usb_txpop")),
-    ]
-    for name in ["header_ready", "bmRequestType", "bRequest", "wValue", "wIndex", "wLength", "cdata_ofs"]:
-        w.o(name + "_o", getattr(dut, name))
-    gate_v = os.path.join(str(tmp_path), "gate.v")
-    export_migen(w, w.ios, "setup_parser", gate_v)
-    ok, log = eqcheck([wrapper], "setup_parser", [gate_v], "setup_parser", depth=24, workdir=str(tmp_path))
-    assert ok, log[-2000:]
-
-@requires_yosys
 def test_ctrl_uart_equivalence(tmp_path):
     """CDCACMControl == ctrl_uart."""
     w = control_wrapper(CDCACMControl, [("s_ctl_sig", "ctl_sig"), ("s_dte1_rate", "dte_rate"),
@@ -212,24 +170,3 @@ def test_cdc_uart_loopback():
 
     run_simulation(dut, gen())
     assert rx == data
-
-@requires_yosys
-def test_uac_endpoint_equivalence(tmp_path):
-    """UACEndpoint == usbuac_ep (bounded: the 44.1kHz accumulator is only partially covered)."""
-    w   = _Wrapper()
-    dut = UACEndpoint()
-    w.submodules.dut = dut
-    w.clock_domains.cd_audio = ClockDomain(reset_less=True)
-    w.comb += [
-        w.cd_audio.clk.eq(w.i("gClk")),
-        dut.reset.eq(w.i("rst")),
-        dut.sof_rise.eq(w.i("usb_sof_rise")),
-        dut.left.eq(w.i("left", 16)),
-        dut.right.eq(w.i("right", 16)),
-        dut.txpop.eq(w.i("uac_txpop")),
-        dut.txact.eq(w.i("uac_txact")),
-    ]
-    w.o("uac_txdat",     dut.txdat)
-    w.o("uac_txdat_len", dut.txdat_len)
-    w.o("uac_txcork",    dut.txcork)
-    check(tmp_path, "usbuac_ep", w, depth=24)

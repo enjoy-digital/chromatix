@@ -5,15 +5,21 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 """
-USB composite device elaboration (Gowin IPs/primitives can't be simulated): Verilog conversion with
-the LiteX PHY, instances and UTMI/pad connections.
+USB composite device elaboration (Gowin primitives can't be simulated): Verilog conversion with the
+LUNA device core (Amaranth -> Verilog), the LiteX PHY and the UTMI/pad connections.
 """
 
+import os
 import re
+
+import pytest
 
 from migen import *
 
 from chromatix import Platform
+
+pytest.importorskip("luna")
+
 from chromatix.gateware.usb_device import USBDevice
 
 # Helpers ------------------------------------------------------------------------------------------
@@ -25,10 +31,12 @@ class _Top(Module):
         pads   = platform.request("usb")
         self.submodules.usb = USBDevice(platform, clk_24, pads)
 
-def elaborate():
+def elaborate(output_dir):
     platform = Platform()
+    platform.output_dir = str(output_dir)
     top      = _Top(platform)
-    return str(platform.get_verilog(top, name="usb_device"))
+    verilog  = str(platform.get_verilog(top, name="usb_device"))
+    return platform, verilog
 
 def instance(verilog, module, name=r"\w+"):
     """Returns the port connections {port: net} of an instance."""
@@ -38,15 +46,19 @@ def instance(verilog, module, name=r"\w+"):
 
 # Tests --------------------------------------------------------------------------------------------
 
-def test_usb_device_elaboration():
-    """Controller + PLL + LiteX USB2PHY instantiated, UTMI connected between controller and PHY."""
-    verilog = elaborate()
-    ctrl    = instance(verilog, "USB_Device_Controller_Top", "u_usb_device_controller_top")
-    assert ctrl["clk_i"].strip() == "phy_clk"
+def test_usb_device_elaboration(tmp_path):
+    """LUNA core + PLL + LiteX USB2PHY instantiated, UTMI connected between the core and the PHY."""
+    platform, verilog = elaborate(tmp_path)
+    core = instance(verilog, "luna_usb_device")
+    assert core["usb_clk"].strip() == "phy_clk"
     assert "PLLA" in verilog and "usb_pll" in verilog
+    # Converted LUNA core registered as a source, no Gowin USB IP.
+    sources = [os.path.basename(path) for path, language, library in platform.sources]
+    assert "luna_usb_device.v" in sources
+    assert "USB_Device_Controller_Top" not in verilog
 
-    utmi = {port: ctrl[f"utmi_{port}_{d}"].strip() for port, d in [("dataout", "o"), ("txvalid", "o"),
-        ("txready", "i"), ("datain", "i"), ("linestate", "i"), ("xcvrselect", "o")]}
+    utmi = {port: core[f"utmi_{port}"].strip() for port in ["tx_data", "tx_valid", "tx_ready",
+        "rx_data", "line_state", "xcvr_select"]}
     for net in utmi.values():
         assert net and not re.fullmatch(r"\d+'d\d+", net) # Connected, not tied.
 

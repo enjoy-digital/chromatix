@@ -169,10 +169,14 @@ UVC + UAC + CDC. LiteX only has full-speed CDC-ACM (LUNA, through Amaranth) and 
   - Decide after measuring what users actually rely on (UVC capture vs CDC).
 - **F3 (done).** The Gowin USB 2.0 SoftPHY is replaced by LiteX's USB2PHY (HS + FS UTMI),
   validated on hardware (480M enumeration, UVC/UAC/CDC).
-- **F4 (in progress).** Replace the Gowin USB Device Controller: LUNA's USB 2.0 device (Amaranth,
+- **F4 (done).** The Gowin USB Device Controller is replaced by LUNA's USB 2.0 device (Amaranth,
   HS UTMI, high-bandwidth isochronous IN) integrated through LiteX's Amaranth2VConverter on our
-  USB2PHY, then a native Migen port of the same layers (reset/chirp, packet, transaction, control,
-  endpoints) checked against LUNA in co-simulation.
+  USB2PHY (`gateware/usb_luna_core.py`, `gateware/usb_luna.py`), with a request bridge to the Migen
+  EP0 handlers. Validated on hardware (480M enumeration, UVC 160x144/320x288 high-bandwidth, UAC,
+  CDC debug bridge and ESP32 UART bridge with DTR/RTS). No Gowin USB IP is left.
+- **F5 (next).** Native Migen port of LUNA's layers (reset/chirp, packet, transaction, control,
+  endpoints), checked against LUNA in co-simulation (same UTMI stimuli, same UTMI responses), to
+  remove the Amaranth dependency.
 
 ## Phase G — Optional / long term
 
@@ -187,8 +191,8 @@ UVC + UAC + CDC. LiteX only has full-speed CDC-ACM (LUNA, through Amaranth) and 
 - The MiSTer Game Boy core (`gb.v`, T80, `gbc_snd`, ...): third-party GPL IP, instantiated from the
   submodule.
 - The GW5A hard ADC primitive.
-- The USB device controller, until it is replaced (F4: LUNA first, then a native Migen port). The
-  Gowin SoftPHY has been replaced by LiteX's USB2PHY (F3).
+- The LUNA USB 2.0 device core (Amaranth, open source), until its native Migen port (F5). The Gowin
+  SoftPHY (F3) and USB Device Controller (F4) have been removed.
 
 ## Verification (every step)
 

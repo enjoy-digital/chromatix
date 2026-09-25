@@ -69,7 +69,7 @@ class DebugControl(LiteXModule):
             CSRField("hbw",         size=1,  offset=0,  description="UVC high-bandwidth alternate setting selected."),
             CSRField("frame_index", size=8,  offset=8,  description="UVC committed frame (1: 320x288, 2: 160x144)."),
         ])
-        self._uvc_hbw_count   = CSRStatus(16, description="UVC high-bandwidth micro-frames (2nd transactions sent, wraps).")
+        self._uvc_hbw_count   = CSRStatus(16, description="UVC high-bandwidth (2048-byte) micro-frames (wraps).")
         self._uvc_frame_count = CSRStatus(16, description="UVC frames sent (wraps).")
         self._uvc_debug       = CSRStatus(64, description="UVC debug: {frame starts, skipped frames, dropped lines, max FIFO level}.")
 

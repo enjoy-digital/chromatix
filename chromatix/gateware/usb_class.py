@@ -5,8 +5,8 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 """
-USB class logic of the Chromatic composite device (UVC + UAC + CDC-ACM), on top of the Gowin USB 2.0
-Device Controller (port of the class handlers of usbuvcuart_top.v).
+USB class logic of the Chromatic composite device (UVC + UAC + CDC-ACM), on top of the USB 2.0 device
+core (port of the class handlers of usbuvcuart_top.v).
 
 All modules run in the "sys" domain (the 60MHz UTMI clock of the USB PHY).
 """
@@ -75,92 +75,13 @@ def byte(value, n):
     """Byte n (little-endian) of value."""
     return (value >> (8*n)) & 0xff
 
-# Setup Parser -------------------------------------------------------------------------------------
-
-class USBSetupParser(LiteXModule):
-    """Control transfers: SETUP header capture and data stage offset tracking."""
-    def __init__(self):
-        self.reset         = Signal()
-        self.setup_active  = Signal()
-        self.endpt         = Signal(4)
-        self.rxdat         = Signal(8)
-        self.rxval         = Signal()
-        self.rxact         = Signal()
-        self.txact         = Signal()
-        self.txpop         = Signal()
-
-        self.header_ready  = Signal()
-        self.bmRequestType = Signal(8)
-        self.bRequest      = Signal(8)
-        self.wValue        = Signal(16)
-        self.wIndex        = Signal(16)
-        self.wLength       = Signal(16)
-        self.cdata_ofs     = Signal(16)
-
-        # # #
-
-        hdr_len      = Signal(3)
-        cdata_rxtx   = Signal()
-        cdata_active = Signal()
-        clength      = Signal(16)
-        self.comb += [
-            self.header_ready.eq(hdr_len == 7),
-            clength.eq(Cat(self.wLength[:8], self.rxdat)),
-        ]
-        self.sync += [
-            If(self.reset,
-                hdr_len.eq(0),
-                cdata_rxtx.eq(0),
-                cdata_active.eq(0),
-            ).Elif(self.setup_active,
-                If(self.rxval,
-                    If(~self.header_ready,
-                        hdr_len.eq(hdr_len + 1),
-                    ),
-                    Case(hdr_len, {
-                        0: [
-                            self.bmRequestType.eq(self.rxdat),
-                            cdata_rxtx.eq(0),
-                            cdata_active.eq(0),
-                            self.cdata_ofs.eq(0),
-                        ],
-                        1: self.bRequest.eq(self.rxdat),
-                        2: self.wValue[0:8].eq(self.rxdat),
-                        3: self.wValue[8:16].eq(self.rxdat),
-                        4: self.wIndex[0:8].eq(self.rxdat),
-                        5: self.wIndex[8:16].eq(self.rxdat),
-                        6: self.wLength[0:8].eq(self.rxdat),
-                        7: [
-                            self.wLength[8:16].eq(self.rxdat),
-                            cdata_active.eq(0),
-                            cdata_rxtx.eq(clength != 0),
-                        ],
-                    })
-                )
-            ).Elif(self.header_ready & (self.endpt == EP_CTRL),
-                If(cdata_rxtx,
-                    If((self.rxact & self.rxval) | (self.txact & self.txpop),
-                        self.cdata_ofs.eq(self.cdata_ofs + 1),
-                    ),
-                    If(self.rxact | self.txact,
-                        cdata_active.eq(1),
-                    ).Elif(cdata_active,
-                        cdata_active.eq(0),
-                        cdata_rxtx.eq(0),
-                        hdr_len.eq(0),
-                    )
-                ).Else(
-                    hdr_len.eq(0),
-                )
-            )
-        ]
-
 # Control Request Handler (base) -------------------------------------------------------------------
 
 class _ControlHandler(LiteXModule):
     """
-    Common interface of the EP0 class request handlers: requests are decoded from the USBSetupParser
-    outputs, IN data stage bytes are provided on txdat (next byte loaded on each txpop) while txval
+    Common interface of the EP0 class request handlers: requests are decoded from the setup fields
+    (header_ready, bmRequestType, bRequest, wValue, wIndex, wLength, cdata_ofs: EP0 request bridge of
+    the USB core), IN data stage bytes are provided on txdat (next byte loaded on each txpop) while txval
     is set.
     """
     def __init__(self, setup):
@@ -406,28 +327,24 @@ class InterfaceAltSelect(LiteXModule):
 class UACEndpoint(LiteXModule):
     """
     UAC isochronous IN endpoint: 44.1kHz stereo 16-bit samples captured from the audio clock
-    ("audio" domain, gClk), buffered per micro-frame (port of usbuac_ep/sample_get_p/audioclk_gen/
-    sync_audio).
+    ("audio" domain, gClk) (port of usbuac_ep/sample_get_p/audioclk_gen/sync_audio), buffered in a
+    byte FIFO: each micro-frame sends the complete samples available (up to MAXBUFFER bytes, next_len
+    latched at SOF by the USB core), txdat is the FIFO output, popped with txpop.
     """
     SAMPLE_RATE        = 44100
     SAMPLES_PER_MFRAME = (SAMPLE_RATE + 7999)//8000
     MAXBUFFER          = 16*2*SAMPLES_PER_MFRAME//8 # Bytes.
 
-    def __init__(self, sys_clk_freq=60e6, luna=False):
-        self.reset     = Signal()
-        self.sof_rise  = Signal()
-        self.next_len  = Signal(12) # LUNA: bytes of the next micro-frame (latched at SOF).
-        self.left      = Signal(16) # "audio" domain.
-        self.right     = Signal(16) # "audio" domain.
-        self.txpop     = Signal()
-        self.txact     = Signal()
-        self.txdat     = Signal(8)
-        self.txdat_len = Signal(12)
-        self.txcork    = Signal()
+    def __init__(self, sys_clk_freq=60e6):
+        self.reset    = Signal()
+        self.next_len = Signal(12) # Bytes of the next micro-frame.
+        self.left     = Signal(16) # "audio" domain.
+        self.right    = Signal(16) # "audio" domain.
+        self.txpop    = Signal()
+        self.txdat    = Signal(8)
 
         # # #
 
-        # Note: reset and txact are unused (as the original, usbuac_ep ignores them).
         n = self.MAXBUFFER
 
         # Audio clock generator (44.1kHz frame clock, phase accumulator).
@@ -472,79 +389,29 @@ class UACEndpoint(LiteXModule):
             sample_ready.eq(aclk),
         ]
 
-        # LUNA: samples buffered in a byte FIFO, each micro-frame sends the complete samples available
-        # (up to MAXBUFFER bytes); txdat is the FIFO output, popped with txpop.
-        if luna:
-            self.converter = converter = stream.Converter(32, 8)
-            self.fifo      = fifo      = ResetInserter()(stream.SyncFIFO([("data", 8)], 64, buffered=True))
-            p_sample_ready = Signal()
-            pending        = Signal()
-            level          = Signal(8)
-            self.sync += [
-                p_sample_ready.eq(sample_ready),
-                If(sample_ready & ~p_sample_ready,
-                    pending.eq(1),
-                ).Elif(converter.sink.ready,
-                    pending.eq(0),
-                ),
-            ]
-            self.comb += [
-                fifo.reset.eq(self.reset),
-                converter.sink.valid.eq(pending),
-                converter.sink.data.eq(sample),
-                converter.source.connect(fifo.sink),
-                self.txdat.eq(fifo.source.data),
-                fifo.source.ready.eq(self.txpop),
-                level.eq(fifo.level & ~0x3),
-                self.next_len.eq(Mux(level >= n, n, level)),
-                self.txcork.eq(0),
-            ]
-            return
-
-        # Micro-frame buffers.
-        mem0            = Signal(8*n)
-        mem1            = Signal(8*n)
-        write_ptr0      = Signal(12)
-        write_ptr1      = Signal(12)
-        store_state     = Signal()
-        switch_active   = Signal()
-        switch_complete = Signal()
-        p_sample_ready  = Signal()
+        # Sample FIFO.
+        self.converter = converter = stream.Converter(32, 8)
+        self.fifo      = fifo      = ResetInserter()(stream.SyncFIFO([("data", 8)], 64, buffered=True))
+        p_sample_ready = Signal()
+        pending        = Signal()
+        level          = Signal(8)
         self.sync += [
-            If(self.sof_rise,
-                switch_active.eq(1),
-            ),
             p_sample_ready.eq(sample_ready),
             If(sample_ready & ~p_sample_ready,
-                store_state.eq(1),
+                pending.eq(1),
+            ).Elif(converter.sink.ready,
+                pending.eq(0),
             ),
-            switch_complete.eq(0),
-            If(store_state,
-                If(write_ptr0 != n,
-                    mem0.eq(Cat(mem0[32:], sample)),
-                    write_ptr0.eq(write_ptr0 + 4),
-                ),
-                store_state.eq(0),
-            ).Elif(switch_active,
-                write_ptr1.eq(write_ptr0),
-                If(write_ptr0 != n,
-                    mem1.eq(Cat(mem0[32:], Constant(0, 32))),
-                ).Else(
-                    mem1.eq(mem0),
-                ),
-                write_ptr0.eq(0),
-                switch_active.eq(0),
-                switch_complete.eq(1),
-            ),
-            If(switch_complete,
-                self.txdat.eq(mem1[:8]),
-                mem1.eq(Cat(mem1[8:], Constant(0, 8))),
-                self.txdat_len.eq(Mux(write_ptr1 >= (n - 4), write_ptr1, 0)),
-                self.txcork.eq(0),
-            ).Elif(self.txpop,
-                self.txdat.eq(mem1[:8]),
-                mem1.eq(Cat(mem1[8:], Constant(0, 8))),
-            )
+        ]
+        self.comb += [
+            fifo.reset.eq(self.reset),
+            converter.sink.valid.eq(pending),
+            converter.sink.data.eq(sample),
+            converter.source.connect(fifo.sink),
+            self.txdat.eq(fifo.source.data),
+            fifo.source.ready.eq(self.txpop),
+            level.eq(fifo.level & ~0x3),
+            self.next_len.eq(Mux(level >= n, n, level)),
         ]
 
 # CDC UART -----------------------------------------------------------------------------------------
@@ -619,10 +486,11 @@ class UVCVideo(LiteXModule):
     captured in ping-pong line buffers.
     "sys" domain (60MHz UTMI clock): lines are replayed at the committed frame geometry (160x144
     or 320x288: each pixel/line repeated, so YUY2 chroma pairs are single source pixels), converted
-    to YCbCr, packed as YUYV in a FIFO and sent with one or two (high-bandwidth, alt setting >= 2)
-    1024-byte transactions per micro-frame (12-byte UVC header per micro-frame payload transfer).
+    to YCbCr, packed as YUYV in a FIFO and sent with one micro-frame transfer of up to 1024 bytes, or
+    2048 bytes (high-bandwidth, alt setting >= 2: split in DATA1/DATA0 packets by the USB core), each
+    with a 12-byte UVC payload header.
     """
-    def __init__(self, frames=VIDEO_FRAMES, n_buffers=4, fifo_depth=4096, luna=False):
+    def __init__(self, frames=VIDEO_FRAMES, n_buffers=4, fifo_depth=4096):
         assert all((w % UVC_WIDTH == 0) and (h % UVC_HEIGHT == 0) and (w//UVC_WIDTH == h//UVC_HEIGHT)
             for w, h in frames)
         max_scale = max(w//UVC_WIDTH for w, h in frames)
@@ -643,12 +511,9 @@ class UVCVideo(LiteXModule):
         self.txpop       = Signal()
         self.txdat       = Signal(8)
         self.txdat_len   = Signal(12)
-        self.txcork      = Signal()
-        self.txiso_pid   = Signal(4, reset=0b0011) # DATA1 (0b1011) when a 2nd transaction follows.
         self.next_len    = Signal(12) # Length of the next micro-frame transfer (latched at SOF).
-        self.sof_rise    = Signal() # SOF rising edge (also used by the UAC endpoint).
         # Statistics (sys).
-        self.hbw_count   = Signal(16) # 2nd transactions sent.
+        self.hbw_count   = Signal(16) # High-bandwidth (2048-byte) micro-frames.
         self.frame_count = Signal(16) # Frames sent (EOF).
         self.max_level   = Signal(13) # Maximum FIFO level.
         self.drop_count  = Signal(16) # Dropped lines (video domain).
@@ -992,8 +857,6 @@ class UVCVideo(LiteXModule):
         state        = Signal(3, reset=0b001) # IDLE (001), UNCORK (010), TXACTIVE (100).
         last_read    = Signal()
         read_active  = Signal()
-        second       = Signal() # 2nd transaction of the micro-frame (payload only).
-        two          = Signal() # 2 transactions in this micro-frame.
         byte_count   = Signal(11)
         pts_counter  = Signal(32)
         pts_reg      = Signal(32)
@@ -1004,16 +867,13 @@ class UVCVideo(LiteXModule):
         sof_d1       = Signal()
         eof_sr       = Signal(4)
         len_m1       = Signal(32)
-        preload      = Signal()
-        DATA0, DATA1 = 0b0011, 0b1011
         IDLE, UNCORK, TXACTIVE = 0b001, 0b010, 0b100
-        # 2 transactions: header + 1012 bytes, then 1024 bytes (only when all are buffered).
+        # High-bandwidth: header + 2036 bytes (only when all are buffered).
         two_bytes    = 2*UVC_PACKET_SIZE - UVC_HEADER_SIZE
 
         # Micro-frame transfer decision (latched at SOF). Note: the FIFO almost full triggers at 1012
         # bytes, while 1011 are needed for a full packet (one extra byte is always kept at the FIFO
-        # output). High-bandwidth: 2 transactions (Gowin controller: 2 x 1024 with a re-armed 2nd
-        # transaction, LUNA: a single 2048-byte transfer split in DATA1/DATA0 packets by LUNA).
+        # output).
         next_two         = Signal()
         next_last_read   = Signal()
         next_read_active = Signal()
@@ -1021,7 +881,7 @@ class UVCVideo(LiteXModule):
             next_two.eq(0),
             If(self.hbw & (fifo.Rnum >= two_bytes),
                 next_two.eq(1),
-                self.next_len.eq(2*UVC_PACKET_SIZE if luna else UVC_PACKET_SIZE),
+                self.next_len.eq(2*UVC_PACKET_SIZE),
                 next_last_read.eq(0),
                 next_read_active.eq(1),
             ).Elif(fifo.Almost_Full,
@@ -1049,33 +909,18 @@ class UVCVideo(LiteXModule):
             )
         ]
         self.sync += [
-            preload.eq(0),
             If(self.reset,
                 state.eq(IDLE),
-                self.txiso_pid.eq(DATA0),
-                second.eq(0),
             ).Elif(self.sof,
                 self.txdat_len.eq(self.next_len),
-                self.txiso_pid.eq(Mux(next_two & ~luna, DATA1, DATA0)),
-                two.eq(next_two & ~luna),
                 last_read.eq(next_last_read),
                 read_active.eq(next_read_active),
-                second.eq(0),
-                self.txcork.eq(0),
                 state.eq(UNCORK),
+                If(next_two, self.hbw_count.eq(self.hbw_count + 1)),
             ).Elif(self.txact & (state == UNCORK),
                 state.eq(TXACTIVE),
             ).Elif(~self.txact & (state == TXACTIVE),
-                If(two & ~second,
-                    # Re-arm for the 2nd transaction (payload only, 1st byte preloaded).
-                    self.txdat_len.eq(UVC_PACKET_SIZE),
-                    self.txiso_pid.eq(DATA0),
-                    second.eq(1),
-                    preload.eq(1),
-                    state.eq(UNCORK),
-                ).Else(
-                    state.eq(IDLE),
-                )
+                state.eq(IDLE),
             )
         ]
         self.sync += [
@@ -1099,13 +944,9 @@ class UVCVideo(LiteXModule):
                 pts_reg.eq(pts_counter),
             ),
         ]
-        last_data = (self.txdat_len - 1) if luna else (UVC_PACKET_SIZE - 1) # Last byte: no read.
-        self.comb += If(second,
-            rden.eq(preload | (self.txpop & (byte_count < (UVC_PACKET_SIZE - 1)))),
-        ).Else(
-            rden.eq(self.txpop & (byte_count >= (UVC_HEADER_SIZE - 1)) &
-                                 (byte_count <  last_data) & read_active),
-        )
+        # Last byte: no read.
+        self.comb += rden.eq(self.txpop & (byte_count >= (UVC_HEADER_SIZE - 1)) &
+            (byte_count < (self.txdat_len - 1)) & read_active)
 
         # End of image.
         p_image_eof = Signal()
@@ -1119,7 +960,6 @@ class UVCVideo(LiteXModule):
             )
         ]
         self.sync += [
-            If(self.txact & (state == UNCORK) & second, self.hbw_count.eq(self.hbw_count + 1)),
             If(txact_fall & last_read, self.frame_count.eq(self.frame_count + 1)),
         ]
         self.sync += [
@@ -1137,7 +977,7 @@ class UVCVideo(LiteXModule):
         ]
 
         # SOF counter (1ms frames = 8 micro-frames).
-        sof_rise = self.sof_rise
+        sof_rise = Signal()
         self.comb += sof_rise.eq(sof_d0 & ~sof_d1)
         self.sync += [
             If(self.reset,
@@ -1169,21 +1009,15 @@ class UVCVideo(LiteXModule):
         self.sync += [
             If(self.sof,
                 self.txdat.eq(UVC_HEADER_SIZE), # bHeaderLength.
-            ).Elif(preload,
-                self.txdat.eq(fifo.Q),
             ).Elif(self.txpop,
-                If(second,
-                    self.txdat.eq(fifo.Q),
-                ).Else(
-                    Case(byte_count, {
-                        0: self.txdat.eq(Mux(last_read, frame | 0x02, frame)), # bmHeaderInfo (EOF on last).
-                        **{n: self.txdat.eq(v) for n, v in header.items()},
-                        "default": If(byte_count >= len_m1,
-                            self.txdat.eq(UVC_HEADER_SIZE),
-                        ).Else(
-                            self.txdat.eq(fifo.Q),
-                        ),
-                    })
-                )
+                Case(byte_count, {
+                    0: self.txdat.eq(Mux(last_read, frame | 0x02, frame)), # bmHeaderInfo (EOF on last).
+                    **{n: self.txdat.eq(v) for n, v in header.items()},
+                    "default": If(byte_count >= len_m1,
+                        self.txdat.eq(UVC_HEADER_SIZE),
+                    ).Else(
+                        self.txdat.eq(fifo.Q),
+                    ),
+                })
             )
         ]
