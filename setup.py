@@ -19,7 +19,7 @@ setup(
     url                           = "https://github.com/enjoy-digital/chromatix",
     download_url                  = "https://github.com/enjoy-digital/chromatix",
     license                       = "BSD",
-    python_requires               = ">=3.8",
+    python_requires               = ">=3.9",
     install_requires              = [
         "litex",
         "litei2c",
