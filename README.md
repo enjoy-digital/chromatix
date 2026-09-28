@@ -93,6 +93,20 @@ litex_term /dev/ttyACM0 --kernel demo.bin
 
 <img src="doc/images/litex_bios.png" width="320" alt="LiteX BIOS on the Chromatic LCD, captured over UVC">
 
+## Simulation
+
+`chromatix_sim.py` simulates the Game Boy core with Verilator (VHDL parts converted to Verilog
+with GHDL): cartridge model (ROM only, MBC1, MBC5 + RAM), scripted buttons and the LCD output captured
+as PNG frames. The ROM, frames and buttons are runtime inputs, so `--no-compile` runs another ROM or
+scenario on the same build (~0.5s per Game Boy frame):
+
+```bash
+./test/gb_test_rom.py stripes.gb   # Minimal test ROM (8-pixel stripes, A inverts the palette).
+./chromatix_sim.py --rom stripes.gb --frames 120 --every 30 --buttons a@60+5
+./chromatix_sim.py --rom game.gb --frames 600 --every 60 --buttons start@300+10 --no-compile
+ls build/sim/frames
+```
+
 ## Credits
 
 - [ModRetro](https://modretro.com/): the [Chromatic](https://modretro.com/products/chromatic) and its

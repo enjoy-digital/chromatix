@@ -283,12 +283,14 @@ module emu_system_top
     reg gbreset_1 = 1'b0;
     
     // synthesis translate_off
+`ifndef VERILATOR // Savestate load after reset (original simulation flow), not with Verilator.
     always@(posedge hclk)
     begin
       gbreset_1 <= gbreset;
       ss_load   <= 1'b0;
       if (gbreset_1 && ~gbreset) ss_load <= 1'b1;
     end
+`endif
     // synthesis translate_on
 
     wire [15:0] snd_l;  

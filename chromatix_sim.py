@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+
+#
+# This file is part of ChromatiX.
+#
+# Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
+# SPDX-License-Identifier: BSD-2-Clause
+
+"""
+ChromatiX simulation (Verilator): the Game Boy core (emu_system_top, VHDL parts converted with
+GHDL) with a cartridge model, scripted buttons and the LCD output captured as PNG frames.
+
+    ./chromatix_sim.py --rom game.gb --frames 300 --every 30 --buttons start@200+10
+    ./chromatix_sim.py --rom other.gb --frames 100 --no-compile # Reuse the build.
+
+The ROM, frames and buttons are runtime inputs: --no-compile runs any ROM on the previous build.
+"""
+
+import os
+import glob
+import argparse
+import subprocess
+
+from migen import *
+
+from litex.gen import *
+
+from litex.build.generic_platform import Pins
+from litex.build.sim import SimPlatform
+from litex.build.sim.config import SimConfig
+
+from chromatix.gateware.sources import VERILOG_PATH
+from chromatix.gateware.sim     import SIM_VERILOG_PATH, convert_vhdl, verilog_sources
+from chromatix.gateware.sim     import SimCartridge, write_rom_init, check_rom
+from chromatix.gateware.sim     import parse_button_sequence, write_button_events
+
+# IOs ----------------------------------------------------------------------------------------------
+
+PCLK_FREQ = 33.55432e6
+
+_io = [
+    ("sys_clk", 0, Pins(1)),
+    ("sys_rst", 0, Pins(1)),
+]
+
+# Simulation Top -----------------------------------------------------------------------------------
+
+class SimTop(LiteXModule):
+    def __init__(self, platform, rom):
+        # Clocks: pClk from the simulation clocker, hClk = pClk/2 (as the PLL outputs).
+        self.cd_pclk = ClockDomain("pclk", reset_less=True)
+        self.cd_hclk = ClockDomain("hclk", reset_less=True)
+        hclk = Signal()
+        self.comb += self.cd_pclk.clk.eq(platform.request("sys_clk"))
+        self.sync.pclk += hclk.eq(~hclk)
+        self.comb += self.cd_hclk.clk.eq(hclk)
+
+        # Reset: released after a few hClk cycles.
+        reset_n = Signal()
+        count   = Signal(8)
+        self.sync.hclk += If(count != 0xff, count.eq(count + 1)).Else(reset_n.eq(1))
+
+        # Game Boy LCD.
+        gb_lcd_clkena = Signal()
+        gb_lcd_data   = Signal(15)
+        gb_lcd_mode   = Signal(2)
+        gb_lcd_vsync  = Signal()
+
+        # Cartridge.
+        cart_a   = Signal(16)
+        cart_d   = Signal(8)
+        cart_rd  = Signal()
+        cart_wr  = Signal()
+        cart_cs  = Signal()
+        cart_rst = Signal()
+        d        = TSTriple(8)
+        self.specials += d.get_tristate(cart_d)
+        self.cartridge = ClockDomainsRenamer("pclk")(SimCartridge(rom,
+            a  = cart_a,
+            d  = d,
+            rd = cart_rd,
+            wr = cart_wr,
+            cs = cart_cs,
+        ))
+        self.comb += cart_rst.eq(1) # Cartridge RST pulled up.
+
+        # Buttons ({right, left, down, up, start, select, b, a}, from buttons.hex).
+        buttons = Signal(8)
+        self.specials += Instance("gb_buttons",
+            i_clk     = ClockSignal("hclk"),
+            i_vsync   = gb_lcd_vsync,
+            o_buttons = buttons,
+        )
+
+        # Game Boy core.
+        self.specials += Instance("emu_system_top",
+            i_hclk              = ClockSignal("hclk"),
+            i_pclk              = ClockSignal("pclk"),
+            i_reset_n           = reset_n,
+            i_POWER_GOOD        = 1,
+            i_customPaletteEna  = 0,
+            i_paletteOff        = 0,
+            i_paletteBGIn       = 0,
+            i_paletteOBJ0In     = 0,
+            i_paletteOBJ1In     = 0,
+            i_BTN_NODIAGONAL    = 0,
+            i_BTN_A             = buttons[0],
+            i_BTN_B             = buttons[1],
+            i_BTN_SEL           = buttons[2],
+            i_BTN_START         = buttons[3],
+            i_BTN_DPAD_UP       = buttons[4],
+            i_BTN_DPAD_DOWN     = buttons[5],
+            i_BTN_DPAD_LEFT     = buttons[6],
+            i_BTN_DPAD_RIGHT    = buttons[7],
+            i_BTN_MENU          = 0, # Not pressed.
+            i_MENU_CLOSED       = 1,
+            o_CART_A            = cart_a,
+            io_CART_D           = cart_d,
+            o_CART_RD           = cart_rd,
+            io_CART_RST         = cart_rst,
+            o_CART_WR           = cart_wr,
+            o_CART_CS           = cart_cs,
+            i_IR_RX             = 1,
+            i_LINK_IN           = 1,
+            i_LCD_INIT_DONE     = 1,
+            o_gb_lcd_clkena     = gb_lcd_clkena,
+            o_gb_lcd_data       = gb_lcd_data,
+            o_gb_lcd_mode       = gb_lcd_mode,
+            o_gb_lcd_vsync      = gb_lcd_vsync,
+        )
+
+        # LCD capture (PPM frames, ends the simulation).
+        self.specials += Instance("gb_lcd_capture",
+            i_clk      = ClockSignal("hclk"),
+            i_clkena   = gb_lcd_clkena,
+            i_data     = gb_lcd_data,
+            i_vsync    = gb_lcd_vsync,
+        )
+
+# Build --------------------------------------------------------------------------------------------
+
+def build_sim(gateware_dir, rom, threads=1, trace=False):
+    platform = SimPlatform("SIM", _io)
+    for source in verilog_sources():
+        platform.add_source(source)
+    platform.add_source(convert_vhdl(os.path.join(os.path.dirname(gateware_dir), "vhdl")))
+    for source in ["ereg_savestatev.v", "gb_buttons.v", "gb_lcd_capture.v"]:
+        platform.add_source(os.path.join(SIM_VERILOG_PATH, source))
+    sim_config = SimConfig()
+    sim_config.add_clocker("sys_clk", freq_hz=PCLK_FREQ)
+    platform.build(SimTop(platform, rom),
+        build_dir   = gateware_dir,
+        sim_config  = sim_config,
+        opt_level   = "O3",
+        threads     = threads,
+        trace       = trace,
+        run         = False,
+    )
+    # Compile (LiteX only compiles when also running the simulation).
+    subprocess.run(["bash", "build_sim.sh"], cwd=gateware_dir, check=True, stdout=subprocess.DEVNULL)
+
+def run_sim(gateware_dir, rom, frames=60, every=1, presses=[]):
+    """Run the simulation (ROM/buttons files + plusargs), returns the captured PPM frames."""
+    # Boot ROM ($readmemh relative path, from the simulation directory).
+    bootroms = os.path.join(gateware_dir, "BootROMs")
+    if not os.path.exists(bootroms):
+        os.symlink(os.path.join(VERILOG_PATH, "emu", "CORE", "BootROMs"), bootroms)
+    for ppm in glob.glob(os.path.join(gateware_dir, "frame_*.ppm")):
+        os.remove(ppm)
+    write_rom_init(os.path.join(gateware_dir, "sim_cart_rom.init"), rom)
+    write_button_events(os.path.join(gateware_dir, "buttons.hex"), presses)
+    subprocess.run(["obj_dir/Vsim", f"+frames={frames}", f"+every={every}"], cwd=gateware_dir, check=True)
+    return sorted(glob.glob(os.path.join(gateware_dir, "frame_*.ppm")))
+
+def ppm_to_png(ppm, png, scale=1):
+    from PIL import Image
+    image = Image.open(ppm)
+    if scale > 1:
+        image = image.resize((image.width*scale, image.height*scale), Image.NEAREST)
+    image.save(png)
+
+def main():
+    parser = argparse.ArgumentParser(description="ChromatiX simulation (Verilator): Game Boy core + cartridge + LCD capture.")
+    parser.add_argument("--rom",        required=True,         help="Game Boy ROM (ROM only, MBC1 or MBC5).")
+    parser.add_argument("--frames",     default=60,  type=int, help="Frames to simulate.")
+    parser.add_argument("--every",      default=1,   type=int, help="Capture one frame every N frames.")
+    parser.add_argument("--buttons",    default="",            help="Button presses: button@frame[+frames],... (ex: start@200+10,a@300).")
+    parser.add_argument("--output-dir", default="build/sim",   help="Build/output directory.")
+    parser.add_argument("--scale",      default=2,   type=int, help="PNG scale factor.")
+    parser.add_argument("--threads",    default=1,   type=int, help="Verilator threads.")
+    parser.add_argument("--trace",      action="store_true",   help="Enable waveform tracing (VCD).")
+    parser.add_argument("--no-compile", action="store_true",   help="Run on the previous build (any ROM/frames/buttons).")
+    args = parser.parse_args()
+
+    with open(args.rom, "rb") as f:
+        rom = f.read()
+    check_rom(rom)
+    presses = parse_button_sequence(args.buttons)
+
+    output_dir   = os.path.abspath(args.output_dir)
+    gateware_dir = os.path.join(output_dir, "gateware")
+    frames_dir   = os.path.join(output_dir, "frames")
+
+    # Build / Run.
+    if not args.no_compile:
+        build_sim(gateware_dir, rom, threads=args.threads, trace=args.trace)
+    ppms = run_sim(gateware_dir, rom, frames=args.frames, every=args.every, presses=presses)
+
+    # Frames -> PNG.
+    os.makedirs(frames_dir, exist_ok=True)
+    for png in glob.glob(os.path.join(frames_dir, "frame_*.png")):
+        os.remove(png)
+    for ppm in ppms:
+        ppm_to_png(ppm, os.path.join(frames_dir, os.path.basename(ppm)[:-4] + ".png"), args.scale)
+    print(f"{len(ppms)} frames written to {frames_dir}.")
+
+if __name__ == "__main__":
+    main()

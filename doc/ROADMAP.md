@@ -19,5 +19,7 @@ Verilog at build time). Next steps:
 
 ## Tooling
 
-- A Verilator `litex_sim` target (GB core + video) for testing without hardware.
+- Verilator simulation (done: `chromatix_sim.py`, Game Boy core + cartridge + buttons + LCD
+  capture). Next: add the video pipeline (frame blend, OSD, color correction) with a PSRAM model, and
+  audio capture.
 - CI: re-enable once the GitHub Actions account billing issue is solved.
