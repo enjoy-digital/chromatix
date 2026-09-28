@@ -2,7 +2,8 @@
 # This file is part of ChromatiX.
 #
 # Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-3.0-only
+# Derived from ModRetro's oss-chromatic-console-fpga (GPL-3.0).
 
 """
 Chromatic video pipeline (port of vid_system_top.sv, ST7785_panel_master.v and overlay*.vhd).

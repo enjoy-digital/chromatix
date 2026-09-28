@@ -2,7 +2,8 @@
 // This file is part of ChromatiX.
 //
 // Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
-// SPDX-License-Identifier: BSD-2-Clause
+// SPDX-License-Identifier: GPL-3.0-only
+// Derived from the MiSTer Game Boy core (bus_savestates.vhd, GPL).
 //
 // eReg_SavestateV (MiSTer bus_savestates.vhd) in Verilog for simulation: instantiated from Verilog
 // with per-instance generics (not kept by the GHDL VHDL -> Verilog conversion).

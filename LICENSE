@@ -1,46 +1,31 @@
-BSD 2-Clause License
+ChromatiX licensing
+=======================
 
 ChromatiX: the ModRetro Chromatic FPGA design rebuilt with LiteX.
 
-Unless otherwise noted, ChromatiX is copyright (C) 2026 Enjoy-Digital & ChromatiX developers.
-All rights reserved.
+ChromatiX is dual-licensed, per file (see the SPDX-License-Identifier of each file):
 
-Redistribution and use in source and binary forms, with or without modification,
-are permitted provided that the following conditions are met:
+- Work derived from ModRetro's oss-chromatic-console-fpga (GPL-3.0): GPL-3.0-only
+  (LICENSES/GPL-3.0-only.txt). This covers the LiteX/Migen ports of the original design
+  (chromatix.py and the gateware modules marked "Derived from ModRetro's
+  oss-chromatic-console-fpga"), the register data extracted from it (chromatix/data/)
+  and the Game Boy emulation wrapper (chromatix/verilog/emu/, see its LICENSE).
 
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
+- Our own work (LiteX adaptation, new modules, tools, simulation, tests, documentation):
+  BSD-2-Clause (LICENSES/BSD-2-Clause.txt), copyright (C) 2026 Enjoy-Digital &
+  ChromatiX developers.
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+Other authors retain ownership of their contributions. Contributions to BSD-2-Clause files are
+expected under the BSD-2-Clause license, contributions to GPL-3.0-only files under the GPL-3.0.
 
-Other authors retain ownership of their contributions. If a submission can
-reasonably be considered independently copyrightable, it's yours and we
-encourage you to claim it with appropriate copyright notices. This submission
-then falls under the "otherwise noted" category. All submissions are strongly
-encouraged to use the two-clause BSD license reproduced above.
+Third-party components (under their own licenses):
 
-Third-party components (otherwise noted, under their own licenses):
-
-- chromatix/verilog/emu/: Game Boy emulation wrapper from ModRetro's
-  oss-chromatic-console-fpga (GPL-3.0, see chromatix/verilog/emu/LICENSE),
-  including files of the MiSTer Game Boy core (GPL-2.0+/GPL-3.0+, see file
-  headers) and the SameBoy CGB boot ROM (MIT, Lior Halphon).
-- chromatix/verilog/Gameboy_MiSTer/ (git submodule): MiSTer Game Boy core
-  (GPL, see its sources).
+- chromatix/verilog/emu/: includes files of the MiSTer Game Boy core (GPL-2.0+/GPL-3.0+,
+  see file headers) and the SameBoy CGB boot ROM (MIT, Lior Halphon).
+- chromatix/verilog/Gameboy_MiSTer/ (git submodule): MiSTer Game Boy core (GPL, see its
+  sources).
 - Python dependencies (not included): LiteX (BSD-2-Clause), Migen (BSD-2-Clause),
   Amaranth (BSD-2-Clause), LUNA (BSD-3-Clause).
 
-Bitstreams built from this repository include the GPL Game Boy core: they must be
-distributed under the terms of the GPL.
+Bitstreams built from this repository include GPL parts: they must be distributed under the
+terms of the GPL.

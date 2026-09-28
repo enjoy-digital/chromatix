@@ -125,9 +125,10 @@ ls build/sim/frames
 
 ## License
 
-ChromatiX is released under the [BSD 2-Clause License](LICENSE), like the other LiteX projects.
-Third-party parts keep their own licenses (see [LICENSE](LICENSE)): the Game Boy emulation Verilog
-(`chromatix/verilog`, GPL from ModRetro/MiSTer) is GPL, so built bitstreams fall under the GPL.
+ChromatiX is dual-licensed per file (see [LICENSE](LICENSE)): the ports of ModRetro's original
+design (GPL-3.0) stay under the **GPL-3.0**, our own work (LiteX adaptation, new modules, tools,
+tests) is under the **BSD 2-Clause** license. The Game Boy emulation Verilog is GPL, so built
+bitstreams fall under the GPL.
 
 <sub>ModRetro and Chromatic are trademarks of ModRetro; Tetris® is a trademark of The Tetris Company.
 This project is not affiliated with or endorsed by ModRetro.</sub>

@@ -18,7 +18,7 @@ setup(
     author_email                  = "florent@enjoy-digital.fr",
     url                           = "https://github.com/enjoy-digital/chromatix",
     download_url                  = "https://github.com/enjoy-digital/chromatix",
-    license                       = "BSD",
+    license                       = "BSD-2-Clause AND GPL-3.0-only",
     python_requires               = ">=3.9",
     install_requires              = [
         "litex",

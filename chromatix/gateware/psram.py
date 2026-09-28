@@ -2,7 +2,8 @@
 # This file is part of ChromatiX.
 #
 # Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-3.0-only
+# Derived from ModRetro's oss-chromatic-console-fpga (GPL-3.0).
 
 """
 AP Memory OPI (x8, DDR) PSRAM controller for the Chromatic (port of PSRAMController.vhd and

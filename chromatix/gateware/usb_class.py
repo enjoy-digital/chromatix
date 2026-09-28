@@ -2,7 +2,8 @@
 # This file is part of ChromatiX.
 #
 # Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
-# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-License-Identifier: GPL-3.0-only
+# Derived from ModRetro's oss-chromatic-console-fpga (GPL-3.0).
 
 """
 USB class logic of the Chromatic composite device (UVC + UAC + CDC-ACM), on top of the USB 2.0 device
