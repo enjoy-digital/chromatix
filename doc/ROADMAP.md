@@ -1,19 +1,14 @@
 # ChromatiX Roadmap
 
 The migration is done ([MIGRATION.md](MIGRATION.md)): no encrypted/vendor IP is left and only the
-MiSTer Game Boy core stays in Verilog. Next steps, following the same process (isolate, port, prove
-equivalent, check on hardware, then delete):
-
-## USB: native Migen device core
-
-Port LUNA's USB 2.0 device layers (reset/HS chirp, packet, transaction, control, isochronous/bulk
-endpoints) to Migen, one layer at a time, each checked against LUNA in co-simulation (same UTMI
-stimuli, same UTMI responses). This removes the Amaranth dependency.
+MiSTer Game Boy core stays in Verilog, and the USB device core stays on LUNA (Amaranth, converted to
+Verilog at build time). Next steps:
 
 ## LiteX dev board demos
 
-- **LiteX BIOS demo**: a VexRiscv SoC running the LiteX BIOS, with its console shown on the LCD and
-  streamed over UVC, and reachable over the USB CDC port.
+- **LiteX BIOS demo** (done: `--with-bios`): a VexRiscv SoC running the LiteX BIOS, with its console
+  on the LCD (and so over UVC) and on the USB CDC port, and 4MB of PSRAM as main RAM to run firmware
+  (serialboot). Next: firmware using the buttons/audio, faster CPU clock.
 - Other cores on the Chromatic (retro cores, RISC-V SoCs, accelerators) reusing the platform, video
   pipeline, USB (UVC/UAC/CDC) and the debug/automation loop.
 

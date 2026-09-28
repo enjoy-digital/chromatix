@@ -65,6 +65,27 @@ def test_soc_elaboration(tmp_path, with_debug_bridge):
         assert f"csr_register,{name}," in csrs, name
     assert "csr_base,identifier_mem," in csrs
 
+def test_soc_bios_elaboration(tmp_path):
+    """LiteX BIOS demo: VexRiscv + UART (USB CDC) + LCD terminal in place of the Game Boy core and a PSRAM
+    main RAM (the BIOS software is not compiled here)."""
+    target   = load_target()
+    platform = Platform()
+    target.add_timing_constraints(platform)
+    soc      = target.BaseSoC(platform, with_bios=True)
+    csr_csv  = os.path.join(tmp_path, "csr.csv")
+    builder  = Builder(soc, output_dir=str(tmp_path), csr_csv=csr_csv, compile_software=False)
+    builder.build(build_name="chromatic", run=False)
+    with open(os.path.join(builder.gateware_dir, "chromatic.v"), encoding="utf-8") as f:
+        verilog = f.read()
+    with open(csr_csv, encoding="utf-8") as f:
+        csrs = f.read()
+    assert "VexRiscv" in verilog
+    assert "emu_system_top" not in verilog
+    assert "terminal" in verilog
+    assert "csr_base,uart," in csrs
+    assert "memory_region,main_ram,0x40000000,4194304,cached" in csrs
+    assert platform.sources == [] or all("emu" not in path for path, _, _ in platform.sources)
+
 # IO Constraints -----------------------------------------------------------------------------------
 
 def test_soc_io_constraints(tmp_path):

@@ -23,6 +23,8 @@ from litex.gen import *
 from litex.gen.genlib.cdc import BusSynchronizer
 
 from litex.soc.cores.uart import RS232PHY, UARTBone
+from litex.soc.interconnect import wishbone
+from litex.soc.integration.soc import SoCRegion, MB
 from litex.soc.integration.soc_core import SoCMini
 from litex.soc.integration.builder import Builder
 
@@ -40,6 +42,7 @@ from chromatix.gateware.lcd        import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_registers
 from chromatix.gateware.sysmon     import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
 from chromatix.gateware.adc        import BatteryADC
+from chromatix.gateware.terminal   import LCDTerminal
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -95,16 +98,28 @@ class BaseSoC(SoCMini):
     pipeline, audio I2S with TLV320 codec, Game Boy emulation core, memory controller, USB
     UVC+UART, ESP32 MCU communication, battery ADC, button debouncing, and system monitoring.
     """
-    def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200, uvc_frames=None):
+    def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200, uvc_frames=None,
+        with_bios=False):
         gclk_freq = int(33.55432e6 / 4)
         hclk_freq = int(33.55432e6 / 2)
+        assert not (with_bios and with_debug_bridge) # Both use the USB CDC port.
 
         # SoCMini (CSR bus in the sys domain = gClk) -----------------------------------------------
 
+        # LiteX BIOS demo: VexRiscv + BIOS (integrated ROM/SRAM) in place of the Game Boy core, console
+        # on the USB CDC port and on the LCD (so also on the UVC capture).
+        cpu_kwargs = {} if not with_bios else dict(
+            cpu_type             = "vexriscv",
+            cpu_variant          = "lite",
+            integrated_rom_size  = 0x6000,
+            integrated_sram_size = 0x2000,
+            with_timer           = True,
+        )
         SoCMini.__init__(self, platform,
             clk_freq      = gclk_freq,
-            ident         = "ChromatiX SoC",
+            ident         = "ChromatiX SoC" + (" (LiteX BIOS demo)" if with_bios else ""),
             ident_version = True,
+            **cpu_kwargs,
         )
 
         # CRG --------------------------------------------------------------------------------------
@@ -401,7 +416,7 @@ class BaseSoC(SoCMini):
 
         # Memory System ----------------------------------------------------------------------------
 
-        self.memory = memory = MemorySystem(qspi_pads=qspi, psram_pads=ps)
+        self.memory = memory = MemorySystem(qspi_pads=qspi, psram_pads=ps, with_bus=with_bios)
         self.comb += [
             memory.reset.eq(memrst),
             q_menu_init.eq(memory.menu_init),
@@ -418,71 +433,122 @@ class BaseSoC(SoCMini):
             h_wr_burst_q2.eq(memory.osd_data),
         ]
 
-        # Emulation System -------------------------------------------------------------------------
+        # CPU Main RAM (LiteX BIOS demo): upper 4MB of the PSRAM (framebuffers/BIST in the lower
+        # ones), behind a L2 cache doing 8-byte line bursts (64-bit lines: the cache data memory is
+        # split per byte lane, 1 BSRAM each).
+        if with_bios:
+            main_ram = wishbone.Interface(data_width=32, address_width=32, addressing="word")
+            self.l2_cache = wishbone.Cache(
+                cachesize = 8192//4,
+                master    = main_ram,
+                slave     = memory.bus,
+                reverse   = False,
+            )
+            self.add_config("L2_SIZE", 8192)
+            self.bus.add_slave(name="main_ram", slave=main_ram, region=SoCRegion(
+                origin = self.mem_map["main_ram"],
+                size   = 4*MB,
+                mode   = "rwx",
+            ))
 
-        self.specials += Instance("emu_system_top",
-            i_hclk              = ClockSignal("hclk"),
-            i_pclk              = ClockSignal("pclk"),
-            i_reset_n           = ~memrst,
-            i_POWER_GOOD        = ~power.on_fpga,
-            # Palette.
-            i_customPaletteEna  = palette_bg_in[63],
-            i_paletteOff        = system_control[12],
-            i_paletteBGIn       = palette_bg_in,
-            i_paletteOBJ0In     = palette_obj0_in,
-            i_paletteOBJ1In     = palette_obj1_in,
-            o_gbc_mode          = gbc_mode,
-            o_gpd               = gpd,
-            # Buttons.
-            i_BTN_NODIAGONAL    = system_control[11],
-            i_BTN_A             = btns.a          | mcu_buttons[3],
-            i_BTN_B             = btns.b          | mcu_buttons[2],
-            i_BTN_DPAD_DOWN     = btns.dpad_down  | mcu_buttons[7],
-            i_BTN_DPAD_LEFT     = btns.dpad_left  | mcu_buttons[6],
-            i_BTN_DPAD_RIGHT    = btns.dpad_right | mcu_buttons[5],
-            i_BTN_DPAD_UP       = btns.dpad_up    | mcu_buttons[4],
-            i_BTN_MENU          = ~btn_menu_ored,
-            i_BTN_SEL           = btns.sel        | mcu_buttons[1],
-            i_BTN_START         = btns.start      | mcu_buttons[0],
-            i_MENU_CLOSED       = menu_disabled & ~slide_out_active,
-            # Cartridge.
-            o_CART_A            = cart.a,
-            o_CART_CLK          = cart.clk,
-            o_CART_CS           = cart.cs,
-            io_CART_D           = cart.d,
-            o_CART_RD           = cart.rd,
-            io_CART_RST         = cart.rst,
-            o_CART_WR           = cart.wr,
-            o_CART_DATA_DIR_E   = cart.data_dir_e,
-            # IR.
-            i_IR_RX             = ir.rx,
-            o_IR_LED            = ir.led,
-            # Link Cable.
-            io_LINK_CLK         = link.clk,
-            i_LINK_IN           = getattr(link, "in"),
-            o_LINK_OUT          = link.out,
-            # LCD Status.
-            o_lcd_on_int        = lcd_on_int,
-            o_lcd_off_overwrite = lcd_off_overwrite,
-            o_boot_rom_enabled  = boot_rom_enabled,
-            # Audio.
-            o_left              = left,
-            o_right             = right,
-            # Game Boy LCD.
-            i_LCD_INIT_DONE     = lcd_init_done,
-            o_gb_lcd_clkena     = gb_lcd_clkena,
-            o_gb_lcd_mode       = gb_lcd_mode,
-            o_gb_lcd_on         = gb_lcd_on,
-            o_gb_lcd_vsync      = gb_lcd_vsync,
-            o_gb_lcd_data       = gb_lcd_data,
-        )
+        # Emulation System -------------------------------------------------------------------------
+        if with_bios:
+            # LCD terminal in place of the Game Boy LCD; cartridge/IR/link idle (as when the Game Boy
+            # core doesn't access them).
+            self.terminal = terminal = LCDTerminal()
+            for pad in [cart.d, cart.rst, link.clk]:
+                self.specials += TSTriple(len(pad)).get_tristate(pad) # Not driven.
+            self.comb += [
+                gb_lcd_clkena.eq(terminal.gb_clkena),
+                gb_lcd_data.eq(terminal.gb_data),
+                gb_lcd_mode.eq(terminal.gb_mode),
+                gb_lcd_on.eq(terminal.gb_on),
+                gb_lcd_vsync.eq(terminal.gb_vsync),
+                cart.a.eq(0),
+                cart.clk.eq(0),
+                cart.cs.eq(1),
+                cart.rd.eq(1),
+                cart.wr.eq(1),
+                cart.data_dir_e.eq(1),
+                ir.led.eq(0),
+                link.out.eq(0),
+            ]
+        else:
+            self.specials += Instance("emu_system_top",
+                i_hclk              = ClockSignal("hclk"),
+                i_pclk              = ClockSignal("pclk"),
+                i_reset_n           = ~memrst,
+                i_POWER_GOOD        = ~power.on_fpga,
+                # Palette.
+                i_customPaletteEna  = palette_bg_in[63],
+                i_paletteOff        = system_control[12],
+                i_paletteBGIn       = palette_bg_in,
+                i_paletteOBJ0In     = palette_obj0_in,
+                i_paletteOBJ1In     = palette_obj1_in,
+                o_gbc_mode          = gbc_mode,
+                o_gpd               = gpd,
+                # Buttons.
+                i_BTN_NODIAGONAL    = system_control[11],
+                i_BTN_A             = btns.a          | mcu_buttons[3],
+                i_BTN_B             = btns.b          | mcu_buttons[2],
+                i_BTN_DPAD_DOWN     = btns.dpad_down  | mcu_buttons[7],
+                i_BTN_DPAD_LEFT     = btns.dpad_left  | mcu_buttons[6],
+                i_BTN_DPAD_RIGHT    = btns.dpad_right | mcu_buttons[5],
+                i_BTN_DPAD_UP       = btns.dpad_up    | mcu_buttons[4],
+                i_BTN_MENU          = ~btn_menu_ored,
+                i_BTN_SEL           = btns.sel        | mcu_buttons[1],
+                i_BTN_START         = btns.start      | mcu_buttons[0],
+                i_MENU_CLOSED       = menu_disabled & ~slide_out_active,
+                # Cartridge.
+                o_CART_A            = cart.a,
+                o_CART_CLK          = cart.clk,
+                o_CART_CS           = cart.cs,
+                io_CART_D           = cart.d,
+                o_CART_RD           = cart.rd,
+                io_CART_RST         = cart.rst,
+                o_CART_WR           = cart.wr,
+                o_CART_DATA_DIR_E   = cart.data_dir_e,
+                # IR.
+                i_IR_RX             = ir.rx,
+                o_IR_LED            = ir.led,
+                # Link Cable.
+                io_LINK_CLK         = link.clk,
+                i_LINK_IN           = getattr(link, "in"),
+                o_LINK_OUT          = link.out,
+                # LCD Status.
+                o_lcd_on_int        = lcd_on_int,
+                o_lcd_off_overwrite = lcd_off_overwrite,
+                o_boot_rom_enabled  = boot_rom_enabled,
+                # Audio.
+                o_left              = left,
+                o_right             = right,
+                # Game Boy LCD.
+                i_LCD_INIT_DONE     = lcd_init_done,
+                o_gb_lcd_clkena     = gb_lcd_clkena,
+                o_gb_lcd_mode       = gb_lcd_mode,
+                o_gb_lcd_on         = gb_lcd_on,
+                o_gb_lcd_vsync      = gb_lcd_vsync,
+                o_gb_lcd_data       = gb_lcd_data,
+            )
 
         # Link Port: LINK_SD not driven by emu_system_top.
         self.comb += link.sd.eq(0)
 
-        # USB CDC UART: ESP32 passthrough (default) or LiteX UARTBone debug bridge.
+        # USB CDC UART: ESP32 passthrough (default), LiteX UARTBone debug bridge or BIOS console.
         usb_uart = Record([("tx", 1), ("rx", 1), ("dtr", 1), ("rts", 1)])
-        if with_debug_bridge:
+        if with_bios:
+            self.comb += [
+                esp32_ctrl.usb_rxd.eq(1),
+                esp32_ctrl.usb_dtr.eq(0),
+                esp32_ctrl.usb_rts.eq(0),
+            ]
+            self.add_uart(uart_pads=usb_uart, baudrate=debug_bridge_baudrate)
+            # Console also on the LCD terminal (bytes sent by the UART PHY).
+            self.comb += [
+                terminal.sink.valid.eq(self.uart_phy.sink.valid & self.uart_phy.sink.ready),
+                terminal.sink.data.eq(self.uart_phy.sink.data),
+            ]
+        elif with_debug_bridge:
             # Keep the ESP32 running normally (EN high, IO0 high) with an idle UART.
             self.comb += [
                 esp32_ctrl.usb_rxd.eq(1),
@@ -680,6 +746,7 @@ def main():
     parser.add_argument("--with-debug-bridge",     action="store_true",                      help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
     parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,                 help="Debug bridge baudrate.")
     parser.add_argument("--uvc-sizes", default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
+    parser.add_argument("--with-bios", action="store_true", help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
     args = parser.parse_args()
 
     # Platform.
@@ -703,18 +770,22 @@ def main():
                 else:
                     os.environ["LD_LIBRARY_PATH"] = ld_library_path
         platform.toolchain.run_script = run_script_with_gowin_libs
-    add_verilog_sources(platform)
+    if not args.with_bios:
+        add_verilog_sources(platform) # Game Boy core.
     add_timing_constraints(platform)
 
     # SoC.
     soc = BaseSoC(platform,
         with_debug_bridge     = args.with_debug_bridge,
+        with_bios             = args.with_bios,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
     )
 
     # Build.
-    builder = Builder(soc, output_dir="build", csr_csv="scripts/csr.csv")
+    builder = Builder(soc, output_dir="build", csr_csv="scripts/csr.csv",
+        bios_lto = True, # BIOS fits the 24KB integrated ROM.
+    )
     if args.build:
         builder.build(build_name="chromatic", run=not args.no_compile)
 

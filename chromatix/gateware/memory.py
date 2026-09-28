@@ -5,11 +5,12 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 from migen import *
-from migen.genlib.cdc import PulseSynchronizer
+from migen.genlib.cdc import MultiReg, PulseSynchronizer
 
 from litex.gen import *
 
 from litex.soc.interconnect import stream
+from litex.soc.interconnect import wishbone
 
 from chromatix.gateware.psram import PSRAMGW5APHY, PSRAMController, PSRAMBIST
 
@@ -429,6 +430,85 @@ class LineReader(LiteXModule):
             ),
         ]
 
+# PSRAM Wishbone ------------------------------------------------------------------------------------
+
+class PSRAMWishbone(LiteXModule):
+    """
+    Wishbone slave (sys domain) -> PSRAM burst port (xClk domain), for a CPU main RAM.
+
+    Each access is a full burst of the bus data width (ex: 64-bit = an 8-byte line of a L2 cache in
+    front of it) at `base` + adr * bytes. Only full-width writes are supported (sel is ignored), as
+    done by a LiteX L2 cache. The request/acknowledge cross the domains with toggles; the address,
+    data and read data are quasi-static during an access.
+    """
+    def __init__(self, port, ram_dout, base=0x000000, data_width=64):
+        assert data_width % 16 == 0
+        nwords = data_width // 16
+        self.bus = bus = wishbone.Interface(data_width=data_width, address_width=32, addressing="word")
+
+        # # #
+
+        # sys: request / acknowledge.
+        req_toggle = Signal()
+        ack_toggle = Signal()
+        ack_sync   = Signal()
+        ack_seen   = Signal()
+        pending    = Signal()
+        adr        = Signal(23)
+        we         = Signal()
+        dat_w      = Signal(data_width)
+        dat_r      = Signal(data_width)
+        self.specials += MultiReg(ack_toggle, ack_sync)
+        self.comb += [
+            bus.dat_r.eq(dat_r),
+            bus.ack.eq(pending & (ack_sync != ack_seen)),
+        ]
+        self.sync += [
+            If(bus.ack,
+                pending.eq(0),
+                ack_seen.eq(ack_sync),
+            ).Elif(bus.cyc & bus.stb & ~pending,
+                pending.eq(1),
+                req_toggle.eq(~req_toggle),
+                adr.eq(base + bus.adr*(data_width//8)),
+                we.eq(bus.we),
+                dat_w.eq(bus.dat_w),
+            )
+        ]
+
+        # xClk: burst.
+        req_sync = Signal()
+        req_seen = Signal()
+        busy     = Signal()
+        index    = Signal(max=max(nwords, 2))
+        words    = [dat_r[16*i:16*(i + 1)] for i in range(nwords)]
+        self.specials += MultiReg(req_toggle, req_sync, "xclk")
+        self.comb += [
+            port.rnw.eq(~we),
+            port.addr.eq(adr),
+            port.burst_length.eq(data_width//8),
+            port.din.eq(Array(dat_w[16*i:16*(i + 1)] for i in range(nwords))[index]),
+        ]
+        self.sync.xclk += [
+            port.request.eq(0),
+            If(~busy & (req_sync != req_seen),
+                busy.eq(1),
+                req_seen.eq(req_sync),
+                index.eq(0),
+                port.request.eq(1),
+            ),
+            If(port.write_next | port.dout_valid,
+                index.eq(index + 1),
+            ),
+            If(port.dout_valid,
+                Case(index, {i: words[i].eq(ram_dout) for i in range(nwords)}),
+            ),
+            If(busy & port.done,
+                busy.eq(0),
+                ack_toggle.eq(~ack_toggle),
+            ),
+        ]
+
 # Memory System ------------------------------------------------------------------------------------
 
 PORT_BIST   = 0 # PSRAM BIST (short test at startup).
@@ -436,6 +516,7 @@ PORT_QSPI   = 1 # ESP32 QSPI writes (menu/OSD framebuffer).
 PORT_FBRD   = 2 # Game Boy framebuffer read (previous frame, for frame blending).
 PORT_FBWR   = 3 # Game Boy framebuffer write.
 PORT_FBOSD  = 4 # OSD framebuffer read.
+PORT_CPU    = 5 # CPU main RAM (optional, LiteX BIOS demo).
 PORT_COUNT  = 5
 
 class MemorySystem(LiteXModule):
@@ -445,7 +526,7 @@ class MemorySystem(LiteXModule):
     Clock domains: xclk (controller/arbiter), fclk (PSRAM 2x clock), hclk (video), qspi/qspi_n
     (QSPI_CLK rising/falling edges, created here).
     """
-    def __init__(self, qspi_pads, psram_pads):
+    def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64):
         self.reset        = Signal()
         self.menu_init    = Signal()
         self.bist_done    = Signal()
@@ -475,7 +556,7 @@ class MemorySystem(LiteXModule):
         ]
 
         # Arbiter + PSRAM Controller ---------------------------------------------------------------
-        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT))
+        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus))
         self.phy   = phy   = ClockDomainsRenamer("xclk")(PSRAMGW5APHY(psram_pads))
         self.psram = psram = ClockDomainsRenamer("xclk")(PSRAMController(phy))
         ports = ctrl.ports
@@ -558,3 +639,11 @@ class MemorySystem(LiteXModule):
             port.rnw.eq(0),
             port.burst_length.eq(320),
         ]
+
+        # CPU Main RAM (optional) ------------------------------------------------------------------
+        if with_bus:
+            self.bus_bridge = bus_bridge = PSRAMWishbone(ports[PORT_CPU], ctrl.dout,
+                base       = bus_base,
+                data_width = bus_data_width,
+            )
+            self.bus = bus_bridge.bus

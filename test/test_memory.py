@@ -11,9 +11,9 @@ from litex.gen.sim import run_simulation
 from chromatix.gateware.psram  import PSRAMController
 from chromatix.gateware.memory import memory_port_layout, MultiPortRAMCtrl, BurstWriteFIFO
 from chromatix.gateware.memory import GBBurstWrite, QSPIBurstWrite, QSPISlave, LineReader
-from chromatix.gateware.memory import MemorySystem, PORT_BIST
+from chromatix.gateware.memory import MemorySystem, PORT_BIST, PSRAMWishbone
 
-from test.test_psram import SimInstance, PSRAMModel
+from test.test_psram import SimInstance, PSRAMModel, PSRAMSimPHY
 
 # Helpers ------------------------------------------------------------------------------------------
 
@@ -333,6 +333,74 @@ def test_line_reader():
     run_simulation(dut, {"hclk": hclk_gen(), "xclk": xclk_gen()}, clocks={"hclk": 13, "xclk": 10})
     assert requests == [0x10000, 0x10000 + 2*LineReader.LINE_DEPTH]
     assert stream == lines[0]
+
+# PSRAM Wishbone -----------------------------------------------------------------------------------
+
+class PSRAMWishboneDUT(Module):
+    def __init__(self, base, data_width):
+        self.submodules.ctrl   = ctrl   = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=2))
+        self.submodules.phy    = phy    = PSRAMSimPHY()
+        self.submodules.psram  = psram  = ClockDomainsRenamer("xclk")(PSRAMController(phy, startup_cycles=16))
+        self.submodules.bridge = bridge = PSRAMWishbone(ctrl.ports[1], ctrl.dout, base=base, data_width=data_width)
+        self.comb += [
+            psram.req_read.eq(ctrl.req_read),
+            psram.req_write.eq(ctrl.req_write),
+            psram.addr.eq(ctrl.addr),
+            psram.din.eq(ctrl.din),
+            psram.burst_length.eq(ctrl.burst_length),
+            ctrl.ready.eq(psram.ready),
+            ctrl.write_next.eq(psram.write_next),
+            ctrl.dout.eq(psram.dout),
+            ctrl.dout_valid.eq(psram.dout_valid),
+            ctrl.done.eq(psram.done),
+        ]
+
+
+def test_psram_wishbone():
+    """128-bit Wishbone lines (sys) written/read back through the arbiter + PSRAM controller (xClk)."""
+    base  = 0x400000
+    dut   = PSRAMWishboneDUT(base, data_width=128)
+    model = PSRAMModel(dut.phy)
+    lines = {0x000: 0x00112233445566778899aabbccddeeff, 0x001: 0x0123456789abcdef0f1e2d3c4b5a6978,
+             0x3ff: 0xdeadbeefcafef00d5555aaaa12345678}
+    res   = {}
+
+    def main():
+        bus = dut.bridge.bus
+        for adr, data in lines.items():
+            yield from bus.write(adr, data)
+        res["read"] = {}
+        for adr in reversed(list(lines)):
+            res["read"][adr] = (yield from bus.read(adr))
+
+    run_simulation(dut, {"sys": main(), "xclk": model.generator()}, clocks={"sys": 80, "xclk": 10},
+        special_overrides={Instance: SimInstance})
+    assert res["read"] == lines
+    assert model.errors == []
+    # Line n at PSRAM byte address base + 16*n (8 words, 16-bit word 0 = data[15:0]).
+    for adr, data in lines.items():
+        words = [model.mem[(base + 16*adr)//2 + i] for i in range(8)]
+        assert words == [(data >> 16*i) & 0xffff for i in range(8)]
+
+
+def test_psram_wishbone_64():
+    """64-bit Wishbone lines (as used behind the SoC L2 cache)."""
+    dut   = PSRAMWishboneDUT(0x400000, data_width=64)
+    model = PSRAMModel(dut.phy)
+    lines = {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d}
+    res   = {}
+
+    def main():
+        for adr, data in lines.items():
+            yield from dut.bridge.bus.write(adr, data)
+        res["read"] = {}
+        for adr in lines:
+            res["read"][adr] = (yield from dut.bridge.bus.read(adr))
+
+    run_simulation(dut, {"sys": main(), "xclk": model.generator()}, clocks={"sys": 80, "xclk": 10},
+        special_overrides={Instance: SimInstance})
+    assert res["read"] == lines
+    assert model.errors == []
 
 # Memory System ------------------------------------------------------------------------------------
 

@@ -74,6 +74,25 @@ litex_server --uart --uart-port /dev/ttyACM0 --uart-baudrate 115200 &
 ./scripts/chromatic.py sequence "press:start wait:1.5 press:a wait:1.5 capture:menu.png"
 ```
 
+## LiteX BIOS Demo
+
+`--with-bios` turns the Chromatic into a small LiteX dev board: a VexRiscv SoC runs the LiteX BIOS in
+place of the Game Boy core. Its console is on the USB CDC port (`litex_term /dev/ttyACM0`) and on the
+LCD (40x24 terminal, 4x6 font), so it is also streamed over UVC. The upper 4MB of the PSRAM are the
+SoC main RAM (behind a L2 cache), so firmware can be loaded over the USB CDC port and run:
+
+```bash
+./chromatix.py --gowin-path ~/tools/gowin_1.9.12.04/IDE --with-bios --build --flash
+litex_term /dev/ttyACM0
+./scripts/chromatic.py capture bios.png --size 320x288
+
+# Firmware (ex: LiteX demo app), loaded with the BIOS serialboot command.
+litex_bare_metal_demo --build-path build
+litex_term /dev/ttyACM0 --kernel demo.bin
+```
+
+<img src="doc/images/litex_bios.png" width="320" alt="LiteX BIOS on the Chromatic LCD, captured over UVC">
+
 ## Credits
 
 - [ModRetro](https://modretro.com/): the [Chromatic](https://modretro.com/products/chromatic) and its
