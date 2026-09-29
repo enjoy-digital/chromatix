@@ -47,6 +47,30 @@ and rebuilt with [LiteX](https://github.com/enjoy-digital/litex) (ChromatiX: Chr
 - Step-by-step migration, clock domains and ported blocks: [doc/MIGRATION.md](doc/MIGRATION.md);
   next steps: [doc/ROADMAP.md](doc/ROADMAP.md).
 
+## Install on your Chromatic (prebuilt bitstreams)
+
+No toolchain needed: download the bitstreams and the flasher from the
+[releases](https://github.com/enjoy-digital/chromatix/releases). The Chromatic's USB-C port includes a
+Gowin GWU2X JTAG bridge, so the FPGA flash is written over the USB cable with
+[openFPGALoader](https://github.com/trabucayre/openFPGALoader) (Linux: distribution package + its udev
+rules, macOS: `brew install openfpgaloader`, Windows: MSYS2 package).
+
+| Bitstream                | Description                                                                          |
+|--------------------------|--------------------------------------------------------------------------------------|
+| `chromatix-standard.fs`  | Drop-in replacement of the official design: cartridge games, ESP32 menu, USB UVC/UAC capture, USB CDC bridged to the ESP32. |
+| `chromatix-vcart.fs`     | Standard + debug bridge: **virtual cartridge** (Game Boy ROMs loaded from the PC with `scripts/chromatic.py load-rom`), virtual buttons, automation (USB CDC is the debug bridge instead of the ESP32 bridge). |
+| `chromatix-bios.fs`      | LiteX BIOS demo: VexRiscv RISC-V SoC, console on USB CDC and LCD, PSRAM main RAM, firmware over serialboot. |
+
+```bash
+./chromatix_flash.py info                          # Check the connection (console on, USB-C connected).
+./chromatix_flash.py flash chromatix-standard.fs   # Saves the original flash image first, then installs ChromatiX.
+./chromatix_flash.py restore                       # Restores the original image (first backup).
+```
+
+Backups are saved in `~/chromatix-backups` (keep them: they hold the official image). The flash is
+written and verified over JTAG, which stays available whatever the flash content, so a failed or
+interrupted write can simply be retried. Use at your own risk.
+
 ## Build & Flash
 
 Requires [LiteX](https://github.com/enjoy-digital/litex) (`litex_setup.py`, recent master: USB 2.0 PHY and OPI PSRAM cores), Gowin EDA and [openFPGALoader](https://github.com/trabucayre/openFPGALoader) (with GWU2X support).
@@ -64,8 +88,9 @@ python3 -m pytest -n auto test                                        # Tests.
 Notes:
 - Use **Gowin V1.9.12.04** (V1.9.10 builds don't enumerate on USB, V1.9.9 fails timing).
 - USB only enumerates when the FPGA boots from **flash** (`--flash`, not `--load`); the console must be on.
-- Back up the official image first: `openFPGALoader --cable gwu2x --dump-flash --file-size 1048576 official.bin`
-  (restore with `--write-flash --file-type bin --reset official.bin` or the ModRetro updater).
+- Back up the official image first: `./scripts/chromatix_flash.py backup` (restore with
+  `./scripts/chromatix_flash.py restore`).
+- Release bitstreams: `./scripts/build_release.sh` (`dist/`).
 
 ## Debug / Automation
 
