@@ -1,0 +1,988 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ChromatiX Promo</title>
+<style>
+  :root { --bg: #05070d; --green: #6cf06a; --cyan: #34d9ff; --violet: #b98cff; --red: #ff3b4e; }
+  html, body { margin: 0; padding: 0; background: var(--bg); overflow: hidden; }
+  canvas { display: block; }
+  #overlay { position: absolute; inset: 0; pointer-events: none; font-family: Ubuntu, sans-serif; color: #eef3ff; }
+  .o { position: absolute; will-change: opacity, transform; }
+  #title { left: 4.4vw; top: 5.4vh; margin: 0; font-weight: 700; font-size: 6.0vw; letter-spacing: -0.02em; line-height: 1; }
+  #title .chroma { background: linear-gradient(90deg, var(--green), var(--cyan) 70%, var(--violet)); -webkit-background-clip: text; color: transparent; }
+  #title .x { display: inline-block; font-weight: 700; font-size: 1.32em; line-height: 0.7; color: #ffffff; transform: skewX(-12deg) translateY(0.04em);
+              margin-left: 0.02em; text-shadow: 0 0 1.2vw rgba(108,240,106,.35); }
+  #sub { left: 4.6vw; top: 19.2vh; font-size: 1.45vw; font-weight: 300; color: #b9c6e4; max-width: 36vw; line-height: 1.35; margin: 0; }
+  #pills { left: 4.6vw; top: 28.6vh; display: flex; flex-direction: column; gap: 0.75vh; align-items: flex-start; }
+  .pill { font-size: 0.96vw; padding: 0.5vh 1.0vw 0.5vh 0.8vw; border-radius: 99px; border: 1px solid rgba(160,190,255,.25);
+          background: rgba(14,22,42,.6); color: #d8e3ff; font-weight: 500; display: flex; align-items: center; gap: .6vw; }
+  .pill i { width: .55vw; height: .55vw; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 .6vw var(--cyan); display: inline-block; }
+  .pill.g i { background: var(--green); box-shadow: 0 0 .6vw var(--green); }
+  .pill.v i { background: var(--violet); box-shadow: 0 0 .6vw var(--violet); }
+  #litex { right: 3.2vw; bottom: 4.2vh; height: 9.5vh; mix-blend-mode: lighten; }
+  #cta { right: 3.3vw; bottom: 15.2vh; font-family: 'Ubuntu Mono', monospace; font-size: 1.05vw; color: #9fb0d6; text-align: right; }
+  #cta b { color: #eef3ff; font-weight: 700; }
+  #credits { right: 3.3vw; bottom: 1.4vh; font-size: 0.72vw; color: #7f8aa6; text-align: right; white-space: nowrap; }
+  #credits b { color: #c9d4ee; font-weight: 500; }
+  #caption { left: 0; right: 0; bottom: 7.5vh; text-align: center; font-size: 2.6vw; font-weight: 700; letter-spacing: -0.01em;
+             text-shadow: 0 0.3vw 2vw rgba(0,0,0,.85); }
+  #caption .dim { font-weight: 300; color: #c9d4ee; }
+  #caption .g { color: var(--green); } #caption .c { color: var(--cyan); } #caption .v { color: var(--violet); } #caption .r { color: var(--red); }
+  #caption s { text-decoration-color: var(--red); text-decoration-thickness: 0.25vw; }
+  #fade { position: absolute; inset: 0; background: var(--bg); }
+  #capbg { left: 0; right: 0; bottom: 0; height: 26vh; background: linear-gradient(to top, rgba(3,5,10,.8), rgba(3,5,10,0)); }
+</style>
+</head>
+<body>
+<div id="overlay">
+  <h1 class="o" id="title"><span class="chroma">Chromati</span><span class="x">X</span></h1>
+  <p class="o" id="sub">The ModRetro Chromatic FPGA design,<br>freed and rebuilt with open-source LiteX.</p>
+  <div class="o" id="pills">
+    <span class="pill g"><i></i>100% open source: LiteX · Migen · LUNA · openFPGALoader</span>
+    <span class="pill g"><i></i>Encrypted vendor IP → open cores, upstreamed to LiteX</span>
+    <span class="pill"><i></i>Game Boy ROMs straight from your PC</span>
+    <span class="pill"><i></i>A LiteX dev board in your pocket: RISC-V, firmware</span>
+    <span class="pill v"><i></i>AI-ready: USB video + virtual buttons → agentic dev</span>
+  </div>
+  <div class="o" id="credits">Thanks: <b>ModRetro</b> (Chromatic, original FPGA design) · <b>MiSTer</b> GB core · <b>10+ years of LiteX contributors</b> · <b>LUNA</b> · <b>Tangram Games</b> (Tobu Tobu Girl DX, CC-BY)</div>
+  <div class="o" id="cta">github.com/<b>enjoy-digital/chromatix</b></div>
+  <img class="o" id="litex" src="litex.svg">
+  <div class="o" id="capbg"></div>
+  <div class="o" id="caption"></div>
+  <div id="fade"></div>
+</div>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { buildBoard, PCB_W, PCB_H, PCB_T } from './board.js';
+
+const Q = new URLSearchParams(location.search);
+const W = innerWidth, H = innerHeight;
+const AI0 = 17.0, AID = 4.2;                // AI-in-the-loop beat inserted at 17 s (main timeline paused)
+const RB0 = AI0 + AID, RBD = 3.6;           // ROM-from-the-PC beat (virtual cartridge), right after
+const DURATION = window.DURATION = 23.0 + AID + RBD;
+const HERO_T = 21.0 + AID + RBD;                 // frame used for stills / thumbnail
+const STILL = Q.has('still');              // render hero still (no captions, no fade)
+if (Q.get('overlay') === '0') document.getElementById('overlay').style.visibility = 'hidden';
+
+// ---------------------------------------------------------------- timing utils
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const lerp = (a, b, k) => a + (b - a) * k;
+const E = {
+  inOutCubic: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  inOutSine: x => -(Math.cos(Math.PI * x) - 1) / 2,
+  outExpo: x => x === 1 ? 1 : 1 - Math.pow(2, -10 * x),
+  outQuart: x => 1 - Math.pow(1 - x, 4),
+  outCubic: x => 1 - Math.pow(1 - x, 3),
+  inQuad: x => x * x,
+  inCubic: x => x * x * x,
+  outBack: (x, s = 1.4) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2),
+};
+function rng(seed) { return () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; }; }
+
+// ---------------------------------------------------------------- renderer
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(W, H);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.12;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+function canvasTex(w, h, draw) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  t.redraw = (...a) => { const g = c.getContext('2d'); g.clearRect(0, 0, w, h); draw(g, w, h, ...a); t.needsUpdate = true; };
+  t.redraw();
+  return t;
+}
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function glowSprite(color, size, opacity = 1) {
+  const tex = canvasTex(256, 256, (g, w, h) => {
+    const r = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+    r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(0.25, 'rgba(255,255,255,0.35)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.fillRect(0, 0, w, h);
+  });
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+  s.scale.setScalar(size);
+  return s;
+}
+
+// ---------------------------------------------------------------- background / floor / fog
+{
+  const t = canvasTex(1024, 1024, (g, w, h) => {
+    const grd = g.createRadialGradient(600, 400, 40, 560, 500, 720);
+    grd.addColorStop(0, '#0f1a34'); grd.addColorStop(0.5, '#080d1c'); grd.addColorStop(1, '#04060c');
+    g.fillStyle = grd; g.fillRect(0, 0, w, h);
+  });
+  scene.background = t;
+}
+scene.fog = new THREE.Fog(0x05080f, 24, 52);
+{
+  const tex = canvasTex(2048, 2048, (g, w, h) => {
+    g.fillStyle = '#070b15'; g.fillRect(0, 0, w, h);
+    g.strokeStyle = 'rgba(40,70,150,0.35)'; g.lineWidth = 2;
+    for (let i = 0; i <= w; i += 128) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i, h); g.stroke(); g.beginPath(); g.moveTo(0, i); g.lineTo(w, i); g.stroke(); }
+  });
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(120, 120),
+    new THREE.MeshStandardMaterial({ map: tex, roughness: 0.45, metalness: 0.35, envMapIntensity: 0.25 }));
+  floor.rotation.x = -Math.PI / 2; floor.position.y = -1.8; floor.receiveShadow = true;
+  scene.add(floor);
+}
+
+// ---------------------------------------------------------------- lights
+scene.add(new THREE.HemisphereLight(0x9fb7ff, 0x0a0c14, 0.35));
+const key = new THREE.DirectionalLight(0xfff1e0, 2.1);
+key.position.set(-6, 12, 8); key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024);
+Object.assign(key.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 50 });
+key.shadow.bias = -0.0005; key.shadow.radius = 5;
+scene.add(key);
+const rimShell = new THREE.PointLight(0x34d9ff, 120, 26); rimShell.position.set(13.5, 5.5, -10.5); scene.add(rimShell);
+const rimC = new THREE.PointLight(0x34d9ff, 50, 30); rimC.position.set(-8, 5, -6); scene.add(rimC);
+const rimM = new THREE.PointLight(0xb98cff, 45, 40); rimM.position.set(4, 7, -13); scene.add(rimM);
+
+const camera = new THREE.PerspectiveCamera(32, W / H, 0.1, 200);
+
+// ================================================================= PCB (procedural model of the real board, see board.js)
+const board = new THREE.Group();
+board.position.set(0.6, 0, 1.0); board.rotation.y = -0.55;
+scene.add(board);
+function loadImg(src) { return new Promise(r => { const i = new Image(); i.onload = () => r(i); i.src = src; }); }
+const litexImg = await loadImg('litex.svg');
+const tetrisImg = await loadImg('tetris.png');
+// Real UVC captures of the ChromatiX design (scripts/chromatic.py capture): title, game, ESP32 menu (OSD),
+// and the LiteX BIOS demo (--with-bios).
+const uvcImgs = { title: await loadImg('uvc_title.png'), game: await loadImg('uvc_game.png'), menu: await loadImg('uvc_menu.png'),
+  bios: await loadImg('uvc_bios.png'),
+  // Tobu Tobu Girl Deluxe (Tangram Games, MIT/CC-BY), loaded from the PC (virtual cartridge).
+  tobu_logo: await loadImg('uvc_tobu_logo.png'), tobu_game: await loadImg('uvc_tobu_game.png') };
+const B = buildBoard();
+board.add(B.group);
+const u4pos = B.u4pos.clone();
+const comps = B.comps.map(({ g, dist, label, lh = 1, h, kind }) => {
+  let tag = null;
+  if (label) {
+    const tex = canvasTex(900, 120, (c, cw, ch) => {
+      c.font = '500 58px Ubuntu'; const tw = c.measureText(label).width + 60;
+      c.fillStyle = 'rgba(10,16,32,0.88)'; roundRect(c, (cw - tw) / 2, 10, tw, 100, 50); c.fill();
+      c.strokeStyle = 'rgba(52,217,255,0.8)'; c.lineWidth = 4; roundRect(c, (cw - tw) / 2, 10, tw, 100, 50); c.stroke();
+      c.fillStyle = '#eef3ff'; c.textAlign = 'center'; c.fillText(label, cw / 2, 80);
+    });
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, toneMapped: false }));
+    spr.scale.set(3.66, 0.49, 1); spr.position.set(0, h + lh + 0.25, 0); spr.renderOrder = 20; g.add(spr);
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, h + 0.02, 0), new THREE.Vector3(0, h + lh, 0)]),
+      new THREE.LineBasicMaterial({ color: 0x34d9ff, transparent: true, toneMapped: false }));
+    g.add(line);
+    tag = { spr, line };
+  }
+  return { g, dist, tag, kind, baseY: g.position.y };
+});
+// placement order: parts outward from the FPGA, then passives in waves, then the buttons
+{
+  const w = { part: 0, passive: 1, button: 2 };
+  [...comps].sort((a, b) => (w[a.kind] - w[b.kind]) || (a.dist - b.dist)).forEach((c, i) => { c.t0 = 3.55 + i * 0.024 + w[c.kind] * 0.1; });
+}
+for (const m of B.bareMats) { m.transparent = true; }
+
+// socket footprint ring
+const socketMat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, toneMapped: false, opacity: 0 });
+{
+  socketMat.map = canvasTex(512, 512, (g, w, h) => {
+    g.strokeStyle = '#34d9ff'; g.lineWidth = 8; g.shadowColor = '#34d9ff'; g.shadowBlur = 24;
+    roundRect(g, 40, 40, w - 80, h - 80, 26); g.stroke();
+    g.fillStyle = '#34d9ff';
+  });
+  const s = new THREE.Mesh(new THREE.PlaneGeometry(B.U4_SIZE * 1.3, B.U4_SIZE * 1.3), socketMat);
+  s.rotation.x = -Math.PI / 2; s.position.copy(u4pos).add(new THREE.Vector3(0, 0.006, 0));
+  board.add(s);
+}
+// dashed "open design" boundary around the board
+const boundaryMat = new THREE.LineDashedMaterial({ color: 0x34d9ff, dashSize: 0.22, gapSize: 0.16, transparent: true, opacity: 0, toneMapped: false });
+{
+  const m = 0.45, w = PCB_W / 2 + m, h = PCB_H / 2 + m;
+  const pts = [[-w, -h], [w, -h], [w, h], [-w, h], [-w, -h]].map(([x, z]) => new THREE.Vector3(x, -0.55, z));
+  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), boundaryMat);
+  line.computeLineDistances(); board.add(line);
+}
+
+// ================================================================= FPGA
+const fpga = new THREE.Group();
+board.add(fpga);
+const CHIP_S = 1.0, CHIP_LIFT = 1.15;
+fpga.scale.setScalar(CHIP_S);
+const chipLabel = canvasTex(1024, 1024, (g, w, h, pulse = 0) => {
+  g.fillStyle = '#0e1014'; g.fillRect(0, 0, w, h);
+  const n = g.createLinearGradient(0, 0, w, h); n.addColorStop(0, 'rgba(255,255,255,0.05)'); n.addColorStop(1, 'rgba(0,0,0,0.1)');
+  g.fillStyle = n; g.fillRect(0, 0, w, h);
+  g.textAlign = 'center'; g.fillStyle = '#8a93a6';
+  g.font = '700 120px Ubuntu'; g.fillText('GW5A-25', w / 2, 330);
+  g.fillStyle = `rgb(${lerp(200, 120, pulse)},${lerp(208, 240, pulse)},${lerp(222, 255, pulse)})`;
+  g.font = 'italic 300 190px Ubuntu'; g.fillText('LiteX', w / 2, 600);
+  g.fillStyle = '#5d6577'; g.font = '400 58px Ubuntu Mono'; g.fillText('chromatix.py', w / 2, 730);
+  g.beginPath(); g.arc(120, 120, 34, 0, 7); g.fillStyle = '#1d2027'; g.fill();
+});
+{
+  const sub = new THREE.Mesh(new RoundedBoxGeometry(1.35, 0.1, 1.35, 3, 0.03),
+    new THREE.MeshStandardMaterial({ color: 0x1b4a2c, roughness: 0.5, metalness: 0.3 }));
+  sub.castShadow = true; fpga.add(sub);
+  const die = new THREE.Mesh(new RoundedBoxGeometry(1.15, 0.16, 1.15, 3, 0.03),
+    new THREE.MeshStandardMaterial({ color: 0x0e1014, roughness: 0.35, metalness: 0.2 }));
+  die.position.y = 0.12; die.castShadow = true; fpga.add(die);
+  const label = new THREE.Mesh(new THREE.PlaneGeometry(1.08, 1.08),
+    new THREE.MeshStandardMaterial({ map: chipLabel, roughness: 0.4, metalness: 0.1 }));
+  label.rotation.x = -Math.PI / 2; label.position.y = 0.201; fpga.add(label);
+  const gold = new THREE.MeshStandardMaterial({ color: 0xd8b25a, metalness: 1, roughness: 0.3 });
+  const balls = new THREE.InstancedMesh(new THREE.SphereGeometry(0.025, 10, 8), gold, 256);
+  let k = 0; const m = new THREE.Matrix4();
+  for (let i = 0; i < 16; i++) for (let j = 0; j < 16; j++) { m.makeTranslation(-0.6 + i * 0.08, -0.06, -0.6 + j * 0.08); balls.setMatrixAt(k++, m); }
+  fpga.add(balls);
+}
+const chipGlow = glowSprite(0x1f9fd0, 3.0, 0);
+board.add(chipGlow);
+const chipPulse = glowSprite(0x9fefff, 6, 0);
+board.add(chipPulse);
+
+// ================================================================= Handheld shell
+const shell = new THREE.Group();
+shell.scale.setScalar(0.86);
+scene.add(shell);
+const SW = 6.2, SH = 10.2, FZ = 0.7 + 0.18 + 0.002;
+// SELECT/START pills: slanted, rising to the right (~29deg), labels below (as on the Chromatic).
+const PILLS = [[-0.95, 'SELECT'], [0.2, 'START']], PILL_Y = -3.95, PILL_ANGLE = 0.5, PILL_LABEL = 0.3;
+const SCR = (() => { const sx = 1240 / SW, sy = 2040 / SH; const bx = 0.55 * sx, by = 0.5 * sy, bw = 1240 - 2 * bx, bh = 4.3 * sy;
+  return { bx, by, bw, bh, x: bx + 90, y: by + 100, w: bw - 180, h: bh - 170 }; })();
+const faceTex = canvasTex(1240, 2040, (g, w, h) => {
+  const { bx, by, bw, bh } = SCR;
+  g.fillStyle = '#1e1d25';
+  g.beginPath(); g.moveTo(bx + 30, by); g.lineTo(bx + bw - 30, by); g.arcTo(bx + bw, by, bx + bw, by + 30, 30);
+  g.lineTo(bx + bw, by + bh - 190); g.quadraticCurveTo(bx + bw, by + bh, bx + bw - 190, by + bh);
+  g.lineTo(bx + 30, by + bh); g.arcTo(bx, by + bh, bx, by + bh - 30, 30); g.lineTo(bx, by + 30); g.arcTo(bx, by, bx + 30, by, 30); g.fill();
+  g.fillStyle = '#d9dbe6'; g.font = '500 44px Ubuntu'; g.textAlign = 'center';
+  g.fillText('ChromatiX  ·  LiteX', w / 2, by + 62);
+  const ly = by + bh + 0.55 * (h / SH);
+  g.textAlign = 'left'; g.fillStyle = '#ffffff'; g.font = '700 74px Ubuntu'; g.fillText('CHROMATI', bx, ly);
+  const lw = g.measureText('CHROMATI').width;
+  g.save(); g.translate(bx + lw - 4, ly + 6); g.transform(1, 0, -0.21, 1, 0, 0); g.font = '700 100px Ubuntu'; g.fillText('X', 0, 0); g.restore();
+  for (let i = 0; i < 9; i++) { g.fillStyle = '#2e9e3a'; const e = i > 6 ? (i - 6) * 8 : 0; g.fillRect(bx + 640 + i * 42, ly - 44 - e, 28, 44 + e); }
+  g.fillStyle = '#2b8f35'; g.font = '700 38px Ubuntu';
+  g.save(); g.translate(0.72 * w, 0.76 * h); g.rotate(-0.4); g.fillText('B', 0, 0); g.restore();
+  g.save(); g.translate(0.9 * w, 0.72 * h); g.rotate(-0.4); g.fillText('A', 0, 0); g.restore();
+  // SELECT/START labels under their (slanted) pills, as on the Chromatic.
+  g.font = '700 30px Ubuntu'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (const [x, txt] of PILLS) {
+    const lx = x + PILL_LABEL * Math.sin(PILL_ANGLE), ly = PILL_Y - PILL_LABEL * Math.cos(PILL_ANGLE);
+    g.save(); g.translate((lx / SW + 0.5) * w, (0.5 - ly / SH) * h); g.rotate(-PILL_ANGLE); g.fillText(txt, 0, 0); g.restore();
+  }
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.fillStyle = '#2e9e3a';
+  for (const o of [0, 0.06]) { g.beginPath(); g.moveTo((0.035 + o) * w, 0.885 * h); g.lineTo((0.075 + o) * w, 0.885 * h); g.lineTo((0.215 + o) * w, 0.975 * h); g.lineTo((0.175 + o) * w, 0.975 * h); g.fill(); }
+  g.fillStyle = '#e8ecef'; g.beginPath(); g.moveTo(0.03 * w, 0.93 * h); g.lineTo(0.11 * w, 0.978 * h); g.lineTo(0.03 * w, 0.978 * h); g.fill();
+});
+// screen content: separate canvas (redrawn on state change)
+const screenTex = canvasTex(1024, 768, (g, w, h, st = { power: 0, mode: 'tetris', lines: 0, cursor: 1 }) => {
+  g.fillStyle = '#030405'; g.fillRect(0, 0, w, h);
+  if (st.power <= 0) return;
+  // CRT power-on: horizontal line opening vertically
+  const open = clamp(st.power * 1.6), sh = Math.max(4, h * E.outCubic(clamp((st.power - 0.25) / 0.75)));
+  g.save(); g.beginPath(); g.rect(0, h / 2 - sh / 2, w * open, sh); g.clip();
+  g.fillStyle = '#07090c'; g.fillRect(0, 0, w, h);
+  if (st.mode === 'tetris') {
+    g.imageSmoothingEnabled = false;
+    const s = Math.min(w / tetrisImg.width, h / tetrisImg.height);
+    g.drawImage(tetrisImg, (w - tetrisImg.width * s) / 2, (h - tetrisImg.height * s) / 2, tetrisImg.width * s, tetrisImg.height * s);
+  } else if (uvcImgs[st.mode]) {   // ChromatiX running (real UVC capture)
+    const img = uvcImgs[st.mode];
+    g.imageSmoothingEnabled = false;
+    const s = Math.min(w / img.width, h / img.height);
+    g.drawImage(img, (w - img.width * s) / 2, (h - img.height * s) / 2, img.width * s, img.height * s);
+  }
+  if (st.flash > 0) { g.fillStyle = `rgba(255,255,255,${st.flash})`; g.fillRect(0, 0, w, h); }
+  g.fillStyle = 'rgba(255,255,255,0.03)'; for (let y = 0; y < h; y += 6) g.fillRect(0, y, w, 2);
+  g.restore();
+});
+{
+  const r = 0.45, R = 1.7;
+  const s = new THREE.Shape();
+  s.moveTo(-SW / 2 + r, SH / 2);
+  s.lineTo(SW / 2 - r, SH / 2); s.quadraticCurveTo(SW / 2, SH / 2, SW / 2, SH / 2 - r);
+  s.lineTo(SW / 2, -SH / 2 + R); s.quadraticCurveTo(SW / 2, -SH / 2, SW / 2 - R, -SH / 2);
+  s.lineTo(-SW / 2 + r, -SH / 2); s.quadraticCurveTo(-SW / 2, -SH / 2, -SW / 2, -SH / 2 + r);
+  s.lineTo(-SW / 2, SH / 2 - r); s.quadraticCurveTo(-SW / 2, SH / 2, -SW / 2 + r, SH / 2);
+  const geo = new THREE.ExtrudeGeometry(s, { depth: 0.7, bevelEnabled: true, bevelThickness: 0.18, bevelSize: 0.18, bevelSegments: 6, curveSegments: 24 });
+  const green = new THREE.MeshPhysicalMaterial({ color: 0x4cc64a, roughness: 0.6, metalness: 0.0, envMapIntensity: 0.3 });
+  const body = new THREE.Mesh(geo, green); body.castShadow = true; body.receiveShadow = true;
+  shell.add(body);
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(SW, SH),
+    new THREE.MeshStandardMaterial({ map: faceTex, transparent: true, roughness: 0.85, envMapIntensity: 0.3 }));
+  face.position.z = FZ; shell.add(face);
+  // the screen itself
+  const sw = SCR.w / 1240 * SW, sh = SCR.h / 2040 * SH;
+  const scr = new THREE.Mesh(new THREE.PlaneGeometry(sw, sh), new THREE.MeshBasicMaterial({ map: screenTex, toneMapped: false }));
+  scr.position.set(-SW / 2 + (SCR.x + SCR.w / 2) / 1240 * SW, SH / 2 - (SCR.y + SCR.h / 2) / 2040 * SH, FZ + 0.002);
+  shell.add(scr);
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1b1c20, roughness: 0.45 });
+  const dp = new THREE.Shape(); const a = 0.3, b = 0.9;
+  dp.moveTo(-a, b); dp.lineTo(a, b); dp.lineTo(a, a); dp.lineTo(b, a); dp.lineTo(b, -a); dp.lineTo(a, -a); dp.lineTo(a, -b);
+  dp.lineTo(-a, -b); dp.lineTo(-a, -a); dp.lineTo(-b, -a); dp.lineTo(-b, a); dp.lineTo(-a, a); dp.lineTo(-a, b);
+  const dpad = new THREE.Mesh(new THREE.ExtrudeGeometry(dp, { depth: 0.18, bevelEnabled: true, bevelSize: 0.05, bevelThickness: 0.05, bevelSegments: 3 }), dark);
+  dpad.position.set(-1.65, -2.35, FZ); dpad.castShadow = true; shell.add(dpad);
+  const pink = new THREE.MeshPhysicalMaterial({ color: 0xc48c8a, roughness: 0.7 });
+  for (const [x, y] of [[1.25, -2.75], [2.35, -2.2]]) {
+    const btn = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.46, 0.25, 40), pink);
+    btn.rotation.x = Math.PI / 2; btn.position.set(x, y, FZ + 0.1); btn.castShadow = true; shell.add(btn);
+  }
+  for (const [x] of PILLS) {
+    const pill = new THREE.Mesh(new THREE.CapsuleGeometry(0.1, 0.55, 6, 16), dark);
+    pill.rotation.z = Math.PI / 2 + PILL_ANGLE; pill.position.set(x, PILL_Y, FZ + 0.04); shell.add(pill); if (x > 0) window.startBtn = pill;
+  }
+}
+const screenGlow = glowSprite(0x6f8cff, 7, 0);
+scene.add(screenGlow);
+
+// ================================================================= Encrypted IP block
+const encIP = new THREE.Group();
+board.add(encIP);
+const encMat = new THREE.MeshStandardMaterial({ color: 0x3a3f4a, roughness: 0.9, metalness: 0.1, emissive: 0xff2030, emissiveIntensity: 0 });
+{
+  const box = new THREE.Mesh(new RoundedBoxGeometry(1.5, 1.5, 1.5, 3, 0.07), encMat);
+  box.castShadow = true; encIP.add(box);
+  const tex = canvasTex(512, 512, (c, w, h) => {
+    c.fillStyle = '#2c3039'; c.fillRect(0, 0, w, h);
+    c.strokeStyle = '#8b93a3'; c.lineWidth = 26; c.beginPath(); c.arc(w / 2, 190, 64, Math.PI, 0); c.stroke();
+    c.fillStyle = '#8b93a3'; roundRect(c, w / 2 - 105, 190, 210, 150, 22); c.fill();
+    c.fillStyle = '#2c3039'; c.beginPath(); c.arc(w / 2, 250, 22, 0, 7); c.fill(); c.fillRect(w / 2 - 9, 256, 18, 48);
+    c.fillStyle = '#c3c9d6'; c.textAlign = 'center';
+    c.font = '700 66px Ubuntu'; c.fillText('encrypted IP', w / 2, 430);
+    c.font = '400 40px Ubuntu Mono'; c.fillStyle = '#8b93a3'; c.fillText('*_encryption.v', w / 2, 484);
+  });
+  const faces = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, emissive: 0xff2030, emissiveIntensity: 0 });
+  encIP.userData.faces = faces;
+  for (const [rx, ry, pos] of [[0, 0, [0, 0, 0.76]], [0, Math.PI / 2, [0.76, 0, 0]], [-Math.PI / 2, 0, [0, 0.76, 0]], [0, -Math.PI / 2, [-0.76, 0, 0]], [0, Math.PI, [0, 0, -0.76]]]) {
+    const f = new THREE.Mesh(new THREE.PlaneGeometry(1.36, 1.36), faces);
+    f.rotation.set(rx, ry, 0); f.position.set(...pos); encIP.add(f);
+  }
+}
+// red "no" sign (billboarded, world space)
+const noSign = new THREE.Group();
+scene.add(noSign);
+{
+  const m = new THREE.MeshBasicMaterial({ color: new THREE.Color('#ff3b4e').multiplyScalar(1.25), toneMapped: false, transparent: true });
+  noSign.add(new THREE.Mesh(new THREE.TorusGeometry(1.35, 0.1, 12, 64), m));
+  const bar = new THREE.Mesh(new RoundedBoxGeometry(2.6, 0.2, 0.2, 2, 0.08), m);
+  bar.rotation.z = -Math.PI / 4; noSign.add(bar);
+  noSign.userData.mat = m;
+}
+// green open source emblem ("console freed"), billboarded, pinned to the frame
+function arcText(g, text, cx, cy, r, top) {
+  const ws = [...text].map(ch => g.measureText(ch).width * 1.08), total = ws.reduce((a, b) => a + b, 0) / r;
+  let a = top ? -Math.PI / 2 - total / 2 : Math.PI / 2 + total / 2;
+  [...text].forEach((ch, i) => {
+    const da = ws[i] / r, m = top ? a + da / 2 : a - da / 2;
+    g.save(); g.translate(cx + r * Math.cos(m), cy + r * Math.sin(m)); g.rotate(top ? m + Math.PI / 2 : m - Math.PI / 2);
+    g.fillText(ch, 0, 0); g.restore();
+    a = top ? a + da : a - da;
+  });
+}
+const freeTex = canvasTex(1024, 1024, (g, w, h) => {
+  const cx = w / 2, cy = h / 2, G = '#6cf06a';
+  const halo = g.createRadialGradient(cx, cy, 250, cx, cy, 505);
+  halo.addColorStop(0, 'rgba(108,240,106,0.22)'); halo.addColorStop(1, 'rgba(108,240,106,0)');
+  g.fillStyle = halo; g.fillRect(0, 0, w, h);
+  g.fillStyle = 'rgba(6,22,12,0.92)'; g.beginPath(); g.arc(cx, cy, 440, 0, 7); g.fill();
+  g.strokeStyle = G; g.lineWidth = 22; g.beginPath(); g.arc(cx, cy, 440, 0, 7); g.stroke();
+  g.lineWidth = 7; g.beginPath(); g.arc(cx, cy, 300, 0, 7); g.stroke();
+  // ring texts
+  g.fillStyle = '#eafff0'; g.font = '700 74px Ubuntu'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  arcText(g, '100% OPEN SOURCE', cx, cy, 370, true);
+  g.fillStyle = G; arcText(g, 'CONSOLE FREED', cx, cy, 370, false);
+  for (const sx of [-1, 1]) { g.beginPath(); g.arc(cx + sx * 370, cy, 14, 0, 7); g.fill(); }
+  // open padlock (shackle released)
+  g.fillStyle = G; roundRect(g, cx - 125, cy - 20, 250, 190, 30); g.fill();
+  g.strokeStyle = G; g.lineWidth = 38; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(cx - 78, cy - 20); g.lineTo(cx - 78, cy - 95); g.arc(cx + 2, cy - 95, 80, Math.PI, 0); g.lineTo(cx + 82, cy - 60); g.stroke();
+  g.fillStyle = 'rgba(6,22,12,1)'; g.beginPath(); g.arc(cx, cy + 55, 30, 0, 7); g.fill(); g.fillRect(cx - 12, cy + 60, 24, 70);
+});
+const freeBadge = new THREE.Sprite(new THREE.SpriteMaterial({ map: freeTex, transparent: true, opacity: 0, toneMapped: false, depthTest: false }));
+freeBadge.renderOrder = 30; scene.add(freeBadge);
+const freeGlow = glowSprite(0x6cf06a, 1, 0); freeGlow.material.depthTest = false; freeGlow.renderOrder = 29; scene.add(freeGlow);
+const ENC_REST = new THREE.Vector3(PCB_W / 2 + 2.2, 0.2, -1.8);   // board-local
+const ENC_HIT = new THREE.Vector3(PCB_W / 2 + 0.45 + 0.8, 1.3, u4pos.z + 1.0);
+const ENC_FROM = new THREE.Vector3(PCB_W / 2 + 12, 4.5, u4pos.z - 3);
+const shieldMat = new THREE.MeshBasicMaterial({ color: 0x34d9ff, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+{
+  const tex = canvasTex(512, 512, (g, w, h) => {
+    const r = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+    r.addColorStop(0, 'rgba(255,255,255,0.9)'); r.addColorStop(0.5, 'rgba(255,255,255,0.3)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.fillRect(0, 0, w, h);
+    g.strokeStyle = 'rgba(255,255,255,0.8)'; g.lineWidth = 3;
+    for (let i = 0; i < w; i += 32) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i, h); g.stroke(); g.beginPath(); g.moveTo(0, i); g.lineTo(w, i); g.stroke(); }
+  });
+  shieldMat.map = tex; shieldMat.alphaMap = null;
+  const shield = new THREE.Mesh(new THREE.PlaneGeometry(4, 4), shieldMat);
+  shield.rotation.y = Math.PI / 2; shield.position.set(PCB_W / 2 + 0.45, 1.3, u4pos.z + 1.0);
+  board.add(shield);
+}
+
+// ================================================================= Code panel
+// Lines from chromatix.py (BaseSoC), abridged: ClockDomainsRenamer wrappers and long argument lists elided.
+const K_ = '#c792ea', F_ = '#82aaff', T_ = '#e6ecff', S_ = '#c3e88d', C_ = '#697098';
+const CODE = [
+  { s: [[K_, 'class '], [F_, 'BaseSoC'], [T_, '(SoCMini):']] },
+  { s: [[K_, '    def '], [F_, '__init__'], [T_, '(self, platform, ...):']] },
+  { s: [[T_, '        '], [F_, 'SoCMini'], [T_, '.__init__(self, platform, clk_freq=sys_clk_freq)']] },
+  { s: [[T_, '        self.crg = crg = '], [F_, 'CRG'], [T_, '(platform, sys_clk=...)']], tile: 1 },
+  { s: [[T_, '        self.st7785_init = '], [F_, 'ST7785Init'], [T_, '(load_st7785_sequence())']], tile: 3 },
+  { s: [[T_, '        self.codec_ctrl = '], [F_, 'CodecControl'], [T_, '(...)']], tile: 4 },
+  { s: [[T_, '        self.memory = '], [F_, 'MemorySystem'], [T_, '(qspi_pads=qspi, ...)']], tile: 2 },
+  { s: [[T_, '        self.vcart = '], [F_, 'VirtualCart'], [T_, '(memory.vcart_port, ...)']], tile: 6 },
+  { s: [[T_, '        self.specials += '], [F_, 'Instance'], [T_, '('], [S_, '"emu_system_top"'], [T_, ', ...)']], tile: 0 },
+  { s: [[T_, '        self.uartbone = '], [F_, 'UARTBone'], [T_, '(phy=cdc_phy, ...)']], tile: 7 },
+  { s: [[T_, '        self.usb = '], [F_, 'USBDevice'], [T_, '(platform, clk_24, usb, ...)'], [C_, ' # LUNA']], tile: 5 },
+  { s: [[C_, '        # next: RISC-V, AI, your core...']], tile: 8 },
+  { s: [] },
+  { s: [[S_, '$ '], [T_, './chromatix.py --build --flash']], build: true },
+];
+const BI = CODE.findIndex(l => l.build);
+const CODE_LEN = CODE.map(l => l.s.reduce((n, [, t]) => n + t.length, 0));
+const AGENT = [
+  [['#697098', '# agentic dev loop: scripts/chromatic.py']],
+  [['#c3e88d', '$ '], ['#e6ecff', 'litex_server --uart --uart-port /dev/ttyACM0 &']],
+  [['#c3e88d', '$ '], ['#e6ecff', './scripts/chromatic.py capture frame.png'], ['#697098', '   # video -> agent']],
+  [['#c3e88d', '$ '], ['#e6ecff', './scripts/chromatic.py press start --duration 0.2'], ['#697098', ' # agent -> buttons']],
+  [['#c3e88d', '$ '], ['#e6ecff', './scripts/chromatic.py sequence "press:start wait:2 capture:game.png"']],
+];
+const ROMCMD = [
+  [['#697098', '# virtual cartridge: Game Boy ROMs from the PC']],
+  [['#c3e88d', '$ '], ['#e6ecff', './scripts/chromatic.py load-rom tobudx.gb']],
+  [['#6cf06a', 'TOBUDX: 256KB loaded in 0.1s (MBC1, RAM 8KB).']],
+];
+const ROM_T = RB0 + 1.95;                          // cartridge reaches the board, game boots
+const PRESS_T = AI0 + 0.35 + 3 * 0.55 + 0.3;       // when the "press start" line has run
+const OFL = 'openFPGALoader --cable gwu2x --write-flash --bitstream build/gateware/chromatic.fs --reset';
+const CH = 1180; // code panel canvas height
+const codeTex = canvasTex(1400, CH, (g, w, h, st = { chars: 1e9, lineOn: -1, progress: 0, cursor: 0, out: 1 }) => {
+  g.fillStyle = 'rgba(13,20,38,0.93)'; roundRect(g, 0, 0, w, h, 40); g.fill();
+  g.strokeStyle = 'rgba(110,150,255,0.45)'; g.lineWidth = 4; roundRect(g, 2, 2, w - 4, h - 4, 40); g.stroke();
+  ['#ff5f57', '#febc2e', '#28c840'].forEach((c, i) => { g.fillStyle = c; g.beginPath(); g.arc(52 + i * 44, 52, 15, 0, 7); g.fill(); });
+  if (st.rom) {
+    g.fillStyle = '#8b98b8'; g.font = '400 36px Ubuntu Mono'; g.fillText('terminal · virtual cartridge', 200, 64);
+    g.font = '400 36px Ubuntu Mono';
+    ROMCMD.slice(0, st.lines).forEach((line, i) => {
+      let x = 56; for (const [c, txt] of line) { g.fillStyle = c; g.fillText(txt, x, 160 + i * 64); x += g.measureText(txt).width; }
+      if (i === st.lines - 1 && st.cursor && st.lines < ROMCMD.length) { g.fillStyle = '#34d9ff'; g.fillRect(x + 6, 160 + i * 64 - 30, 18, 38); }
+    });
+    // cartridge -> PSRAM -> Game Boy core
+    const bx = 56, by = 420;
+    g.drawImage(cartCanvas, bx, by, 300, 330);
+    g.strokeStyle = '#6cf06a'; g.lineWidth = 6; g.beginPath(); g.moveTo(bx + 320, by + 165); g.lineTo(bx + 420, by + 165); g.stroke();
+    g.fillStyle = '#6cf06a'; g.beginPath(); g.moveTo(bx + 420, by + 150); g.lineTo(bx + 440, by + 165); g.lineTo(bx + 420, by + 180); g.fill();
+    const ax = 520, ay = by + 20, aw = 800, ah = 290;
+    g.fillStyle = 'rgba(108,240,106,0.10)'; roundRect(g, ax, ay, aw, ah, 30); g.fill();
+    g.strokeStyle = '#6cf06a'; g.lineWidth = 4; roundRect(g, ax, ay, aw, ah, 30); g.stroke();
+    g.fillStyle = '#ffffff'; g.font = '700 54px Ubuntu'; g.fillText('Virtual cartridge', ax + 40, ay + 80);
+    g.font = '400 34px Ubuntu Mono'; g.fillStyle = '#b8f5b6';
+    g.fillText('ROM + saves in PSRAM, cache', ax + 40, ay + 145);
+    g.fillText('MBC1/2/3/5 · no cartridge needed', ax + 40, ay + 200);
+    if (st.loaded) { g.fillStyle = '#6cf06a'; g.fillText('▶ running on the handheld', ax + 40, ay + 255); }
+    return;
+  }
+  if (st.agent) {
+    g.fillStyle = '#8b98b8'; g.font = '400 36px Ubuntu Mono'; g.fillText('terminal · AI agent', 200, 64);
+    g.font = '400 36px Ubuntu Mono';
+    AGENT.slice(0, st.lines).forEach((line, i) => {
+      let x = 56; for (const [c, txt] of line) { g.fillStyle = c; g.fillText(txt, x, 160 + i * 64); x += g.measureText(txt).width; }
+      if (i === st.lines - 1 && st.cursor && st.lines < AGENT.length) { g.fillStyle = '#34d9ff'; g.fillRect(x + 6, 160 + i * 64 - 30, 18, 38); }
+    });
+    if (st.frame) {   // last captured UVC frame + agent box
+      const fx = 56, fy = 520, fw = 160 * 2.3, fh = 144 * 2.3;
+      g.imageSmoothingEnabled = false; g.drawImage(uvcImgs.title, fx, fy, fw, fh); g.imageSmoothingEnabled = true;
+      g.strokeStyle = '#6cf06a'; g.lineWidth = 4; g.strokeRect(fx, fy, fw, fh);
+      g.fillStyle = '#6cf06a'; g.font = '400 30px Ubuntu Mono'; g.fillText('frame.png · 160x144 · UVC', fx, fy + fh + 44);
+      const ax = 560, ay = 590, aw = 760, ah = 250;
+      g.fillStyle = 'rgba(185,140,255,0.12)'; roundRect(g, ax, ay, aw, ah, 30); g.fill();
+      g.strokeStyle = '#b98cff'; g.lineWidth = 4; roundRect(g, ax, ay, aw, ah, 30); g.stroke();
+      g.fillStyle = '#ffffff'; g.font = '700 54px Ubuntu'; g.fillText('AI agent', ax + 40, ay + 80);
+      g.font = '400 34px Ubuntu Mono'; g.fillStyle = '#c9b3ff';
+      g.fillText('sees:  video frames (UVC)', ax + 40, ay + 145);
+      g.fillText('acts:  buttons (UARTBone)', ax + 40, ay + 200);
+      g.strokeStyle = '#6cf06a'; g.lineWidth = 6; g.beginPath(); g.moveTo(fx + fw + 20, fy + 90); g.lineTo(ax - 20, fy + 90); g.stroke();
+      g.fillStyle = '#6cf06a'; g.beginPath(); g.moveTo(ax - 20, fy + 78); g.lineTo(ax - 4, fy + 90); g.lineTo(ax - 20, fy + 102); g.fill();
+    }
+    return;
+  }
+  g.fillStyle = '#8b98b8'; g.font = '400 36px Ubuntu Mono'; g.fillText('chromatix.py', 200, 64);
+  g.font = '400 40px Ubuntu Mono';
+  let left = st.chars, cx = 0, cy = 0;
+  CODE.forEach((line, i) => {
+    let x = 56; const y = 160 + i * 66;
+    if (i === st.lineOn) { g.fillStyle = 'rgba(52,217,255,0.10)'; g.fillRect(20, y - 44, w - 40, 60); }
+    for (const [c, t] of line.s) {
+      if (left <= 0) break;
+      const part = t.slice(0, left); left -= part.length;
+      g.fillStyle = c; g.fillText(part, x, y); x += g.measureText(part).width;
+    }
+    if (left >= 0) { cx = x; cy = y; }
+  });
+  if (st.cursor) { g.fillStyle = '#34d9ff'; g.fillRect(cx + 4, cy - 34, 20, 42); }
+  if (st.out) { g.font = '400 29px Ubuntu Mono'; g.fillStyle = '#8b98b8'; g.fillText(OFL, 56, 160 + (BI + 1) * 66 - 8); }
+  if (st.progress > 0) {
+    const y = 160 + (BI + 1) * 66 + 22;
+    g.fillStyle = 'rgba(52,217,255,0.15)'; roundRect(g, 56, y, w - 112, 16, 8); g.fill();
+    g.fillStyle = '#34d9ff'; roundRect(g, 56, y, (w - 112) * st.progress, 16, 8); g.fill();
+  }
+});
+const code = new THREE.Group();
+const codePanel = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 5.2 * CH / 1400),
+  new THREE.MeshBasicMaterial({ map: codeTex, transparent: true, toneMapped: false, side: THREE.DoubleSide, depthTest: false }));
+codePanel.renderOrder = 10;
+code.add(codePanel); code.scale.setScalar(0.8);
+scene.add(code);
+function codeLineAnchor(i) {  // world pos of end of a code line
+  const x = (56 + 20 * CODE_LEN[i] + 20) / 1400 - 0.5, y = 0.5 - (160 + i * 66 - 14) / CH;
+  return codePanel.localToWorld(new THREE.Vector3(x * 5.2, y * 5.2 * CH / 1400, 0.05));
+}
+
+// ================================================================= Game Boy cartridge (ROM beat)
+const cartCanvas = (() => {
+  const c = document.createElement('canvas'); c.width = 300; c.height = 330; const g = c.getContext('2d');
+  g.fillStyle = '#9aa0ab'; g.beginPath(); g.moveTo(10, 10); g.lineTo(240, 10); g.lineTo(290, 60); g.lineTo(290, 320); g.lineTo(10, 320); g.closePath(); g.fill();
+  g.fillStyle = '#b7bcc6'; g.fillRect(10, 10, 230, 26);
+  for (let i = 0; i < 10; i++) { g.fillStyle = '#80868f'; g.fillRect(40 + i * 22, 20, 10, 12); }
+  g.fillStyle = '#1b2a3c'; roundRect(g, 42, 70, 216, 190, 14); g.fill();
+  g.strokeStyle = '#6cf06a'; g.lineWidth = 5; roundRect(g, 42, 70, 216, 190, 14); g.stroke();
+  g.fillStyle = '#6cf06a'; g.font = '700 40px Ubuntu'; g.textAlign = 'center'; g.fillText('.gb', 150, 150);
+  g.fillStyle = '#e8ecf5'; g.font = '500 30px Ubuntu Mono'; g.fillText('tobudx.gb', 150, 215);
+  g.fillStyle = '#80868f'; g.font = '700 26px Ubuntu'; g.fillText('FROM YOUR PC', 150, 300);
+  return c;
+})();
+
+// ================================================================= USB link to the host (AI beat)
+const link = new THREE.Group(); scene.add(link);
+const linkMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0x34d9ff).multiplyScalar(0.9), transparent: true, opacity: 0, depthTest: false, toneMapped: false });
+let linkCurve = null, linkTube = null;
+const vidFrames = [], inputs = [];
+{
+  const ft = new THREE.Texture(uvcImgs.title); ft.colorSpace = THREE.SRGBColorSpace; ft.needsUpdate = true; ft.magFilter = THREE.NearestFilter;
+  for (let i = 0; i < 3; i++) {
+    const m = new THREE.Sprite(new THREE.SpriteMaterial({ map: ft, transparent: true, opacity: 0, toneMapped: false, depthTest: false }));
+    m.scale.set(0.85, 0.77, 1); m.renderOrder = 13; link.add(m); vidFrames.push(m);
+  }
+  for (let i = 0; i < 7; i++) {
+    const d = glowSprite(0xb98cff, 0.5, 0); d.material.depthTest = false; d.renderOrder = 13; link.add(d); inputs.push(d);
+  }
+}
+const cartTex = new THREE.CanvasTexture(cartCanvas); cartTex.colorSpace = THREE.SRGBColorSpace;
+const cartSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: cartTex, transparent: true, opacity: 0, toneMapped: false, depthTest: false }));
+cartSprite.scale.set(0.95, 1.05, 1); cartSprite.renderOrder = 14; link.add(cartSprite);
+const cartGlow = glowSprite(0x6cf06a, 2.2, 0); cartGlow.material.depthTest = false; cartGlow.renderOrder = 13; link.add(cartGlow);
+function updateLink(T) {
+  const k = Math.min(E.outCubic(seg(T, AI0 + 0.2, AI0 + 0.9)), 1 - seg(T, RB0 + RBD - 0.5, RB0 + RBD - 0.1));
+  link.visible = k > 0;
+  if (!link.visible) return;
+  const a = board.localToWorld(B.usbPos.clone()).add(new THREE.Vector3(0, 0.1, 0));
+  const b = codePanel.localToWorld(new THREE.Vector3(2.62, 0.5, 0.05));
+  const m1 = a.clone().add(new THREE.Vector3(-2.2, 2.6, 1.2)), m2 = b.clone().add(new THREE.Vector3(2.2, 1.2, 0.3));
+  linkCurve = new THREE.CubicBezierCurve3(a, m1, m2, b);
+  if (linkTube) { link.remove(linkTube); linkTube.geometry.dispose(); }
+  linkTube = new THREE.Mesh(new THREE.TubeGeometry(linkCurve, 80, 0.035, 8), linkMat); linkTube.renderOrder = 12;
+  linkTube.geometry.setDrawRange(0, Math.floor(linkTube.geometry.index.count * k / 6) * 6);
+  link.add(linkTube); linkMat.opacity = 0.85;
+  vidFrames.forEach((f, i) => {   // frames: board -> host
+    const u = ((T - AI0) * 0.32 + i / vidFrames.length) % 1;
+    f.position.copy(linkCurve.getPoint(u)).add(new THREE.Vector3(0, 0.55, 0));
+    f.material.opacity = k * Math.sin(u * Math.PI) * (T > AI0 + 0.9 && T < RB0 ? 1 : 0);
+  });
+  inputs.forEach((d, i) => {      // button presses: host -> board, burst around PRESS_T
+    const u = 1 - clamp((T - PRESS_T + 0.45 - i * 0.06) / 0.5);
+    d.position.copy(linkCurve.getPoint(clamp(u)));
+    d.material.opacity = k * (u > 0 && u < 1 ? 1 : 0);
+  });
+  // ROM beat: the cartridge travels host -> board.
+  const uc = 1 - E.inOutCubic(seg(T, RB0 + 0.95, ROM_T));
+  cartSprite.position.copy(linkCurve.getPoint(uc)).add(new THREE.Vector3(0, 0.75, 0));
+  cartGlow.position.copy(cartSprite.position);
+  const kc = (T > RB0 + 0.9 && T < ROM_T + 0.05) ? Math.min(1, seg(T, RB0 + 0.9, RB0 + 1.1)) : 0;
+  cartSprite.material.opacity = kc; cartGlow.material.opacity = 0.7 * kc;
+}
+
+// ================================================================= Core tiles
+const CORES = [
+  { t: 'GB / GBC', s: 'MiSTer core', c: '#6cf06a' },
+  { t: 'GW5APLL', s: 'clocking', c: '#34d9ff' },
+  { t: 'Memory', s: 'OPI PSRAM · LiteX', c: '#34d9ff' },
+  { t: 'ST7785', s: 'LCD init', c: '#34d9ff' },
+  { t: 'LiteI2C', s: 'codec control', c: '#34d9ff' },
+  { t: 'USB 2.0', s: 'LiteX PHY · LUNA', c: '#34d9ff' },
+  { t: 'Virtual Cart', s: 'ROMs from your PC', c: '#6cf06a' },
+  { t: 'UARTBone', s: 'USB debug bridge', c: '#34d9ff' },
+  { t: 'RISC-V · AI', s: 'or your core', c: '#b98cff', dash: true },
+];
+const tiles = CORES.map((core) => {
+  const tex = canvasTex(640, 360, (g, w, h) => {
+    g.fillStyle = '#0b1224'; roundRect(g, 0, 0, w, h, 44); g.fill();
+    g.fillStyle = core.c; g.globalAlpha = 0.10; roundRect(g, 0, 0, w, h, 44); g.fill(); g.globalAlpha = 1;
+    g.strokeStyle = core.c; g.lineWidth = 12; if (core.dash) g.setLineDash([36, 20]);
+    roundRect(g, 10, 10, w - 20, h - 20, 38); g.stroke(); g.setLineDash([]);
+    g.fillStyle = '#ffffff'; g.textAlign = 'center';
+    let fs = 112; do { g.font = `700 ${fs}px Ubuntu`; fs -= 4; } while (g.measureText(core.t).width > 560);
+    g.fillText(core.t, w / 2, 180);
+    g.fillStyle = core.c; g.font = '500 58px Ubuntu'; g.fillText(core.s, w / 2, 268);
+  });
+  const tile = new THREE.Group();
+  const body = new THREE.Mesh(new RoundedBoxGeometry(1.9, 1.07, 0.16, 3, 0.06),
+    new THREE.MeshPhysicalMaterial({ color: 0x0d1426, roughness: 0.3, metalness: 0.3, clearcoat: 1, envMapIntensity: 0.8 }));
+  body.castShadow = true; tile.add(body);
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(1.84, 1.035), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, transparent: true }));
+  face.position.z = 0.081; tile.add(face);
+  const pins = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.09, 0.06), new THREE.MeshStandardMaterial({ color: 0xa88a40, metalness: 1, roughness: 0.55 }));
+  pins.position.set(0, -0.58, 0); tile.add(pins);
+  const glow = glowSprite(new THREE.Color(core.c), 3.2, 0); tile.add(glow);
+  scene.add(tile);
+  return { tile, core, face, glow, target: new THREE.Vector3(), curve: null, tube: null, dots: [] };
+});
+const coreGroup = new THREE.Group(); scene.add(coreGroup);
+
+// dust motes
+const dust = (() => {
+  const r = rng(7), n = 220, pos = new Float32Array(n * 3), seeds = [];
+  for (let i = 0; i < n; i++) seeds.push([r() * 30 - 12, r() * 9, r() * 22 - 12, r() * 6.28, 0.2 + r() * 0.5]);
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const tex = canvasTex(64, 64, (g, w, h) => { const rg = g.createRadialGradient(32, 32, 0, 32, 32, 32); rg.addColorStop(0, 'rgba(255,255,255,1)'); rg.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = rg; g.fillRect(0, 0, 64, 64); });
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({ map: tex, color: 0x7fa8ff, size: 0.09, transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending }));
+  scene.add(pts);
+  return { geo, pos, seeds, n };
+})();
+
+// ================================================================= Layout (hero)
+const HERO = {
+  shellPos: new THREE.Vector3(11.3, 3.3, -7.6), shellRot: new THREE.Euler(-0.18, -0.55, -0.04),
+  codePos: new THREE.Vector3(-5.9, 1.9, 4.4), codeRot: new THREE.Euler(-0.2, 0.3, 0.0),
+  cam: new THREE.Vector3(0.5, 14.5, 22.5), look: new THREE.Vector3(1.4, 2.4, -0.4), fov: 32,
+};
+const qHero = new THREE.Quaternion().setFromEuler(HERO.shellRot);
+const qFlat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, -0.55, 0, 'YXZ'));
+const shellFlatPos = board.localToWorld(new THREE.Vector3(0, 0.26, 0.3));
+
+// compute tile targets / buses at hero camera
+camera.position.copy(HERO.cam); camera.fov = HERO.fov; camera.lookAt(HERO.look); camera.updateProjectionMatrix();
+fpga.position.copy(u4pos).add(new THREE.Vector3(0, CHIP_LIFT, 0));
+scene.updateMatrixWorld(true);
+const chipW = fpga.getWorldPosition(new THREE.Vector3());
+{
+  const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).setY(0).normalize();
+  const up = new THREE.Vector3(0, 1, 0);
+  const back = new THREE.Vector3().crossVectors(up, right).normalize().multiplyScalar(-1);
+  tiles.forEach((T, i) => {
+    const a = Math.PI * (0.98 - 0.92 * i / (tiles.length - 1));
+    T.target.copy(chipW).addScaledVector(up, 1.3 + 2.7 * Math.sin(a)).addScaledVector(right, 4.7 * Math.cos(a) - 0.5).addScaledVector(back, 0.5 * Math.sin(a));
+    const dxz = T.target.clone().sub(chipW).setY(0).normalize().multiplyScalar(0.85);
+    const start = chipW.clone().add(new THREE.Vector3(dxz.x, 0.34, dxz.z));
+    const end = T.target.clone().add(new THREE.Vector3(0, -0.66, 0));
+    const mid = new THREE.Vector3(lerp(start.x, end.x, 0.2), lerp(start.y, end.y, 0.85), lerp(start.z, end.z, 0.2));
+    T.curve = new THREE.QuadraticBezierCurve3(start, mid, end);
+    const col = new THREE.Color(T.core.c);
+    T.tube = new THREE.Mesh(new THREE.TubeGeometry(T.curve, 64, T.core.dash ? 0.014 : 0.022, 6),
+      new THREE.MeshBasicMaterial({ color: col.clone().multiplyScalar(T.core.dash ? 1.3 : 2.0), toneMapped: false, transparent: true, opacity: T.core.dash ? 0.65 : 1 }));
+    T.tube.geometry.setDrawRange(0, 0);
+    coreGroup.add(T.tube);
+    for (let k = 0; k < 7; k++) {
+      const d = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), new THREE.MeshBasicMaterial({ color: col.clone().multiplyScalar(3.2), toneMapped: false, transparent: true, opacity: 0 }));
+      coreGroup.add(d); T.dots.push(d);
+    }
+  });
+}
+
+// ================================================================= post
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(W, H), 0.6, 0.45, 0.92);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+const finish = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uGrain: { value: 0.028 }, uVig: { value: 0.9 } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float uTime, uGrain, uVig; varying vec2 vUv;
+    float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)) + uTime*37.0) * 43758.5453); }
+    void main(){ vec4 c = texture2D(tDiffuse, vUv);
+      vec2 d = vUv - 0.5; d.x *= 1.25; float v = smoothstep(0.95, 0.25, length(d) * uVig);
+      c.rgb *= mix(0.55, 1.0, v);
+      c.rgb += (h(vUv * 1000.0) - 0.5) * uGrain;
+      gl_FragColor = c; }`,
+});
+composer.addPass(finish);
+
+// ================================================================= overlay helpers
+const $ = id => document.getElementById(id);
+function show(el, k, dy = 14) { el.style.opacity = k; el.style.transform = `translateY(${(1 - k) * dy}px)`; }
+const CAPTIONS = [
+  [0.6, 2.3, 'ModRetro Chromatic. <span class="dim">An FPGA inside.</span>'],
+  [2.7, 4.3, '<span class="dim">Inside:</span> <span class="g">Gowin GW5A-25</span> <span class="dim">+ ESP32, PSRAM, audio codec</span>'],
+  [4.45, 5.6, '<span class="dim">…a fun</span> <span class="c">LiteX dev board</span> <span class="dim">in your pocket.</span>'],
+  [5.8, 6.85, '<span class="r">Encrypted vendor IP</span><span class="dim">: out.</span>'],
+  [6.95, 7.9, '<span class="g">100% open source</span><span class="dim">: the console,</span> <span class="g">freed.</span>'],
+  [8.3, 11.3, '<span class="c">One Python script.</span>'],
+  [11.5, 14.4, '<span class="dim">Open cores:</span> <span class="c">USB 2.0 PHY</span> · <span class="c">OPI PSRAM</span> · <span class="c">LUNA</span>'],
+  [14.7, 16.9, 'Build. Flash with <span class="c">openFPGALoader</span>. <span class="g">Boot.</span>'],
+  [17.25, 19.0, '<span class="v">AI in the loop:</span> <span class="dim">live video over USB</span> <span class="c">(UVC)</span> <span class="dim">→ agent</span>'],
+  [19.15, 21.0, '<span class="dim">Agent →</span> <span class="c">buttons</span> <span class="dim">(UARTBone):</span> <span class="v">fully agentic dev.</span>'],
+  [RB0 + 0.25, RB0 + RBD - 0.25, '<span class="g">Virtual cartridge:</span> <span class="dim">ROMs</span> <span class="c">straight from your PC.</span>'],
+  [21.3 + RBD, 23.5 + RBD, '<span class="g">Open source</span> <span class="dim">→</span> <span class="c">RISC-V</span> · <span class="g">retro cores</span> · <span class="v">AI</span> · <span class="dim">your core here</span>'],
+];
+
+// ================================================================= timeline
+let lastCode = '', lastScreen = '', lastChip = -1;
+const tmpV = new THREE.Vector3();
+window.renderAt = (T) => {
+  if (STILL) T = HERO_T;
+  // main timeline is paused during the AI beat; T keeps running for continuous motion
+  const t = T < AI0 ? T : T < RB0 + RBD ? AI0 : T - AID - RBD;
+  const inAI = T >= AI0 && T < AI0 + AID, inROM = T >= RB0 && T < RB0 + RBD;
+  const HIT = 6.55;
+  // ---- camera
+  const K = [ // [time, pos, look, fov]
+    [0.0, [2.2, 7.6, 7.4], [0.9, 0.3, -1.6], 34],
+    [2.4, [2.6, 9.2, 9.8], [0.9, 0.5, -1.2], 34],
+    [5.0, [-0.8, 10.0, 14.0], [0.4, 1.1, -1.2], 33],
+    [7.9, [0.6, 9.2, 12.8], [1.4, 1.2, -0.6], 33],
+    [8.4, [-1.0, 11.5, 18.0], [-0.6, 2.0, -0.2], 33],
+    [14.4, [2.0, 12.5, 19.5], [0.4, 2.4, -0.4], 32],
+    [17.0, HERO.cam.toArray(), HERO.look.toArray(), HERO.fov],
+    [99, HERO.cam.toArray(), HERO.look.toArray(), HERO.fov],
+  ];
+  let a = 0; while (t > K[a + 1][0]) a++;
+  const [ta, pa, la, fa] = K[a], [tb, pb, lb, fb] = K[a + 1];
+  const kc = E.inOutCubic(seg(t, ta, tb));
+  camera.position.set(lerp(pa[0], pb[0], kc), lerp(pa[1], pb[1], kc), lerp(pa[2], pb[2], kc));
+  camera.fov = lerp(fa, fb, kc) - 1.2 * Math.sin(Math.PI * seg(T, AI0, RB0 + RBD)); camera.updateProjectionMatrix();
+  camera.lookAt(lerp(la[0], lb[0], kc), lerp(la[1], lb[1], kc), lerp(la[2], lb[2], kc));
+  // tiny impact shake
+  const shake = Math.exp(-Math.pow((t - HIT) / 0.08, 2)) * 0.05;
+  camera.position.x += Math.sin(t * 90) * shake; camera.position.y += Math.cos(t * 70) * shake;
+
+  // ---- shell: flat on board -> teardown to hero pose
+  const kShell = E.inOutCubic(seg(t, 2.55, 4.9));
+  const antic = Math.sin(seg(t, 2.35, 2.55) * Math.PI) * 0.06;
+  const lift = Math.sin(kShell * Math.PI) * 3.0;
+  // lifts off and parks out of frame during the close-ups, then glides into its hero spot on the pull-back
+  const PARK = new THREE.Vector3(18, 6.5, -5);
+  const kHero = E.inOutCubic(seg(t, 8.1, 9.6));
+  shell.position.lerpVectors(shellFlatPos, PARK, kShell).lerp(HERO.shellPos, kHero);
+  shell.position.y += lift - antic;
+  shell.quaternion.slerpQuaternions(qFlat, qHero, kShell);
+  const settle = seg(t, 9.6, 10.2); shell.position.y += Math.sin(settle * Math.PI) * 0.08 * (1 - settle);
+  // screen state
+  const power = seg(t, 0.9, 1.5);
+  // screen sequence: Tetris (stock game) -> flash/reset -> ChromatiX boot (real UVC captures: title,
+  // game, ESP32 menu on the OSD) -> LiteX BIOS demo (hero)
+  const logo = seg(t, 15.75, 16.3);
+  let mode = 'tetris', lines = 0, blank = false;
+  if (t >= 15.55 && t < 15.75) blank = true;
+  else if (t >= 15.75 && t < 17.0) mode = 'title';
+  else if (t >= 17.0 && t < 17.15) blank = true;
+  else if (t >= 17.15 && t < 18.3) mode = 'game';
+  else if (t >= 18.3 && t < 19.4) mode = 'menu';
+  else if (t >= 19.4 && t < 19.52) blank = true;
+  else if (t >= 19.52) mode = 'bios';
+  if (inAI) { blank = T < AI0 + 0.12; mode = 'tetris'; }
+  if (inROM) {   // Tobu Tobu Girl DX loaded from the PC (real UVC captures)
+    blank = (T >= ROM_T && T < ROM_T + 0.1) || T > RB0 + RBD - 0.12;
+    mode = T < ROM_T ? 'tetris' : T < ROM_T + 0.55 ? 'tobu_logo' : 'tobu_game';
+  }
+  const scrState = { power: blank ? 0.001 : power, mode: blank ? 'none' : mode, lines, cursor: Math.floor(T * 2.5) % 2,
+    flash: +(blank ? 0 : 0.5 * Math.exp(-Math.pow((t - 15.8) / 0.06, 2)) + 0.35 * Math.exp(-Math.pow((T - PRESS_T - 0.25) / 0.08, 2))
+      + 0.5 * Math.exp(-Math.pow((T - ROM_T - 0.12) / 0.06, 2))).toFixed(2) };
+  const sKey = JSON.stringify(scrState);
+  if (sKey !== lastScreen) { screenTex.redraw(scrState); lastScreen = sKey; }
+  screenGlow.position.copy(shell.localToWorld(new THREE.Vector3(0, 2.3, 2.5)));
+  screenGlow.material.opacity = 0.0;
+
+  // ---- chip rise + socket
+  socketMat.opacity = clamp(seg(t, 5.0, 5.4) * (0.6 + 0.4 * Math.sin(t * 40) * (1 - seg(t, 5.0, 5.6))));
+  // bare board appears once the shell is lifted, the FPGA is placed first
+  const kBoard = E.outCubic(seg(t, 2.85, 3.5));
+  board.visible = kBoard > 0;
+  B.bare.position.y = -PCB_T / 2 - 0.35 * (1 - kBoard);
+  for (const m of B.bareMats) { m.opacity = kBoard; m.transparent = kBoard < 1; m.depthWrite = kBoard > 0.5; }
+  const kPlace = E.outCubic(seg(t, 3.3, 3.75));
+  const kChip = E.outQuart(seg(t, 5.0, 6.2));
+  fpga.position.copy(u4pos).add(new THREE.Vector3(0, CHIP_LIFT * kChip + 1.6 * (1 - kPlace), 0));
+  fpga.visible = t >= 3.3;
+  chipGlow.position.copy(fpga.position).add(new THREE.Vector3(0, -0.2, 0));
+  chipGlow.material.opacity = 0.08 + 0.22 * kChip;
+  const crgPulse = Math.max(Math.exp(-Math.pow((t - 9.6) / 0.25, 2)), Math.exp(-Math.pow((t - 15.6) / 0.3, 2)));
+  const cp = +crgPulse.toFixed(2);
+  if (cp !== lastChip) { chipLabel.redraw(cp); lastChip = cp; }
+  chipPulse.position.copy(fpga.position).add(new THREE.Vector3(0, 0.4, 0));
+  chipPulse.material.opacity = 0.9 * Math.exp(-Math.pow((t - 15.6) / 0.22, 2));
+  chipPulse.scale.setScalar(4 + 8 * seg(t, 15.4, 16.2));
+  boundaryMat.opacity = 0.5 * seg(t, 5.6, 6.2);
+  for (const c of comps) {
+    // pick & place: drop in from above, land with a tiny settle
+    const k = seg(t, c.t0, c.t0 + 0.42);
+    c.g.visible = k > 0;
+    c.g.position.y = c.baseY + 1.4 * (1 - E.outCubic(k)) - 0.012 * Math.sin(Math.PI * seg(t, c.t0 + 0.3, c.t0 + 0.5));
+    if (c.tag) {
+      const a = Math.min(seg(t, c.t0 + 0.5, c.t0 + 0.9), 1 - seg(t, 6.3, 6.7));
+      c.tag.spr.material.opacity = a; c.tag.line.material.opacity = a * 0.8;
+      c.tag.spr.visible = c.tag.line.visible = a > 0.001;
+    }
+  }
+
+  // ---- encrypted IP: fly in, hit shield, knocked out, greyed
+  if (t < HIT) {
+    const k = E.inQuad(seg(t, 5.5, HIT));
+    encIP.position.lerpVectors(ENC_FROM, ENC_HIT, k);
+    encIP.rotation.set(0.3 + 2.5 * (1 - k), -0.7 - 1.5 * (1 - k), 0.4);
+  } else {
+    const k = E.outCubic(seg(t, HIT, HIT + 0.9));
+    encIP.position.lerpVectors(ENC_HIT, ENC_REST, k);
+    encIP.position.y += Math.sin(k * Math.PI) * 0.9;
+    encIP.rotation.set(0.3 + 0.4 * k, -0.7 + 0.35 * k, 0.4 - 0.3 * k);
+  }
+  const hot = t < HIT ? seg(t, 5.5, HIT) : 1 - seg(t, HIT, HIT + 0.8);
+  encMat.emissiveIntensity = 0.6 * hot; encIP.userData.faces.emissiveIntensity = 0.35 * hot;
+  encIP.visible = t > 5.4;
+  shieldMat.opacity = 0.55 * Math.exp(-Math.pow((t - HIT - 0.05) / 0.18, 2));
+  // "no" sign
+  const kNo = seg(t, HIT + 0.05, HIT + 0.5);
+  noSign.visible = kNo > 0;
+  encIP.getWorldPosition(noSign.position);
+  noSign.position.add(tmpV.copy(camera.position).sub(noSign.position).normalize().multiplyScalar(1.4));
+  noSign.quaternion.copy(camera.quaternion);
+  noSign.scale.setScalar(Math.max(0.001, E.outBack(kNo, 2.0)));
+  // green open source emblem: pops in after the knock-out, then stays (pinned to the frame)
+  {
+    // rises from the "no" sign (green replaces red), then glides to its spot in the frame
+    const kF = seg(t, 6.95, 7.5), D = 15, vh = 2 * D * Math.tan(camera.fov * Math.PI / 360), vw = vh * camera.aspect;
+    const pin = camera.position.clone().add(new THREE.Vector3(0.36 * vw, -0.16 * vh, -D).applyQuaternion(camera.quaternion));
+    const from = noSign.position.clone().add(tmpV.copy(camera.position).sub(noSign.position).normalize().multiplyScalar(0.8)).add(new THREE.Vector3(0, 1.2, 0));
+    freeBadge.position.lerpVectors(from, pin, E.inOutCubic(seg(t, 7.55, 8.5)));
+    freeBadge.scale.setScalar(Math.max(0.001, 0.2 * vh * E.outBack(kF, 1.8)));
+    freeBadge.material.opacity = clamp(kF * 3);
+    freeGlow.position.copy(freeBadge.position);
+    freeGlow.scale.setScalar(0.34 * vh);
+    freeGlow.material.opacity = kF > 0 ? 0.25 + 0.6 * Math.exp(-Math.pow((t - 7.3) / 0.25, 2)) + 0.05 * Math.sin(T * 2.5) : 0;
+    freeBadge.visible = freeGlow.visible = kF > 0;
+  }
+
+  // ---- code panel slides in, types
+  const kCode = E.outExpo(seg(t, 8.0, 8.6));
+  { // pinned to the lower-left of the frame so it never gets cropped by camera moves
+    const D = 15, vh = 2 * D * Math.tan(camera.fov * Math.PI / 360), vw = vh * camera.aspect;
+    const pw = 5.2 * 0.8, ph = pw * CH / 1400;
+    const x = -vw / 2 + 0.035 * vw + pw / 2 - (1 - kCode) * vw * 0.6, y = -vh / 2 + 0.085 * vh + ph / 2;
+    code.position.copy(camera.position).add(new THREE.Vector3(x, y, -D).applyQuaternion(camera.quaternion));
+    code.quaternion.copy(camera.quaternion).multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.05, 0.2, 0)));
+  }
+  code.visible = t > 7.95;
+  // typing schedule: lines 0..8 between 8.5 and 13.8, build line 14.5..15.2
+  const TY0 = 8.5, TY1 = 13.9;
+  const total = CODE_LEN.slice(0, BI - 1).reduce((a, b) => a + b, 0);
+  let chars = Math.floor(clamp((t - TY0) / (TY1 - TY0)) * total);
+  const bchars = Math.floor(clamp((t - 14.5) / 0.7) * CODE_LEN[BI]);
+  if (t >= 14.5) chars = total + bchars;
+  // when each line finishes
+  const lineDone = []; { let acc = 0; for (let i = 0; i < CODE.length; i++) { acc += CODE_LEN[i]; lineDone.push(i < BI - 1 ? TY0 + (acc / total) * (TY1 - TY0) : 14.5 + 0.7); } }
+  const progress = seg(t, 15.2, 15.6);
+  const typingLine = CODE_LEN.findIndex((_, i) => chars < CODE_LEN.slice(0, i + 1).reduce((a, b) => a + b, 0));
+  const cState = { chars, lineOn: t < 15.8 ? typingLine : -1, progress: +progress.toFixed(2), cursor: (Math.floor(t * 3) % 2) && t < 15.2, out: t >= 15.2 ? 1 : 0 };
+  if (inROM) {
+    const lines = T < ROM_T - 0.3 ? clamp(Math.floor((T - RB0 - 0.2) / 0.45) + 1, 0, 2) : 3;
+    Object.assign(cState, { rom: 1, lines, cursor: Math.floor(T * 3) % 2, loaded: T > ROM_T + 0.3 ? 1 : 0 });
+  } else if (inAI) {
+    const al = AGENT.length, ta = T - AI0 - 0.35;
+    Object.assign(cState, { agent: 1, lines: clamp(Math.floor(ta / 0.55) + 1, 0, al), cursor: Math.floor(T * 3) % 2, frame: T > AI0 + 1.2 ? 1 : 0 });
+  }
+  const cKey = JSON.stringify(cState);
+  if (cKey !== lastCode) { codeTex.redraw(cState); lastCode = cKey; }
+
+  // ---- tiles fly from their code line to the arch
+  scene.updateMatrixWorld(true);
+  tiles.forEach((T, i) => {
+    const li = CODE.findIndex(l => l.tile === i);
+    const t0 = lineDone[li], dur = T.core.dash ? 0.8 : 0.6;
+    const k = seg(t, t0, t0 + dur);
+    T.tile.visible = t >= t0;
+    const from = codeLineAnchor(li);
+    const kk = T.core.dash ? E.outCubic(k) : E.outBack(k, 1.3);
+    const ctrl = from.clone().lerp(T.target, 0.5).add(new THREE.Vector3(0, 2.5, 0));
+    const p = new THREE.QuadraticBezierCurve3(from, ctrl, T.target).getPoint(clamp(kk, 0, 1.2));
+    if (kk > 1) p.copy(T.target).add(T.target.clone().sub(ctrl).normalize().multiplyScalar((kk - 1) * 0.6));
+    T.tile.position.copy(p);
+    T.tile.lookAt(camera.position);
+    T.tile.rotateZ((1 - E.outCubic(k)) * 1.2);
+    T.tile.scale.setScalar(lerp(0.3, 0.74, E.outCubic(k)));
+    // bus grows after landing
+    const kb = E.outCubic(seg(t, t0 + dur * 0.7, t0 + dur * 0.7 + 0.35));
+    const idx = T.tube.geometry.index.count;
+    T.tube.geometry.setDrawRange(0, Math.floor(idx * kb / 6) * 6);
+    // ghost tile brightens during "possibilities"
+    const ghost = T.core.dash ? lerp(0.45, 1, seg(t, 17.6, 18.4)) : 1;
+    T.face.material.opacity = ghost;
+    T.glow.material.opacity = (0.45 * Math.exp(-Math.pow((t - t0 - dur) / 0.25, 2))) + (T.core.dash ? 0.25 * seg(t, 17.6, 18.4) * (0.8 + 0.2 * Math.sin(t * 3)) : 0);
+    // data particles flowing to chip after boot
+    const flow = seg(t, 15.6, 16.2);
+    T.dots.forEach((d, j) => {
+      const u = 1 - (((T - 15.6) * 0.45 + j / T.dots.length + i * 0.13) % 1 + 1) % 1;
+      d.position.copy(T.curve.getPoint(u));
+      d.material.opacity = flow * Math.sin(u * Math.PI) * (T.core.dash ? 0.5 : 1);
+      d.visible = flow > 0;
+    });
+  });
+
+  updateLink(T);
+  // start button pressed by the agent
+  if (window.startBtn) window.startBtn.position.z = FZ + 0.04 - 0.07 * Math.exp(-Math.pow((T - PRESS_T - 0.15) / 0.12, 2));
+  // ---- dust
+  for (let i = 0; i < dust.n; i++) {
+    const [x, y, z, ph, sp] = dust.seeds[i];
+    dust.pos[i * 3] = x + Math.sin(T * sp + ph) * 0.4; dust.pos[i * 3 + 1] = y + ((T * sp * 0.15 + ph) % 1) * 0.8; dust.pos[i * 3 + 2] = z + Math.cos(T * sp * 0.7 + ph) * 0.4;
+  }
+  dust.geo.attributes.position.needsUpdate = true;
+
+  // ---- overlay
+  const cap = CAPTIONS.find(([a, b]) => T >= a - 0.1 && T <= b + 0.25);
+  const capEl = $('caption');
+  if (cap && !STILL) {
+    capEl.innerHTML = cap[2]; capEl.style.left = t > 7.9 ? '34vw' : '0';
+    const kin = E.outExpo(seg(T, cap[0], cap[0] + 0.35)), kout = 1 - seg(T, cap[1], cap[1] + 0.22);
+    show(capEl, Math.min(kin, kout), 16);
+  } else capEl.style.opacity = 0;
+  $('capbg').style.opacity = STILL ? 0 : 1 - seg(t, 19.3, 19.8);
+  const hero = [['title', 19.5], ['sub', 19.6], ['pills', 19.7], ['litex', 19.8], ['cta', 20.0], ['credits', 20.2]];
+  for (const [id, a0] of hero) show($(id), E.outExpo(seg(t, a0, a0 + 0.45)), 14);
+  const fadeIn = 1 - seg(t, 0, 0.5), fadeOut = E.inCubic(seg(t, 22.55, 23.0));
+  $('fade').style.opacity = STILL ? 0 : Math.max(fadeIn, fadeOut);
+  if (!STILL) $('overlay').querySelectorAll('#title,#sub,#pills,#litex,#cta,#credits').forEach(el => el.style.opacity = Math.min(+el.style.opacity, 1 - seg(t, 22.4, 22.8)));
+
+  finish.uniforms.uTime.value = T;
+  bloom.strength = 0.6 + 0.5 * Math.exp(-Math.pow((t - 15.6) / 0.25, 2));
+  composer.render();
+};
+await document.fonts.ready;
+window.renderAt(+(Q.get('t') || HERO_T));
+window.sceneReady = true;
+</script>
+</body>
+</html>

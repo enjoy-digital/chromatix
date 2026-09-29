@@ -1,0 +1,6 @@
+{
+  "name": "chromatix-illustration",
+  "private": true,
+  "description": "Headless rendering of the ChromatiX promo video/stills",
+  "dependencies": { "puppeteer-core": "^23.0.0" }
+}

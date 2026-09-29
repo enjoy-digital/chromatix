@@ -6,3 +6,6 @@ __pycache__
 *.csv
 /doc/illustration/node_modules/
 /doc/illustration/package-lock.json
+/doc/images/*.mp4
+/doc/images/*-hires.jpg
+/doc/images/*-notext.jpg

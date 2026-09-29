@@ -82,10 +82,30 @@ int main(void)
 #endif
 	uart_init();
 
-	printf("\n");
-	printf("ChromatiX demo (%d MHz CPU)\n", CONFIG_CLOCK_FREQUENCY/1000000);
-	printf("Buttons: notes, Menu: melody,\n");
-	printf("Start+Select: back to BIOS.\n\n");
+	/* Screen (LCD terminal, previous output scrolled away): 21 lines, then the buttons line. */
+	static const char *screen[] = {
+		"+-------------------------------------+",
+		"|  ChromatiX demo   LiteX / RISC-V    |",
+		"|  VexRiscv @ 33 MHz, PSRAM main RAM  |",
+		"+-------------------------------------+",
+		"",
+		" Buttons play notes (speaker, USB",
+		" audio), Menu plays a melody,",
+		" Start+Select: back to the BIOS.",
+		"",
+		"       [^]               (B)  (A)",
+		"    [<]   [>]",
+		"       [v]         [SEL] [START]",
+		"",
+		"  A  C5    B  D5    v  E5    <  F5",
+		"  >  G5    ^  A5   SEL B5  START C6",
+		"",
+		"", "", "", "", "",
+	};
+	for (int i = 0; i < 24; i++)
+		printf("\n");
+	for (unsigned i = 0; i < sizeof(screen)/sizeof(screen[0]); i++)
+		printf("%s\n", screen[i]);
 
 	for (;;) {
 		buttons = demo_buttons_status_read();

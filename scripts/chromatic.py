@@ -277,7 +277,10 @@ def main():
             save = open(args.save, "rb").read() if args.save else None
             t0   = time.time()
             cfg  = chromatic.load_rom(rom, save)
-            print(f"{rom_title(rom)}: {len(rom)} bytes loaded in {time.time() - t0:.1f}s ({cfg}).")
+            mbc  = {0: "ROM only", 1: "MBC1", 2: "MBC2", 3: "MBC3", 5: "MBC5"}[cfg["mbc"]]
+            ram  = VCART_RAM_SIZES.get(rom[0x149], 0)
+            print(f"{rom_title(rom)}: {len(rom)//1024}KB loaded in {time.time() - t0:.1f}s ({mbc}" +
+                (f", RAM {ram//1024}KB" if ram else "") + ").")
         elif args.command == "save":
             rom  = open(args.rom, "rb").read()
             data = chromatic.read_save(rom)

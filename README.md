@@ -1,14 +1,21 @@
 # ChromatiX
 
-The [ModRetro Chromatic](https://modretro.com/products/chromatic) FPGA design (Gowin GW5A-25), rebuilt
-with [LiteX](https://github.com/enjoy-digital/litex):
+[![ChromatiX: the ModRetro Chromatic FPGA rebuilt with LiteX](doc/images/chromatix.jpg)](https://github.com/enjoy-digital/chromatix/releases/download/media/chromatix.mp4)
+
+<sub>▶ Click the image for the [promo video](https://github.com/enjoy-digital/chromatix/releases/download/media/chromatix.mp4) (rendered with three.js from [`doc/illustration`](doc/illustration); video and hi-res stills in the [media release](https://github.com/enjoy-digital/chromatix/releases/tag/media)).</sub>
+
+The [ModRetro Chromatic](https://modretro.com/products/chromatic) FPGA design (Gowin GW5A-25), freed
+and rebuilt with [LiteX](https://github.com/enjoy-digital/litex) (ChromatiX: Chromatic + LiteX):
 
 - **One Python script** (`chromatix.py`) replaces the Gowin TCL project.
 - **No encrypted/vendor IP**: PLLs, FIFOs, CSC, PSRAM, video, system monitor and USB (PHY + device)
   are open LiteX/Migen cores or [LUNA](https://github.com/greatscottgadgets/luna); only the MiSTer
   Game Boy core stays in Verilog.
-- **Same features as the original**, plus UVC capture at 320x288 (exact 2x2) and a debug bridge
-  (virtual buttons + UVC video) for automated/agentic testing.
+- **Upstream**: the USB 2.0 soft PHY and the OPI PSRAM controller written for this design are part of
+  LiteX, and the Chromatic is a [litex-boards](https://github.com/litex-hub/litex-boards) target.
+- **Same features as the original**, plus UVC capture at 320x288 (exact 2x2), a debug bridge (virtual
+  buttons + UVC video) for automated/agentic testing, a **virtual cartridge** (Game Boy ROMs loaded
+  from the PC, no cartridge needed) and a LiteX BIOS/RISC-V firmware mode.
 
 ## Architecture
 
