@@ -37,6 +37,20 @@ UVC_DEVICE = "/dev/video0" # Default, when the Chromatic UVC device is not found
 UVC_WIDTH  = 160
 UVC_HEIGHT = 144
 
+# Virtual cartridge (see chromatix/gateware/vcart.py).
+PSRAM_BASE    = 0x40000000
+VCART_ROM     = 0x400000
+VCART_RAM     = 0x780000
+VCART_ROM_MAX = VCART_RAM - VCART_ROM
+VCART_MBC     = {
+    **{t: 0 for t in [0x00]},                         # ROM only.
+    **{t: 1 for t in [0x01, 0x02, 0x03]},             # MBC1.
+    **{t: 2 for t in [0x05, 0x06]},                   # MBC2.
+    **{t: 3 for t in [0x0f, 0x10, 0x11, 0x12, 0x13]}, # MBC3 (RTC not supported).
+    **{t: 5 for t in range(0x19, 0x1f)},              # MBC5.
+}
+VCART_RAM_SIZES = {0: 0, 1: 2048, 2: 8192, 3: 32768, 4: 131072, 5: 65536} # Header code -> bytes.
+
 STATUS_FIELDS = ["bist_done", "bist_failed", "lcd_init_done", "menu_disabled", "low_battery", "bat_is_li", "headphones"]
 
 # Chromatic ----------------------------------------------------------------------------------------
@@ -84,6 +98,64 @@ class Chromatic:
         self.set_buttons(buttons)
         time.sleep(duration)
         self.set_buttons([])
+
+    # Virtual Cartridge.
+    def vcart_control(self, enable, hold, flush=0, mbc=0, rom_mask=0, ram_mask=0):
+        self.bus.regs.vcart_csr_control.write(
+            (enable << 0) | (hold << 1) | (flush << 2) | (mbc << 4) | (rom_mask << 8) | (ram_mask << 20))
+
+    def write_psram(self, address, data, chunk=64):
+        data = bytes(data) + bytes(-len(data) % 4)
+        words = [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
+        for i in range(0, len(words), chunk):
+            self.bus.write(PSRAM_BASE + address + 4*i, words[i:i + chunk])
+
+    def read_psram(self, address, length, chunk=64):
+        data = b""
+        for i in range(0, (length + 3)//4, chunk):
+            n = min(chunk, (length + 3)//4 - i)
+            data += b"".join(w.to_bytes(4, "little") for w in self.bus.read(PSRAM_BASE + address + 4*i, n))
+        return data[:length]
+
+    def load_rom(self, rom, save=None):
+        """Run a ROM from the virtual cartridge (optionally with its cartridge RAM/save content)."""
+        cfg = rom_config(rom)
+        self.vcart_control(enable=0, hold=1)
+        self.write_psram(VCART_ROM, rom)
+        if save is not None:
+            self.write_psram(VCART_RAM, save[:VCART_RAM_SIZES[rom[0x149]] or len(save)])
+        self.vcart_control(enable=1, hold=1, flush=1, **cfg)
+        time.sleep(0.01)
+        self.vcart_control(enable=1, hold=0, **cfg)
+        return cfg
+
+    def read_save(self, rom):
+        size = VCART_RAM_SIZES.get(rom[0x149], 0) or (512 if rom_config(rom)["mbc"] == 2 else 0)
+        return self.read_psram(VCART_RAM, size)
+
+    def unload_rom(self):
+        """Back to the physical cartridge."""
+        self.vcart_control(enable=0, hold=1)
+        time.sleep(0.01)
+        self.vcart_control(enable=0, hold=0)
+
+# ROM Header ---------------------------------------------------------------------------------------
+
+def rom_config(rom):
+    """Virtual cartridge configuration from the ROM header (MBC, ROM/RAM bank masks)."""
+    if len(rom) < 0x150:
+        raise ValueError("Not a Game Boy ROM (too small).")
+    if len(rom) > VCART_ROM_MAX:
+        raise ValueError(f"ROM too large ({len(rom)} bytes, max {VCART_ROM_MAX}).")
+    if rom[0x147] not in VCART_MBC:
+        raise ValueError(f"Unsupported cartridge type 0x{rom[0x147]:02x} (ROM only, MBC1/2/3/5).")
+    banks    = max(2, (len(rom) + 0x3fff)//0x4000)
+    rom_mask = (1 << (banks - 1).bit_length()) - 1
+    ram_mask = {3: 0x3, 4: 0xf, 5: 0x7}.get(rom[0x149], 0)
+    return {"mbc": VCART_MBC[rom[0x147]], "rom_mask": rom_mask, "ram_mask": ram_mask}
+
+def rom_title(rom):
+    return rom[0x134:0x143].split(b"\x00")[0].decode("ascii", errors="replace").strip()
 
 # Capture ------------------------------------------------------------------------------------------
 
@@ -170,6 +242,16 @@ def main():
     p.add_argument("--scale",  default=1, type=int,   help="Scale factor.")
     p.add_argument("--size",   default="160x144",     help="UVC frame size (160x144 or 320x288).")
 
+    p = subparsers.add_parser("load-rom", help="Run a ROM from the virtual cartridge (PSRAM).")
+    p.add_argument("rom",            help="Game Boy ROM file (.gb/.gbc).")
+    p.add_argument("--save", default=None, help="Cartridge RAM content to restore (.sav).")
+
+    p = subparsers.add_parser("save", help="Read the virtual cartridge RAM (save) to a file.")
+    p.add_argument("rom",  help="Running ROM file (for the RAM size).")
+    p.add_argument("file", help="Output .sav file.")
+
+    subparsers.add_parser("unload", help="Back to the physical cartridge.")
+
     p = subparsers.add_parser("sequence", help="Run a sequence (ex: \"press:start wait:2 capture:x.png\").")
     p.add_argument("sequence", help="Space-separated steps (press:a+b[@duration], buttons:a+b, wait:s, capture:file).")
 
@@ -190,6 +272,19 @@ def main():
             chromatic.press(args.buttons, args.duration)
         elif args.command == "sequence":
             run_sequence(chromatic, args.sequence)
+        elif args.command == "load-rom":
+            rom  = open(args.rom, "rb").read()
+            save = open(args.save, "rb").read() if args.save else None
+            t0   = time.time()
+            cfg  = chromatic.load_rom(rom, save)
+            print(f"{rom_title(rom)}: {len(rom)} bytes loaded in {time.time() - t0:.1f}s ({cfg}).")
+        elif args.command == "save":
+            rom  = open(args.rom, "rb").read()
+            data = chromatic.read_save(rom)
+            open(args.file, "wb").write(data)
+            print(f"{len(data)} bytes saved to {args.file}.")
+        elif args.command == "unload":
+            chromatic.unload_rom()
     finally:
         # Release the virtual buttons (also on errors/Ctrl-C).
         if args.command in ["press", "sequence"]:

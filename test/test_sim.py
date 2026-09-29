@@ -87,3 +87,26 @@ def test_sim_buttons(sim_build):
         presses=parse_button_sequence("a@40+5"))
     assert stripes(ppms[1]) == [WHITE, BLACK, WHITE, BLACK] # Frame 30.
     assert stripes(ppms[2]) == [BLACK, WHITE, BLACK, WHITE] # Frame 60.
+
+# Simulation (Virtual Cartridge) -------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def sim_build_vcart(tmp_path_factory):
+    if shutil.which("verilator") is None or shutil.which("ghdl") is None:
+        pytest.skip("Verilator/GHDL not installed.")
+    sim      = load_sim()
+    gateware = str(tmp_path_factory.mktemp("sim_vcart") / "gateware")
+    sim.build_sim(gateware, make_test_rom(), vcart=True)
+    return sim, gateware
+
+def test_sim_vcart_rom_only(sim_build_vcart):
+    """ROM served by the virtual cartridge (PSRAM model with latency, cache misses freeze the core)."""
+    sim, gateware = sim_build_vcart
+    ppms = sim.run_sim(gateware, make_test_rom(), frames=31, every=30)
+    assert stripes(ppms[-1]) == [WHITE, BLACK, WHITE, BLACK]
+
+def test_sim_vcart_mbc1(sim_build_vcart):
+    """Virtual cartridge MBC1 (configured from the ROM header): bank 2 selects the inverted palette."""
+    sim, gateware = sim_build_vcart
+    ppms = sim.run_sim(gateware, make_test_rom(mbc1=True), frames=31, every=30)
+    assert stripes(ppms[-1]) == [BLACK, WHITE, BLACK, WHITE]

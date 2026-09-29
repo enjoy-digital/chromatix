@@ -54,8 +54,25 @@ module emu_system_top
     output [14:0]       gb_lcd_data,
     output [1:0]        gb_lcd_mode,
     output              gb_lcd_on,
-    output              gb_lcd_vsync
-    
+    output              gb_lcd_vsync,
+
+    // Virtual cartridge (hclk): ROM/cartridge RAM served by the FPGA (in place of the cartridge
+    // bus, kept idle), VCART_WAIT freezes the core until VCART_DATA is valid, VCART_HOLD holds the
+    // Game Boy in reset.
+    input               VCART_EN,
+    input               VCART_HOLD,
+    input               VCART_WAIT,
+    input   [7:0]       VCART_DATA,
+    output  [15:0]      VCART_A,
+    output              VCART_RD,
+    output              VCART_WR,
+    output  [7:0]       VCART_DOUT,
+    output              VCART_NCS,
+    output              VCART_DMA,
+    output              VCART_CE,
+    output              VCART_CE_2X,
+    output              VCART_SPEED,
+    output              VCART_RESET
 );
 
     parameter SRSIZE = 15;
@@ -167,12 +184,15 @@ module emu_system_top
     wire [2:0] TSTATEo;
     wire sleep_savestate;
 
+    wire cart_wait = VCART_EN & VCART_WAIT;
+
     speedcontrol u_speedcontrol
     (
         .clk_sys     (hclk),
         .pause       (sleep_savestate),
         .speedup     (1'd0),
         .cart_act    (rd | wr),
+        .cart_wait   (cart_wait),
         .DMA_on      (1'd0),
         .ce          (ce),
         .ce_2x       (ce_2x),
@@ -204,7 +224,7 @@ module emu_system_top
         begin
             CART_RST_r1 <= CART_RST;
             CART_RST_r2 <= CART_RST_r1;
-            gbreset_ungated <= ~LCD_INIT_DONE ? 1'b1 : ~CART_RST_r2;
+            gbreset_ungated <= (~LCD_INIT_DONE | VCART_HOLD) ? 1'b1 : ~CART_RST_r2;
             if(~ce_2x_r1 & ce_2x & ce)
                 gbreset <= gbreset_ungated;
                 
@@ -216,6 +236,23 @@ module emu_system_top
     
     wire DMA_on;
     wire hdma_active;
+    wire CART_CS_phys;
+    wire CART_RD_phys;
+    assign CART_CS = VCART_EN ? 1'b1 : CART_CS_phys;
+    assign CART_RD = VCART_EN ? 1'b1 : CART_RD_phys;
+
+    // Virtual cartridge bus.
+    assign VCART_A     = a;
+    assign VCART_RD    = rd;
+    assign VCART_WR    = wr;
+    assign VCART_DOUT  = CART_DOUT;
+    assign VCART_NCS   = nCS;
+    assign VCART_DMA   = DMA_on;
+    assign VCART_CE    = ce;
+    assign VCART_CE_2X = ce_2x;
+    assign VCART_SPEED = cpu_speed;
+    assign VCART_RESET = gbreset;
+
     cart u_cart
     (
        .hclk            (hclk           ),
@@ -226,7 +263,7 @@ module emu_system_top
        .cpu_speed       (cpu_speed      ),
        .cpu_halt        (cpu_halt       ),
        .cpu_stop        (cpu_stop       ),
-       .wr              (wr             ),
+       .wr              (wr & ~VCART_EN ),
        .rd              (rd             ),
        .a               (a              ),
        .CART_DOUT       (CART_DOUT      ),
@@ -237,9 +274,9 @@ module emu_system_top
                                         
        .CART_A          (CART_A         ),
        .CART_CLK        (CART_CLK       ),
-       .CART_CS         (CART_CS        ),
+       .CART_CS         (CART_CS_phys   ),
        .CART_D          (CART_D         ),
-       .CART_RD         (CART_RD        ),
+       .CART_RD         (CART_RD_phys   ),
        .CART_WR         (CART_WR        ),
        .CART_DATA_DIR_E (CART_DATA_DIR_E),
        .CART_DIN_r1     (CART_DIN_r1    )
@@ -320,7 +357,7 @@ module emu_system_top
         .ext_bus_a15(a[15]),
         .cart_rd(rd),
         .cart_wr(wr),
-        .cart_do(CART_DIN_r1),
+        .cart_do(VCART_EN ? VCART_DATA : CART_DIN_r1),
         .cart_di(CART_DOUT),
         .cart_oe(cart_oe),
         .TSTATEo(TSTATEo),

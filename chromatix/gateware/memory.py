@@ -695,7 +695,8 @@ class MemorySystem(LiteXModule):
     Clock domains: xclk (controller/arbiter), fclk (PSRAM 2x clock), hclk (video), qspi/qspi_n
     (QSPI_CLK rising/falling edges, created here).
     """
-    def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64):
+    def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64,
+        with_vcart=False):
         self.reset        = Signal()
         self.menu_init    = Signal()
         self.bist_done    = Signal()
@@ -733,7 +734,7 @@ class MemorySystem(LiteXModule):
             self.cd_psram.rst.eq(self.reset),
             self.cd_psram2x.clk.eq(ClockSignal("fclk")),
         ]
-        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus))
+        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus + with_vcart))
         cd_psram = {"sys": "psram", "sys2x": "psram2x"}
         self.phy   = phy   = ClockDomainsRenamer(cd_psram)(OPIPSRAMPHY(psram_pads))
         self.psram = psram = ClockDomainsRenamer(cd_psram)(OPIPSRAMCore(phy, PSRAM_CLK_FREQ))
@@ -807,6 +808,10 @@ class MemorySystem(LiteXModule):
         ]
 
         # CPU Main RAM (optional) ------------------------------------------------------------------
+        # Virtual Cartridge (optional): last port, highest priority -------------------------------
+        if with_vcart:
+            self.vcart_port = ports[-1]
+
         if with_bus:
             self.bus_bridge = bus_bridge = PSRAMWishbone(ports[PORT_CPU], ctrl.dout,
                 base       = bus_base,

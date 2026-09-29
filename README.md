@@ -62,16 +62,30 @@ Notes:
 
 ## Debug / Automation
 
-`--with-debug-bridge` turns the USB CDC port into a LiteX UARTBone (instead of the ESP32 UART bridge):
-virtual buttons, status and USB debug registers (UVC counters, UTMI packet monitor) from the host.
-With the UVC video, this allows fully automated (or agentic) tests:
+`--with-debug-bridge` turns the USB CDC port into a LiteX UARTBone (instead of the ESP32 UART bridge),
+directly on the USB stream (High-Speed rate, the baudrate is ignored): virtual buttons, status, USB
+debug registers and the whole PSRAM from the host. With the UVC video, this allows fully automated
+(or agentic) tests:
 
 ```bash
 ./chromatix.py --gowin-path ~/tools/gowin_1.9.12.04/IDE --with-debug-bridge --build --flash
-litex_server --uart --uart-port /dev/ttyACM0 --uart-baudrate 115200 &
+litex_server --uart --uart-port /dev/ttyACM0 &
 ./scripts/chromatic.py press start --duration 0.2
 ./scripts/chromatic.py capture frame.png --size 320x288
 ./scripts/chromatic.py sequence "press:start wait:1.5 press:a wait:1.5 capture:menu.png"
+```
+
+### Virtual Cartridge (ROMs loaded from the PC)
+
+With the debug bridge, Game Boy/Game Boy Color ROMs can also be run without a cartridge: the ROM
+(up to 3.5MB) and the cartridge RAM are served from the PSRAM through a cache (MBC1/2/3/5, ROM only;
+the core is briefly frozen on cache misses), and the physical cartridge bus is kept idle:
+
+```bash
+./scripts/chromatic.py load-rom game.gb                  # Loaded in ~0.1s/256KB, runs immediately.
+./scripts/chromatic.py load-rom game.gb --save game.sav  # With a cartridge RAM (save) content.
+./scripts/chromatic.py save game.gb game.sav             # Cartridge RAM (save) to the PC.
+./scripts/chromatic.py unload                            # Back to the physical cartridge.
 ```
 
 ## LiteX BIOS Demo
@@ -96,8 +110,8 @@ litex_term /dev/ttyACM0 --kernel demo.bin
 ## Simulation
 
 `chromatix_sim.py` simulates the Game Boy core with Verilator (VHDL parts converted to Verilog
-with GHDL): cartridge model (ROM only, MBC1, MBC5 + RAM), scripted buttons and the LCD output captured
-as PNG frames. The ROM, frames and buttons are runtime inputs, so `--no-compile` runs another ROM or
+with GHDL): cartridge model (ROM only, MBC1, MBC5 + RAM) or virtual cartridge with a PSRAM model
+(`--vcart`), scripted buttons and the LCD output captured as PNG frames. The ROM, frames and buttons are runtime inputs, so `--no-compile` runs another ROM or
 scenario on the same build (~0.5s per Game Boy frame):
 
 ```bash

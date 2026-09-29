@@ -210,6 +210,97 @@ class SimCartridge(LiteXModule):
             d.o.eq(Mux(a[15], ram_port.dat_r, rom_port.dat_r)),
         ]
 
+# Virtual Cartridge PSRAM Port ---------------------------------------------------------------------
+
+class SimPSRAMPort(LiteXModule):
+    """
+    PSRAM memory port model for the virtual cartridge: ROM (the "cart_rom" $readmemh memory, as the
+    cartridge model) at ROM_BASE, 128KB cartridge RAM at RAM_BASE, first word `latency` cycles after
+    the request, then one word per cycle (memory port burst protocol).
+    """
+    def __init__(self, port, dout, rom, latency=16):
+        from chromatix.gateware.vcart import ROM_BASE, RAM_BASE
+
+        # # #
+
+        self.specials.cart_rom = rom_mem = Memory(8, CART_ROM_SIZE, init=list(rom_init(rom)), name="cart_rom")
+        rom_lo = rom_mem.get_port(async_read=True)
+        rom_hi = rom_mem.get_port(async_read=True)
+        self.specials.cart_ram = ram_mem = Memory(16, 65536, name="cart_ram")
+        ram = ram_mem.get_port(write_capable=True, async_read=True)
+        self.specials += rom_lo, rom_hi, ram
+
+        addr   = Signal(23)
+        count  = Signal(11)
+        rnw    = Signal()
+        timer  = Signal(max=latency + 1)
+        is_ram = Signal()
+        self.comb += [
+            is_ram.eq(addr >= RAM_BASE),
+            rom_lo.adr.eq(addr - ROM_BASE),
+            rom_hi.adr.eq(addr - ROM_BASE + 1),
+            ram.adr.eq((addr - RAM_BASE)[1:]),
+            ram.dat_w.eq(port.din),
+            dout.eq(Mux(is_ram, ram.dat_r, Cat(rom_lo.dat_r, rom_hi.dat_r))),
+        ]
+        self.fsm = fsm = FSM(reset_state="IDLE")
+        fsm.act("IDLE",
+            If(port.request,
+                NextValue(addr,  port.addr),
+                NextValue(count, port.burst_length[1:]),
+                NextValue(rnw,   port.rnw),
+                NextValue(timer, 0),
+                NextState("LATENCY"),
+            )
+        )
+        fsm.act("LATENCY",
+            NextValue(timer, timer + 1),
+            If(timer == (latency - 1),
+                NextState("DATA"),
+            )
+        )
+        fsm.act("DATA",
+            If(rnw,
+                port.dout_valid.eq(1),
+            ).Else(
+                ram.we.eq(is_ram),
+                port.write_next.eq(count != 1),
+            ),
+            NextValue(addr,  addr + 2),
+            NextValue(count, count - 1),
+            If(count == 1,
+                port.done.eq(1),
+                NextState("IDLE"),
+            )
+        )
+
+class SimVirtualCartConfig(LiteXModule):
+    """Virtual cartridge configuration from the ROM header in the "cart_rom" memory (runtime ROM)."""
+    def __init__(self, vcart, rom_mem):
+        from chromatix.gateware.vcart import MBC_NONE, MBC_MBC1, MBC_MBC2, MBC_MBC3, MBC_MBC5
+
+        # # #
+
+        hdr = [rom_mem.get_port(async_read=True, clock_domain="pclk") for _ in range(3)]
+        self.specials += hdr
+        self.comb += [p.adr.eq(0x147 + i) for i, p in enumerate(hdr)]
+        cart_type, rom_size, ram_size = [p.dat_r for p in hdr]
+        mbcs = [
+            (MBC_MBC1, [0x01, 0x02, 0x03]),
+            (MBC_MBC2, [0x05, 0x06]),
+            (MBC_MBC3, [0x0f, 0x10, 0x11, 0x12, 0x13]),
+            (MBC_MBC5, list(range(0x19, 0x1f))),
+        ]
+        self.comb += vcart.mbc_type.eq(MBC_NONE)
+        for mbc, types in mbcs:
+            self.comb += If(reduce(or_, [cart_type == t for t in types]), vcart.mbc_type.eq(mbc))
+        self.comb += [
+            vcart.enable.eq(1),
+            vcart.rom_mask.eq((2 << rom_size[0:4]) - 1),
+            Case(ram_size, {3: vcart.ram_mask.eq(0x3), 4: vcart.ram_mask.eq(0xf), 5: vcart.ram_mask.eq(0x7),
+                "default": vcart.ram_mask.eq(0)}),
+        ]
+
 # Buttons ------------------------------------------------------------------------------------------
 
 # gb_buttons.v bit order.

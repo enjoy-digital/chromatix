@@ -23,7 +23,8 @@ from migen import *
 from litex.gen import *
 from litex.gen.genlib.cdc import BusSynchronizer
 
-from litex.soc.cores.uart import RS232PHY, UARTBone
+from litex.soc.cores.uart import UARTBone
+from litex.soc.interconnect import stream
 from litex.soc.interconnect import wishbone
 from litex.soc.integration.soc import SoCRegion, MB
 from litex.soc.integration.soc_core import SoCMini
@@ -38,6 +39,7 @@ from chromatix.gateware.misc       import TickGenerator, StatusLed, ESP32Control
 from chromatix.gateware.buttons    import Buttons, BUTTONS
 from chromatix.gateware.debug      import DebugControl
 from chromatix.gateware.memory     import MemorySystem
+from chromatix.gateware.vcart      import VirtualCart, VirtualCartCSR
 from chromatix.gateware.video      import VideoPipeline
 from chromatix.gateware.lcd        import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_registers
@@ -77,6 +79,8 @@ TIMING_CONSTRAINTS = [
 
 USB_SCLK_NET = "usb_hs_clk" # USB2PHY SerDes clock divider output (120MHz).
 
+PSRAM_BASE = 0x40000000 # PSRAM on the SoC bus (debug bridge, Game Boy mode).
+
 def add_timing_constraints(platform):
     constraints = [c.replace("{{{usb_sclk}}}", "{" + USB_SCLK_NET + "}") for c in TIMING_CONSTRAINTS]
     original_build_timing_constraints = platform.toolchain.build_timing_constraints
@@ -100,10 +104,11 @@ class BaseSoC(SoCMini):
     UVC+UART, ESP32 MCU communication, battery ADC, button debouncing, and system monitoring.
     """
     def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200, uvc_frames=None,
-        with_bios=False):
+        with_bios=False, with_utmi_monitor=False):
         gclk_freq = int(33.55432e6 / 4)
         hclk_freq = int(33.55432e6 / 2)
         assert not (with_bios and with_debug_bridge) # Both use the USB CDC port.
+        with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
 
         # SoCMini (CSR bus in the sys domain = gClk) -----------------------------------------------
 
@@ -417,7 +422,19 @@ class BaseSoC(SoCMini):
 
         # Memory System ----------------------------------------------------------------------------
 
-        self.memory = memory = MemorySystem(qspi_pads=qspi, psram_pads=ps, with_bus=with_bios)
+        # PSRAM Wishbone bus: CPU main RAM (BIOS demo, upper 4MB, 64-bit lines) or host access over
+        # the debug bridge (whole PSRAM, 32-bit: ROM upload, cartridge RAM, framebuffers).
+        self.memory = memory = MemorySystem(qspi_pads=qspi, psram_pads=ps,
+            with_bus       = with_bios or with_debug_bridge,
+            bus_base       = 0x400000 if with_bios else 0x000000,
+            bus_data_width = 64       if with_bios else 32,
+            with_vcart     = with_vcart,
+        )
+
+        # Virtual Cartridge (ROM/cartridge RAM in the PSRAM, loaded from the host) -----------------
+        if with_vcart:
+            self.vcart     = vcart = VirtualCart(memory.vcart_port, memory.ctrl.dout)
+            self.vcart_csr = VirtualCartCSR(vcart)
         self.comb += [
             memory.reset.eq(memrst),
             q_menu_init.eq(memory.menu_init),
@@ -450,6 +467,14 @@ class BaseSoC(SoCMini):
                 origin = self.mem_map["main_ram"],
                 size   = 4*MB,
                 mode   = "rwx",
+            ))
+
+        # PSRAM (debug bridge): whole PSRAM (8MB) at PSRAM_BASE.
+        if with_debug_bridge and not with_bios:
+            self.bus.add_slave(name="psram", slave=memory.bus, region=SoCRegion(
+                origin = PSRAM_BASE,
+                size   = 8*MB,
+                mode   = "rw",
             ))
 
         # Emulation System -------------------------------------------------------------------------
@@ -530,6 +555,24 @@ class BaseSoC(SoCMini):
                 o_gb_lcd_on         = gb_lcd_on,
                 o_gb_lcd_vsync      = gb_lcd_vsync,
                 o_gb_lcd_data       = gb_lcd_data,
+                # Virtual Cartridge.
+                **(dict(
+                    i_VCART_EN      = vcart.enable,
+                    i_VCART_HOLD    = self.vcart_csr.hold,
+                    i_VCART_WAIT    = vcart.wait,
+                    i_VCART_DATA    = vcart.data,
+                    o_VCART_A       = vcart.a,
+                    o_VCART_RD      = vcart.rd,
+                    o_VCART_WR      = vcart.wr,
+                    o_VCART_DOUT    = vcart.din,
+                    o_VCART_DMA     = vcart.dma,
+                    o_VCART_RESET   = vcart.reset,
+                ) if with_vcart else dict(
+                    i_VCART_EN      = 0,
+                    i_VCART_HOLD    = 0,
+                    i_VCART_WAIT    = 0,
+                    i_VCART_DATA    = 0,
+                )),
             )
 
         # Link Port: LINK_SD not driven by emu_system_top.
@@ -556,8 +599,16 @@ class BaseSoC(SoCMini):
                 esp32_ctrl.usb_dtr.eq(0),
                 esp32_ctrl.usb_rts.eq(0),
             ]
+            # UARTBone on the CDC byte stream (USB rate, no UART: the host baudrate is ignored).
+            class CDCStreamPHY:
+                pass
+            cdc_phy = CDCStreamPHY()
+            self.cdc_rx = stream.ClockDomainCrossing([("data", 8)], cd_from="phy", cd_to="sys")
+            self.cdc_tx = stream.ClockDomainCrossing([("data", 8)], cd_from="sys", cd_to="phy")
+            cdc_phy.source = self.cdc_rx.source
+            cdc_phy.sink   = self.cdc_tx.sink
             self.uartbone = UARTBone(
-                phy           = RS232PHY(usb_uart, clk_freq=gclk_freq, baudrate=debug_bridge_baudrate),
+                phy           = cdc_phy,
                 clk_freq      = gclk_freq,
                 address_width = self.bus.address_width,
             )
@@ -573,8 +624,14 @@ class BaseSoC(SoCMini):
         # USB UVC+UAC+UART System ------------------------------------------------------------------
 
         self.usb = usb_dev = USBDevice(platform, clk_24, usb,
-            with_utmi_monitor = with_debug_bridge,
+            with_utmi_monitor = with_debug_bridge and with_utmi_monitor,
+            with_cdc_stream   = with_debug_bridge,
             **({} if uvc_frames is None else {"uvc_frames": uvc_frames}))
+        if with_debug_bridge:
+            self.comb += [
+                usb_dev.cdc_source.connect(self.cdc_rx.sink),
+                self.cdc_tx.source.connect(usb_dev.cdc_sink),
+            ]
         self.comb += [
             usb_dev.reset.eq(usb_rst),
             esp32_ctrl.usb_locked.eq(usb_dev.locked),
@@ -748,6 +805,7 @@ def main():
     parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,                 help="Debug bridge baudrate.")
     parser.add_argument("--uvc-sizes", default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
     parser.add_argument("--with-bios", action="store_true", help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
+    parser.add_argument("--with-utmi-monitor", action="store_true", help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
 
     # Platform.
@@ -766,6 +824,7 @@ def main():
     soc = BaseSoC(platform,
         with_debug_bridge     = args.with_debug_bridge,
         with_bios             = args.with_bios,
+        with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
     )

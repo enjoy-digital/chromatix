@@ -32,6 +32,9 @@ from litex.build.sim.config import SimConfig
 from chromatix.gateware.sources import VERILOG_PATH
 from chromatix.gateware.sim     import SIM_VERILOG_PATH, convert_vhdl, verilog_sources
 from chromatix.gateware.sim     import SimCartridge, write_rom_init, check_rom
+from chromatix.gateware.sim     import SimPSRAMPort, SimVirtualCartConfig
+from chromatix.gateware.memory  import memory_port_layout
+from chromatix.gateware.vcart   import VirtualCart
 from chromatix.gateware.sim     import parse_button_sequence, write_button_events
 
 # IOs ----------------------------------------------------------------------------------------------
@@ -46,7 +49,7 @@ _io = [
 # Simulation Top -----------------------------------------------------------------------------------
 
 class SimTop(LiteXModule):
-    def __init__(self, platform, rom):
+    def __init__(self, platform, rom, vcart=False, vcart_latency=16, vcart_hold=0):
         # Clocks: pClk from the simulation clocker, hClk = pClk/2 (as the PLL outputs).
         self.cd_pclk = ClockDomain("pclk", reset_less=True)
         self.cd_hclk = ClockDomain("hclk", reset_less=True)
@@ -75,13 +78,29 @@ class SimTop(LiteXModule):
         cart_rst = Signal()
         d        = TSTriple(8)
         self.specials += d.get_tristate(cart_d)
-        self.cartridge = ClockDomainsRenamer("pclk")(SimCartridge(rom,
-            a  = cart_a,
-            d  = d,
-            rd = cart_rd,
-            wr = cart_wr,
-            cs = cart_cs,
-        ))
+        # Virtual cartridge hold (as the host loader: Game Boy held in reset, then released).
+        vcart_hold_n  = Signal(reset=int(vcart_hold > 0))
+        vcart_hold_c  = Signal(max=max(vcart_hold, 1) + 1)
+        self.sync.hclk += If(vcart_hold_c != vcart_hold,
+            vcart_hold_c.eq(vcart_hold_c + 1),
+        ).Else(
+            vcart_hold_n.eq(0),
+        )
+        if vcart:
+            # Virtual cartridge (PSRAM port model in pClk as xClk), no cartridge.
+            port = Record(memory_port_layout())
+            dout = Signal(16)
+            self.vcart     = ClockDomainsRenamer({"xclk": "pclk"})(VirtualCart(port, dout))
+            self.psram     = ClockDomainsRenamer("pclk")(SimPSRAMPort(port, dout, rom, latency=vcart_latency))
+            self.vcart_cfg = SimVirtualCartConfig(self.vcart, self.psram.cart_rom)
+        else:
+            self.cartridge = ClockDomainsRenamer("pclk")(SimCartridge(rom,
+                a  = cart_a,
+                d  = d,
+                rd = cart_rd,
+                wr = cart_wr,
+                cs = cart_cs,
+            ))
         self.comb += cart_rst.eq(1) # Cartridge RST pulled up.
 
         # Buttons ({right, left, down, up, start, select, b, a}, from buttons.hex).
@@ -127,6 +146,24 @@ class SimTop(LiteXModule):
             o_gb_lcd_data       = gb_lcd_data,
             o_gb_lcd_mode       = gb_lcd_mode,
             o_gb_lcd_vsync      = gb_lcd_vsync,
+            # Virtual cartridge.
+            **(dict(
+                i_VCART_EN      = self.vcart.enable,
+                i_VCART_HOLD    = vcart_hold_n,
+                i_VCART_WAIT    = self.vcart.wait,
+                i_VCART_DATA    = self.vcart.data,
+                o_VCART_A       = self.vcart.a,
+                o_VCART_RD      = self.vcart.rd,
+                o_VCART_WR      = self.vcart.wr,
+                o_VCART_DOUT    = self.vcart.din,
+                o_VCART_DMA     = self.vcart.dma,
+                o_VCART_RESET   = self.vcart.reset,
+            ) if vcart else dict(
+                i_VCART_EN      = 0,
+                i_VCART_HOLD    = 0,
+                i_VCART_WAIT    = 0,
+                i_VCART_DATA    = 0,
+            )),
         )
 
         # LCD capture (PPM frames, ends the simulation).
@@ -139,7 +176,7 @@ class SimTop(LiteXModule):
 
 # Build --------------------------------------------------------------------------------------------
 
-def build_sim(gateware_dir, rom, threads=1, trace=False):
+def build_sim(gateware_dir, rom, threads=1, trace=False, vcart=False, vcart_hold=0):
     platform = SimPlatform("SIM", _io)
     for source in verilog_sources():
         platform.add_source(source)
@@ -148,7 +185,7 @@ def build_sim(gateware_dir, rom, threads=1, trace=False):
         platform.add_source(os.path.join(SIM_VERILOG_PATH, source))
     sim_config = SimConfig()
     sim_config.add_clocker("sys_clk", freq_hz=PCLK_FREQ)
-    platform.build(SimTop(platform, rom),
+    platform.build(SimTop(platform, rom, vcart=vcart, vcart_hold=vcart_hold),
         build_dir   = gateware_dir,
         sim_config  = sim_config,
         opt_level   = "O3",
@@ -190,6 +227,8 @@ def main():
     parser.add_argument("--threads",    default=1,   type=int, help="Verilator threads.")
     parser.add_argument("--trace",      action="store_true",   help="Enable waveform tracing (VCD).")
     parser.add_argument("--no-compile", action="store_true",   help="Run on the previous build (any ROM/frames/buttons).")
+    parser.add_argument("--vcart",      action="store_true",   help="Virtual cartridge (ROM served from a PSRAM model).")
+    parser.add_argument("--vcart-hold", default=0, type=int,   help="Virtual cartridge: Game Boy held in reset for N hClk cycles.")
     args = parser.parse_args()
 
     with open(args.rom, "rb") as f:
@@ -203,7 +242,8 @@ def main():
 
     # Build / Run.
     if not args.no_compile:
-        build_sim(gateware_dir, rom, threads=args.threads, trace=args.trace)
+        build_sim(gateware_dir, rom, threads=args.threads, trace=args.trace, vcart=args.vcart,
+            vcart_hold=args.vcart_hold)
     ppms = run_sim(gateware_dir, rom, frames=args.frames, every=args.every, presses=presses)
 
     # Frames -> PNG.

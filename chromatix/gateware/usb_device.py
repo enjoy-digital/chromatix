@@ -43,7 +43,8 @@ class USBDevice(LiteXModule):
     USB composite device (UVC + UAC + CDC-ACM) with its own PLL (clk_24 -> 60MHz "phy" / 960MHz
     "usb_960"), LUNA USB 2.0 device core and LiteX UTMI PHY (USB2PHY).
     """
-    def __init__(self, platform, clk_24, pads, uvc_frames=VIDEO_FRAMES, with_utmi_monitor=False):
+    def __init__(self, platform, clk_24, pads, uvc_frames=VIDEO_FRAMES, with_utmi_monitor=False,
+        with_cdc_stream=False):
         self.reset       = Signal() # Held in reset (PLL too) when 1 (async).
         self.locked      = Signal()
         self.player_num  = Signal(8)
@@ -60,6 +61,10 @@ class USBDevice(LiteXModule):
         self.uart_rxd    = Signal()
         self.uart_dtr    = Signal()
         self.uart_rts    = Signal()
+        # CDC byte stream (phy, with_cdc_stream: in place of the UART): source (host -> device),
+        # sink (device -> host).
+        self.cdc_source  = stream.Endpoint([("data", 8)])
+        self.cdc_sink    = stream.Endpoint([("data", 8)])
 
         # # #
 
@@ -230,30 +235,42 @@ class USBDevice(LiteXModule):
         ]
 
         # CDC-ACM (EP3) + UART ---------------------------------------------------------------------
-        self.uart = uart = ClockDomainsRenamer("phy")(CDCUART())
         self.uart_rx_fifo = rx_fifo = ClockDomainsRenamer("phy")(ResetInserter()(
             stream.SyncFIFO([("data", 8)], 64)))
         self.comb += [
-            uart.reset.eq(usbrst | rst),
-            uart.baudrate.eq(ctrl_uart.dte_rate),
-            # USB -> UART (bytes accepted when the UART FIFO is ready: CDCUART has no ready handshake).
-            uart.tx_data.eq(luna.ep3_out_data),
-            uart.tx_valid.eq(luna.ep3_out_valid & uart.tx_ready),
-            luna.ep3_out_ready.eq(uart.tx_ready),
-            # UART -> USB (flushed when no more data is buffered).
+            # Device -> host (flushed when no more data is buffered).
             rx_fifo.reset.eq(usbrst | rst),
-            rx_fifo.sink.valid.eq(uart.rx_valid),
-            rx_fifo.sink.data.eq(uart.rx_data),
             luna.ep3_in_data.eq(rx_fifo.source.data),
             luna.ep3_in_valid.eq(rx_fifo.source.valid),
             rx_fifo.source.ready.eq(luna.ep3_in_ready),
             luna.ep3_in_flush.eq(~rx_fifo.source.valid),
             # UART control lines.
-            self.uart_txd.eq(uart.txd),
-            uart.rxd.eq(self.uart_rxd),
             self.uart_dtr.eq(ctrl_uart.ctl_sig[0]),
             self.uart_rts.eq(ctrl_uart.ctl_sig[1]),
         ]
+        if with_cdc_stream:
+            # Byte stream at the USB rate (no UART).
+            self.comb += [
+                self.cdc_source.valid.eq(luna.ep3_out_valid),
+                self.cdc_source.data.eq(luna.ep3_out_data),
+                luna.ep3_out_ready.eq(self.cdc_source.ready),
+                self.cdc_sink.connect(rx_fifo.sink),
+            ]
+        else:
+            self.uart = uart = ClockDomainsRenamer("phy")(CDCUART())
+            self.comb += [
+                uart.reset.eq(usbrst | rst),
+                uart.baudrate.eq(ctrl_uart.dte_rate),
+                # USB -> UART (bytes accepted when the UART FIFO is ready: no ready handshake).
+                uart.tx_data.eq(luna.ep3_out_data),
+                uart.tx_valid.eq(luna.ep3_out_valid & uart.tx_ready),
+                luna.ep3_out_ready.eq(uart.tx_ready),
+                # UART -> USB.
+                rx_fifo.sink.valid.eq(uart.rx_valid),
+                rx_fifo.sink.data.eq(uart.rx_data),
+                self.uart_txd.eq(uart.txd),
+                uart.rxd.eq(self.uart_rxd),
+            ]
 
 # UTMI Monitor -------------------------------------------------------------------------------------
 
