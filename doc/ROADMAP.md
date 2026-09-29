@@ -8,7 +8,8 @@ Verilog at build time). Next steps:
 
 - **LiteX BIOS demo** (done: `--with-bios`): a VexRiscv SoC running the LiteX BIOS, with its console
   on the LCD (and so over UVC) and on the USB CDC port, and 4MB of PSRAM as main RAM to run firmware
-  (serialboot). Next: firmware using the buttons/audio, faster CPU clock.
+  (serialboot). Done: CPU at 33MHz, firmware demo (`firmware/demo`: buttons, tone generator, LCD
+  console). Next: more firmware (games/tools using the LCD framebuffer).
 - Other cores on the Chromatic (retro cores, RISC-V SoCs, accelerators) reusing the platform, video
   pipeline, USB (UVC/UAC/CDC) and the debug/automation loop.
 

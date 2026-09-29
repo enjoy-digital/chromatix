@@ -90,8 +90,8 @@ the core is briefly frozen on cache misses), and the physical cartridge bus is k
 
 ## LiteX BIOS Demo
 
-`--with-bios` turns the Chromatic into a small LiteX dev board: a VexRiscv SoC runs the LiteX BIOS in
-place of the Game Boy core. Its console is on the USB CDC port (`litex_term /dev/ttyACM0`) and on the
+`--with-bios` turns the Chromatic into a small LiteX dev board: a VexRiscv SoC (33MHz) runs the LiteX
+BIOS in place of the Game Boy core. Its console is on the USB CDC port (`litex_term /dev/ttyACM0`) and on the
 LCD (40x24 terminal, 4x6 font), so it is also streamed over UVC. The upper 4MB of the PSRAM are the
 SoC main RAM (behind a L2 cache), so firmware can be loaded over the USB CDC port and run:
 
@@ -100,10 +100,14 @@ SoC main RAM (behind a L2 cache), so firmware can be loaded over the USB CDC por
 litex_term /dev/ttyACM0
 ./scripts/chromatic.py capture bios.png --size 320x288
 
-# Firmware (ex: LiteX demo app), loaded with the BIOS serialboot command.
-litex_bare_metal_demo --build-path build
-litex_term /dev/ttyACM0 --kernel demo.bin
+# Firmware demo (buttons: notes on the tone generator, shown on the console/LCD), loaded with the BIOS
+# serialboot command.
+make -C firmware/demo
+litex_term /dev/ttyACM0 --kernel firmware/demo/demo.bin
 ```
+
+Firmware peripherals: buttons (`demo_buttons_status`), square wave tone generator (`tone_period`,
+`tone_volume`: speaker/headphones and USB audio), timer, LCD console.
 
 <img src="doc/images/litex_bios.png" width="320" alt="LiteX BIOS on the Chromatic LCD, captured over UVC">
 

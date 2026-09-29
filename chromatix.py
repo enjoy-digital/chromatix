@@ -40,6 +40,7 @@ from chromatix.gateware.buttons    import Buttons, BUTTONS
 from chromatix.gateware.debug      import DebugControl
 from chromatix.gateware.memory     import MemorySystem
 from chromatix.gateware.vcart      import VirtualCart, VirtualCartCSR
+from chromatix.gateware.demo       import ButtonsCSR, ToneGenerator
 from chromatix.gateware.video      import VideoPipeline
 from chromatix.gateware.lcd        import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_registers
@@ -106,6 +107,9 @@ class BaseSoC(SoCMini):
     def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200, uvc_frames=None,
         with_bios=False, with_utmi_monitor=False):
         gclk_freq = int(33.55432e6 / 4)
+        pclk_freq = int(33.55432e6)
+        # LiteX "sys" domain: gClk, or pClk for the BIOS demo CPU.
+        sys_clk_freq = pclk_freq if with_bios else gclk_freq
         hclk_freq = int(33.55432e6 / 2)
         assert not (with_bios and with_debug_bridge) # Both use the USB CDC port.
         with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
@@ -122,7 +126,7 @@ class BaseSoC(SoCMini):
             with_timer           = True,
         )
         SoCMini.__init__(self, platform,
-            clk_freq      = gclk_freq,
+            clk_freq      = sys_clk_freq,
             ident         = "ChromatiX SoC" + (" (LiteX BIOS demo)" if with_bios else ""),
             ident_version = True,
             **cpu_kwargs,
@@ -130,7 +134,7 @@ class BaseSoC(SoCMini):
 
         # CRG --------------------------------------------------------------------------------------
 
-        self.crg = crg = CRG(platform)
+        self.crg = crg = CRG(platform, sys_clk="pclk" if with_bios else "gclk")
 
         # Platform Resources -----------------------------------------------------------------------
 
@@ -479,6 +483,14 @@ class BaseSoC(SoCMini):
 
         # Emulation System -------------------------------------------------------------------------
         if with_bios:
+            # Firmware peripherals: buttons, tone generator (audio in place of the Game Boy one).
+            self.demo_buttons = ButtonsCSR(btns, menu=~btn_menu_ored)
+            self.tone = tone = ToneGenerator(hclk_freq, cd="hclk")
+            self.comb += [
+                left.eq(tone.sample),
+                right.eq(tone.sample),
+            ]
+
             # LCD terminal in place of the Game Boy LCD; cartridge/IR/link idle (as when the Game Boy
             # core doesn't access them).
             self.terminal = terminal = LCDTerminal()
