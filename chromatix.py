@@ -753,24 +753,11 @@ def main():
     # Platform.
     platform = Platform(toolchain=args.toolchain)
 
-    # Gowin IDE selection (bundled libs/Qt are required for the standalone gw_sh). The bundled libs
-    # are only set for gw_sh (they break other tools, ex: Yosys used by the Amaranth/LUNA conversion).
+    # Gowin IDE selection (LiteX sets the bundled libs for gw_sh only).
     if args.gowin_path is not None:
         gowin_path = os.path.expanduser(args.gowin_path)
         os.environ["PATH"]            = os.path.join(gowin_path, "bin") + os.pathsep + os.environ["PATH"]
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
-        run_script = platform.toolchain.run_script
-        def run_script_with_gowin_libs(script):
-            ld_library_path = os.environ.get("LD_LIBRARY_PATH", None)
-            os.environ["LD_LIBRARY_PATH"] = os.path.join(gowin_path, "lib") + os.pathsep + (ld_library_path or "")
-            try:
-                return run_script(script)
-            finally:
-                if ld_library_path is None:
-                    os.environ.pop("LD_LIBRARY_PATH")
-                else:
-                    os.environ["LD_LIBRARY_PATH"] = ld_library_path
-        platform.toolchain.run_script = run_script_with_gowin_libs
     if not args.with_bios:
         add_verilog_sources(platform) # Game Boy core.
     add_timing_constraints(platform)

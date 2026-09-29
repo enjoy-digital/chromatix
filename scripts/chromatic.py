@@ -33,7 +33,7 @@ from chromatix.gateware.debug import BUTTONS
 
 # Constants ----------------------------------------------------------------------------------------
 
-UVC_DEVICE = "/dev/video0"
+UVC_DEVICE = "/dev/video0" # Default, when the Chromatic UVC device is not found by name.
 UVC_WIDTH  = 160
 UVC_HEIGHT = 144
 
@@ -87,11 +87,27 @@ class Chromatic:
 
 # Capture ------------------------------------------------------------------------------------------
 
-def capture(filename, device=UVC_DEVICE, frames=1, fps=2, scale=1, size=f"{UVC_WIDTH}x{UVC_HEIGHT}"):
+def find_uvc_device():
+    """Chromatic UVC video device (first node of the "Chromatic" V4L2 device)."""
+    try:
+        devices = subprocess.run(["v4l2-ctl", "--list-devices"],
+            capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return UVC_DEVICE
+    lines = devices.splitlines()
+    for i, line in enumerate(lines):
+        if "Chromatic" in line:
+            for node in lines[i + 1:]:
+                if node.strip().startswith("/dev/video"):
+                    return node.strip()
+    return UVC_DEVICE
+
+def capture(filename, device=None, frames=1, fps=2, scale=1, size=f"{UVC_WIDTH}x{UVC_HEIGHT}"):
     """
     Capture frame(s) from the Chromatic UVC stream (frames > 1: horizontal strip), at the native
     160x144 or at 320x288 (2x2 upscale with exact colors).
     """
+    device = device or find_uvc_device()
     width, height = [int(v) for v in size.split("x")]
     filters = [f"fps={fps}"] if frames > 1 else []
     if scale != 1:
