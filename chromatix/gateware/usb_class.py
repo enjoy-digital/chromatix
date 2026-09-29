@@ -21,7 +21,7 @@ from litex.soc.interconnect import stream
 
 from litex.soc.cores.uart import RS232PHYTX, RS232PHYRX
 
-from chromatix.gateware.usb import ColorSpaceConvertor, VideoFIFO, CSC_LATENCY
+from chromatix.gateware.usb      import ColorSpaceConvertor, VideoFIFO, CSC_LATENCY
 from chromatix.gateware.usb_desc import VIDEO_FRAMES, video_frame_size, video_transactions
 
 # Constants ----------------------------------------------------------------------------------------
@@ -42,21 +42,21 @@ EP_UART = 3
 EP_UAC  = 5
 
 # UVC.
-UVC_WIDTH            = 160
-UVC_HEIGHT           = 144
-UVC_FPS              = 60
-UVC_PACKET_SIZE      = 1024
-UVC_HEADER_SIZE      = 12
-UVC_PAYLOAD_SIZE     = UVC_PACKET_SIZE
-UVC_MAX_FRAME_SIZE   = UVC_WIDTH*UVC_HEIGHT*16//8
-UVC_FRAME_INTERVAL   = 10000000//UVC_FPS
+UVC_WIDTH             = 160
+UVC_HEIGHT            = 144
+UVC_FPS               = 60
+UVC_PACKET_SIZE       = 1024
+UVC_HEADER_SIZE       = 12
+UVC_PAYLOAD_SIZE      = UVC_PACKET_SIZE
+UVC_MAX_FRAME_SIZE    = UVC_WIDTH*UVC_HEIGHT*16//8
+UVC_FRAME_INTERVAL    = 10000000//UVC_FPS
 UVC_VS_PROBE_CONTROL  = 0x01
 UVC_VS_COMMIT_CONTROL = 0x02
-UVC_SET_CUR          = 0x01
-UVC_GET_CUR          = 0x81
-UVC_GET_MIN          = 0x82
-UVC_GET_MAX          = 0x83
-UVC_GET_DEF          = 0x87
+UVC_SET_CUR           = 0x01
+UVC_GET_CUR           = 0x81
+UVC_GET_MIN           = 0x82
+UVC_GET_MAX           = 0x83
+UVC_GET_DEF           = 0x87
 
 # UAC.
 UAC_FREQUENCY       = 44100
@@ -95,6 +95,8 @@ class _ControlHandler(LiteXModule):
         self.txdat_len = Signal(12)
         self.txdat     = Signal(8)
         self.last      = Signal() # Last byte of the data stage.
+
+        # # #
 
         # (usb_txdat_len - 16'd1) == cdata_ofs, on 16-bit (as the original).
         last_ofs = Signal(16)
@@ -177,20 +179,20 @@ class UVCControl(_ControlHandler):
         def probe(index, width, height):
             payload_size = UVC_PAYLOAD_SIZE*(video_transactions(width, height) if len(frames) > 1 else 1)
             probe = []
-            probe += [0, 0]                                                   # bmHint.
-            probe += [1]                                                      # bFormatIndex.
-            probe += [index]                                                  # bFrameIndex.
-            probe += [byte(UVC_FRAME_INTERVAL, n) for n in range(4)]          # dwFrameInterval.
-            probe += [0, 0]                                                   # wKeyFrameRate.
-            probe += [0, 0]                                                   # wPFrameRate.
-            probe += [0, 0]                                                   # wCompQuality.
-            probe += [0, 0]                                                   # wCompWindowSize.
-            probe += [0, 0]                                                   # wDelay.
+            probe += [0, 0]                                                       # bmHint.
+            probe += [1]                                                          # bFormatIndex.
+            probe += [index]                                                      # bFrameIndex.
+            probe += [byte(UVC_FRAME_INTERVAL, n) for n in range(4)]              # dwFrameInterval.
+            probe += [0, 0]                                                       # wKeyFrameRate.
+            probe += [0, 0]                                                       # wPFrameRate.
+            probe += [0, 0]                                                       # wCompQuality.
+            probe += [0, 0]                                                       # wCompWindowSize.
+            probe += [0, 0]                                                       # wDelay.
             probe += [byte(video_frame_size(width, height), n) for n in range(4)] # dwMaxVideoFrameSize.
-            probe += [byte(payload_size, n) for n in range(4)]               # dwMaxPayloadTransferSize.
-            probe += [byte(60000000, n) for n in range(4)]                   # dwClockFrequency.
-            probe += [0]                                                      # bmFramingInfo.
-            probe += [0, 0, 0]                                                # bPreferedVersion, bMin/MaxVersion.
+            probe += [byte(payload_size, n) for n in range(4)]                    # dwMaxPayloadTransferSize.
+            probe += [byte(60000000, n) for n in range(4)]                        # dwClockFrequency.
+            probe += [0]                                                          # bmFramingInfo.
+            probe += [0, 0, 0]                                                    # bPreferedVersion, bMin/MaxVersion.
             assert len(probe) == 34
             return probe
         probes = [probe(i, w, h) for i, (w, h) in enumerate(frames, start=1)]
@@ -627,19 +629,19 @@ class UVCVideo(LiteXModule):
             "default": scale_next.eq(frames[0][0]//UVC_WIDTH),
         })
 
-        r_sel      = Signal(sel_bits)
-        r_px       = Signal(line_bits + 1)
-        r_dup      = Signal(max=max(max_scale, 2))
-        r_pass     = Signal(max=max(max_scale, 2))
-        r_phase    = Signal(2)
-        r_lines    = Signal(10)
-        r_gap      = Signal(5)
-        r_enable   = Signal()
+        r_sel         = Signal(sel_bits)
+        r_px          = Signal(line_bits + 1)
+        r_dup         = Signal(max=max(max_scale, 2))
+        r_pass        = Signal(max=max(max_scale, 2))
+        r_phase       = Signal(2)
+        r_lines       = Signal(10)
+        r_gap         = Signal(5)
+        r_enable      = Signal()
         v_frame_valid = Signal()
         v_enable      = Signal()
         v_data        = Signal(18)
-        line_ready = Signal()
-        fifo_room  = Signal()
+        line_ready    = Signal()
+        fifo_room     = Signal()
         self.comb += line_ready.eq(((w_tog_s ^ r_tog) >> r_sel)[0])
 
         last_packet = Signal() # Last data of the frame buffered (packetizer).

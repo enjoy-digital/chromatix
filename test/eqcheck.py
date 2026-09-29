@@ -75,7 +75,7 @@ def eqcheck(gold_files, gold_top, gate_files, gate_top, depth=20, gold_defines=[
            if reset is not None else "") + " miter",
     ]
     ys = os.path.join(workdir, "eqcheck.ys")
-    with open(ys, "w") as f:
+    with open(ys, "w", encoding="utf-8") as f:
         f.write("\n".join(script) + "\n")
     r = subprocess.run([yosys, "-q", "-s", ys], capture_output=True, text=True, cwd=workdir)
     log = r.stdout + r.stderr
@@ -111,7 +111,7 @@ def pdr_eqcheck(gold_files, gold_top, gate_file, gate_top, gold_defines=[], gold
     src = _read(gate_file)
     src = re.sub(r"^(\s*reg\s+(?:signed\s+)?(?:\[[^\]]+\]\s*)?\w+)\s*=\s*[^;]+;", r"\1;", src, flags=re.M)
     gate_noinit = os.path.join(workdir, "gate_noinit.v")
-    with open(gate_noinit, "w") as f:
+    with open(gate_noinit, "w", encoding="utf-8") as f:
         f.write(src)
     # Wrappers with tied inputs.
     def wrapper(name, inst_of):
@@ -119,7 +119,7 @@ def pdr_eqcheck(gold_files, gold_top, gate_file, gate_top, gold_defines=[], gold
         conn = ", ".join(f".{n}({tie[n]})" if n in tie else f".{n}({n})" for d, w, n in ports)
         return f"module {name}({decl});\n  {inst_of} u({conn});\nendmodule\n"
     wrap = os.path.join(workdir, "wrappers.v")
-    with open(wrap, "w") as f:
+    with open(wrap, "w", encoding="utf-8") as f:
         f.write(wrapper("gold_w", gold_top) + wrapper("gate_w", gate_top))
     defines = " ".join([f"-D{d}" for d in gold_defines] + [f"-I{i}" for i in gold_includes])
     script  = [f"read_verilog -sv {defines} {f}" for f in gold_files]
@@ -138,7 +138,7 @@ def pdr_eqcheck(gold_files, gold_top, gate_file, gate_top, gold_defines=[], gold
         "opt -fast -keepdc", "dffunmap", "techmap", "dffunmap", "abc -g AND", "opt_clean",
         "write_aiger -zinit miter.aig",
     ]
-    with open(os.path.join(workdir, "pdr.ys"), "w") as f:
+    with open(os.path.join(workdir, "pdr.ys"), "w", encoding="utf-8") as f:
         f.write("\n".join(script) + "\n")
     r = subprocess.run(["yosys", "-q", "-s", "pdr.ys"], capture_output=True, text=True, cwd=workdir)
     if r.returncode != 0:

@@ -734,10 +734,10 @@ class SystemMonitorControl(LiteXModule):
 
         # # #
 
-        brightness     = self.brightness
-        volt           = self.volt
-        block_receive  = Signal(2)
-        lowpower_old   = Signal(4)
+        brightness    = self.brightness
+        volt          = self.volt
+        block_receive = Signal(2)
+        lowpower_old  = Signal(4)
 
         # Button sampling (2 synchronization stages + 16-bit history for D-Pad/Menu).
         def sampled(btn, with_history=False):
@@ -903,11 +903,11 @@ class SystemMonitorControl(LiteXModule):
         # Battery: type detection, averaging (256 samples), status/LEDs.
         # Type detection only counts samples >= 700 (~1.8V) and volt is only updated once the type
         # is detected (|startup_select| > 127): with a disconnected/low ADC input, volt stays at 0.
-        volt_sum      = Signal(22)
-        volt_cnt      = Signal(9)
-        blink         = Signal()
-        voltage_full  = Signal(14)
-        voltage_red   = Signal(14)
+        volt_sum     = Signal(22)
+        volt_cnt     = Signal(9)
+        blink        = Signal()
+        voltage_full = Signal(14)
+        voltage_red  = Signal(14)
         self.comb += [
             self.bat_is_li.eq(startup_select[10]),
             voltage_full.eq(Mux(self.bat_is_li, 1423, 1367)), # 3.75V Li-ion : 3.6V AA.

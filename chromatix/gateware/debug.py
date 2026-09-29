@@ -25,18 +25,18 @@ class DebugControl(LiteXModule):
     """
     def __init__(self):
         # Inputs (resynchronized to sys when needed).
-        self.bist_done       = Signal()  # xClk.
-        self.bist_failed     = Signal()  # xClk.
-        self.lcd_init_done   = Signal()  # pClk.
+        self.bist_done       = Signal()   # xClk.
+        self.bist_failed     = Signal()   # xClk.
+        self.lcd_init_done   = Signal()   # pClk.
         self.menu_disabled   = Signal()
         self.low_battery     = Signal()
         self.system_control  = Signal(16)
         self.volt            = Signal(14)
         self.adc_value       = Signal(14)
         self.bat_is_li       = Signal()
-        self.volume          = Signal(8) # hClk.
-        self.headphones      = Signal()  # hClk.
-        self.pmic_sys_status = Signal(8) # hClk.
+        self.volume          = Signal(8)  # hClk.
+        self.headphones      = Signal()   # hClk.
+        self.pmic_sys_status = Signal(8)  # hClk.
         self.uvc_hbw         = Signal()   # USB PHY clock.
         self.uvc_frame_index = Signal(8)  # USB PHY clock.
         self.uvc_hbw_count   = Signal(16) # USB PHY clock.
@@ -66,8 +66,8 @@ class DebugControl(LiteXModule):
         self._volume          = CSRStatus(8,  description="Codec volume.")
         self._pmic_sys_status = CSRStatus(8,  description="PMIC system status.")
         self._uvc_status = CSRStatus(fields=[
-            CSRField("hbw",         size=1,  offset=0,  description="UVC high-bandwidth alternate setting selected."),
-            CSRField("frame_index", size=8,  offset=8,  description="UVC committed frame (1: 320x288, 2: 160x144)."),
+            CSRField("hbw",         size=1, offset=0, description="UVC high-bandwidth alternate setting selected."),
+            CSRField("frame_index", size=8, offset=8, description="UVC committed frame (1: 320x288, 2: 160x144)."),
         ])
         self._uvc_hbw_count   = CSRStatus(16, description="UVC high-bandwidth (2048-byte) micro-frames (wraps).")
         self._uvc_frame_count = CSRStatus(16, description="UVC frames sent (wraps).")

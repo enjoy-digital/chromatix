@@ -21,8 +21,9 @@ from litex.gen.sim import run_simulation
 from chromatix.gateware import usb_class
 from chromatix.gateware.usb_class import *
 from chromatix.gateware.usb import CSC_COEFFICIENTS, CSC_FRAC_BITS
+from chromatix.gateware.usb_desc import VIDEO_FRAMES
 
-# Setup Parser (harness) ----------------------------------------------------------------------------
+# Setup Parser (harness) ---------------------------------------------------------------------------
 
 class USBSetupParser(LiteXModule):
     """Control transfers harness: SETUP header capture and data stage offset tracking (setup fields
@@ -319,7 +320,6 @@ def test_uvc_probe_commit_frames():
     """With several frames: GET_DEF returns the default frame (1: 320x288, 2 transactions),
     SET_CUR(PROBE) selects the probed frame returned by GET_CUR (frame 2: 160x144, 1 transaction),
     SET_CUR(COMMIT) sets frame_index, invalid frame indexes are ignored."""
-    from chromatix.gateware.usb_desc import VIDEO_FRAMES
     dut = ControlBench(uvc_frames=VIDEO_FRAMES)
     res = {}
 

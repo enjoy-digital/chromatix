@@ -43,7 +43,6 @@ VERILOG_SOURCES = [
     "Gameboy_MiSTer/rtl/reg_savestates.vhd",
     "Gameboy_MiSTer/rtl/hdma.v",
     "Gameboy_MiSTer/rtl/timer.v",
-
 ]
 
 def add_verilog_sources(platform):

@@ -7,8 +7,8 @@
 import os
 import re
 import shutil
-import subprocess
 import tempfile
+import subprocess
 
 import pytest
 
@@ -18,6 +18,8 @@ from litex.gen import *
 from litex.gen.sim import run_simulation
 
 from chromatix.gateware.usb_desc import USBDescriptors
+
+from test.eqcheck import export_migen, eqcheck
 
 # Simulation ---------------------------------------------------------------------------------------
 
@@ -303,15 +305,16 @@ def fetch_gold(workdir):
     # Yosys does not support part-selects of concatenations ({`MACRO}[h:l], accepted by Gowin):
     # select on 32-bit localparams instead (all macros fit in 32-bit, so values are unchanged).
     top = os.path.join(workdir, VERILOG_FILES[0])
-    src = open(top).read()
+    with open(top, encoding="utf-8") as fd:
+        src = fd.read()
     macros = sorted(set(re.findall(r"\{`(\w+)\}\[", src)))
     src = re.sub(r"\{`(\w+)\}\[", r"__\1[", src)
     decls = "".join(f"    localparam [31:0] __{m} = `{m};\n" for m in macros)
     src = src.replace("\n);\n", "\n);\n" + decls, 1)
-    with open(top, "w") as fd:
+    with open(top, "w", encoding="utf-8") as fd:
         fd.write(src)
     wrapper = os.path.join(workdir, "usb_desc_gold.v")
-    with open(wrapper, "w") as fd:
+    with open(wrapper, "w", encoding="utf-8") as fd:
         fd.write(GOLD_WRAPPER)
     return [top, wrapper]
 
@@ -323,7 +326,6 @@ def run_eqcheck(depth, workdir=None, verbose=False, gate=None):
     proof is re-run with -enable_undef -set-def-inputs so that every defined gold bit is checked
     (gold is x only for out-of-range ROM reads).
     """
-    from test.eqcheck import export_migen, eqcheck
     workdir = workdir or tempfile.mkdtemp(prefix="usb_desc_eq_")
     gold_files = fetch_gold(workdir)
     if gold_files is None:
@@ -345,9 +347,10 @@ def run_eqcheck(depth, workdir=None, verbose=False, gate=None):
     if not ok:
         return ok, log
     ys = os.path.join(workdir, "eqcheck.ys")
-    script = open(ys).read().replace("sat -verify ", "sat -verify -enable_undef -set-def-inputs ")
+    with open(ys, encoding="utf-8") as f:
+        script = f.read().replace("sat -verify ", "sat -verify -enable_undef -set-def-inputs ")
     ys = os.path.join(workdir, "eqcheck_undef.ys")
-    with open(ys, "w") as f:
+    with open(ys, "w", encoding="utf-8") as f:
         f.write(script)
     r = subprocess.run(["yosys", "-q", "-s", ys], capture_output=True, text=True, cwd=workdir)
     return r.returncode == 0, log + r.stdout + r.stderr

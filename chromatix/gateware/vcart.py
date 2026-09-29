@@ -48,14 +48,14 @@ class MBC(LiteXModule):
     """
     def __init__(self):
         # Configuration.
-        self.mbc      = Signal(3)
-        self.rom_mask = Signal(9)
-        self.ram_mask = Signal(4)
-        self.reset    = Signal()
+        self.mbc         = Signal(3)
+        self.rom_mask    = Signal(9)
+        self.ram_mask    = Signal(4)
+        self.reset       = Signal()
         # Game Boy bus.
-        self.a        = Signal(16)
-        self.wr       = Signal()
-        self.din      = Signal(8)
+        self.a           = Signal(16)
+        self.wr          = Signal()
+        self.din         = Signal(8)
         # Mapping.
         self.rom_addr    = Signal(23)
         self.ram_addr    = Signal(17)
@@ -177,8 +177,8 @@ class VirtualCart(LiteXModule):
 
         # # #
 
-        line_bits  = log2_int(lines)
-        tag_bits   = 23 - 4 - line_bits
+        line_bits = log2_int(lines)
+        tag_bits  = 23 - 4 - line_bits
 
         # MBC --------------------------------------------------------------------------------------
         self.mbc = mbc = ClockDomainsRenamer("hclk")(MBC())
@@ -211,8 +211,8 @@ class VirtualCart(LiteXModule):
         # Cache ------------------------------------------------------------------------------------
         # Tags (valid + tag), data (16-bit words, single hClk port: fills, cartridge RAM writes and
         # reads, never at the same time: the core is frozen during fills/writes).
-        tags = Memory(1 + tag_bits, lines)
-        data = Memory(16, lines*8)
+        tags      = Memory(1 + tag_bits, lines)
+        data      = Memory(16, lines*8)
         tags_rd   = tags.get_port(clock_domain="hclk")
         tags_wr   = tags.get_port(write_capable=True, clock_domain="hclk")
         data_hclk = data.get_port(write_capable=True, we_granularity=8, clock_domain="hclk")
@@ -411,12 +411,12 @@ class VirtualCartCSR(LiteXModule):
     """Virtual cartridge control/status (sys domain) for a VirtualCart (hClk)."""
     def __init__(self, vcart):
         self.control = CSRStorage(fields=[
-            CSRField("enable", size=1, offset=0,  description="Serve the ROM/RAM from the PSRAM."),
-            CSRField("hold",   size=1, offset=1,  description="Hold the Game Boy in reset."),
-            CSRField("flush",  size=1, offset=2,  pulse=True, description="Invalidate the cache."),
-            CSRField("mbc",    size=3, offset=4,  description="MBC: 0: None, 1: MBC1, 2: MBC2, 3: MBC3, 5: MBC5."),
-            CSRField("rom_mask", size=9, offset=8,  description="ROM bank mask (16KB banks)."),
-            CSRField("ram_mask", size=4, offset=20, description="RAM bank mask (8KB banks)."),
+            CSRField("enable",   size=1, offset=0,              description="Serve the ROM/RAM from the PSRAM."),
+            CSRField("hold",     size=1, offset=1,              description="Hold the Game Boy in reset."),
+            CSRField("flush",    size=1, offset=2,  pulse=True, description="Invalidate the cache."),
+            CSRField("mbc",      size=3, offset=4,              description="MBC: 0: None, 1: MBC1, 2: MBC2, 3: MBC3, 5: MBC5."),
+            CSRField("rom_mask", size=9, offset=8,              description="ROM bank mask (16KB banks)."),
+            CSRField("ram_mask", size=4, offset=20,             description="RAM bank mask (8KB banks)."),
         ])
         self.misses = CSRStatus(32, description="Cache misses.")
         self.stalls = CSRStatus(32, description="Game Boy stall cycles (hClk).")

@@ -597,7 +597,7 @@ class LineReader(LiteXModule):
             ),
         ]
 
-# PSRAM Wishbone ------------------------------------------------------------------------------------
+# PSRAM Wishbone -----------------------------------------------------------------------------------
 
 class PSRAMWishbone(LiteXModule):
     """
@@ -680,13 +680,13 @@ class PSRAMWishbone(LiteXModule):
 
 PSRAM_CLK_FREQ = 33.55432e6*2 # xclk.
 
-PORT_BIST   = 0 # PSRAM BIST (short test at startup).
-PORT_QSPI   = 1 # ESP32 QSPI writes (menu/OSD framebuffer).
-PORT_FBRD   = 2 # Game Boy framebuffer read (previous frame, for frame blending).
-PORT_FBWR   = 3 # Game Boy framebuffer write.
-PORT_FBOSD  = 4 # OSD framebuffer read.
-PORT_CPU    = 5 # CPU main RAM (optional, LiteX BIOS demo).
-PORT_COUNT  = 5
+PORT_BIST  = 0 # PSRAM BIST (short test at startup).
+PORT_QSPI  = 1 # ESP32 QSPI writes (menu/OSD framebuffer).
+PORT_FBRD  = 2 # Game Boy framebuffer read (previous frame, for frame blending).
+PORT_FBWR  = 3 # Game Boy framebuffer write.
+PORT_FBOSD = 4 # OSD framebuffer read.
+PORT_CPU   = 5 # CPU main RAM (optional, LiteX BIOS demo).
+PORT_COUNT = 5
 
 class MemorySystem(LiteXModule):
     """
@@ -697,23 +697,23 @@ class MemorySystem(LiteXModule):
     """
     def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64,
         with_vcart=False, psram_factory=None):
-        self.reset        = Signal()
-        self.menu_init    = Signal()
-        self.bist_done    = Signal()
-        self.bist_failed  = Signal()
+        self.reset       = Signal()
+        self.menu_init   = Signal()
+        self.bist_done   = Signal()
+        self.bist_failed = Signal()
 
         # Game Boy framebuffer write (hClk).
-        self.gb_new_line  = Signal()
-        self.gb_address   = Signal(23)
-        self.gb_write     = Signal()
-        self.gb_data      = Signal(16)
+        self.gb_new_line = Signal()
+        self.gb_address  = Signal(23)
+        self.gb_write    = Signal()
+        self.gb_data     = Signal(16)
 
         # Framebuffer/OSD line streams (hClk).
-        self.h_valid      = Signal()
-        self.h_hsync      = Signal()
-        self.h_vsync      = Signal()
-        self.fb_data      = Signal(16)
-        self.osd_data     = Signal(16)
+        self.h_valid     = Signal()
+        self.h_hsync     = Signal()
+        self.h_vsync     = Signal()
+        self.fb_data     = Signal(16)
+        self.osd_data    = Signal(16)
 
         # # #
 
@@ -811,11 +811,11 @@ class MemorySystem(LiteXModule):
             port.burst_length.eq(320),
         ]
 
-        # CPU Main RAM (optional) ------------------------------------------------------------------
-        # Virtual Cartridge (optional): last port, highest priority -------------------------------
+        # Virtual Cartridge (optional): last port, highest priority --------------------------------
         if with_vcart:
             self.vcart_port = ports[-1]
 
+        # CPU Main RAM (optional) ------------------------------------------------------------------
         if with_bus:
             self.bus_bridge = bus_bridge = PSRAMWishbone(ports[PORT_CPU], ctrl.dout,
                 base       = bus_base,

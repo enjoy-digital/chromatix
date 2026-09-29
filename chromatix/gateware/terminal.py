@@ -128,11 +128,11 @@ FONT_4X6 = [
 
 # Terminal -----------------------------------------------------------------------------------------
 
-TERM_COLS    = 40
-TERM_LINES   = 24
-FONT_WIDTH   = 4
-FONT_HEIGHT  = 6
-LINE_STRIDE  = 64 # Characters buffer stride (power of 2).
+TERM_COLS   = 40
+TERM_LINES  = 24
+FONT_WIDTH  = 4
+FONT_HEIGHT = 6
+LINE_STRIDE = 64 # Characters buffer stride (power of 2).
 
 # Colors (RGB555: {B, G, R}): normal, bold, green, red.
 COLORS = [
@@ -173,11 +173,11 @@ class LCDTerminal(LiteXModule):
 
         # Writer (sys) -----------------------------------------------------------------------------
         col     = Signal(max=LINE_STRIDE) # Characters after TERM_COLS are stored but not shown.
-        row     = Signal(max=TERM_LINES) # Buffer line of the cursor.
-        top     = Signal(max=TERM_LINES) # Buffer line shown at the top of the screen.
-        full    = Signal()               # All screen lines used (new lines scroll).
+        row     = Signal(max=TERM_LINES)  # Buffer line of the cursor.
+        top     = Signal(max=TERM_LINES)  # Buffer line shown at the top of the screen.
+        full    = Signal()                # All screen lines used (new lines scroll).
         color   = Signal(2)
-        param   = Signal(8)              # CSI parameter.
+        param   = Signal(8)               # CSI parameter.
         clr_col = Signal(max=TERM_COLS + 1)
         c       = sink.data
 
@@ -279,16 +279,16 @@ class LCDTerminal(LiteXModule):
             MultiReg(col, col_h, "hclk"),
         ]
 
-        phase   = Signal(2)         # hClk cycles per pixel clock.
-        dot     = Signal(max=line_dots) # Pixel clock in line.
+        phase   = Signal(2)               # hClk cycles per pixel clock.
+        dot     = Signal(max=line_dots)   # Pixel clock in line.
         line    = Signal(max=frame_lines) # Line in frame.
-        x       = Signal(8)         # Visible pixel (mode 3).
+        x       = Signal(8)               # Visible pixel (mode 3).
         text_x  = Signal(max=TERM_COLS)
         font_x  = Signal(2)
         text_y  = Signal(max=TERM_LINES)
         font_y  = Signal(3)
         buf_y   = Signal(max=TERM_LINES)
-        frame   = Signal(5)         # Frame counter (cursor blink).
+        frame   = Signal(5)               # Frame counter (cursor blink).
         visible = Signal()
         color_r = Signal(2)
         cursor  = Signal()

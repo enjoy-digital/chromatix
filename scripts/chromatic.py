@@ -139,6 +139,12 @@ class Chromatic:
         time.sleep(0.01)
         self.vcart_control(enable=0, hold=0)
 
+# Helpers ------------------------------------------------------------------------------------------
+
+def _read_file(filename):
+    with open(filename, "rb") as f:
+        return f.read()
+
 # ROM Header ---------------------------------------------------------------------------------------
 
 def rom_config(rom):
@@ -232,18 +238,18 @@ def main():
     subparsers.add_parser("status", help="Print the status registers.")
 
     p = subparsers.add_parser("press", help="Press button(s).")
-    p.add_argument("buttons", nargs="+", help=f"Buttons ({', '.join(BUTTONS)}).")
+    p.add_argument("buttons",    nargs="+",                help=f"Buttons ({', '.join(BUTTONS)}).")
     p.add_argument("--duration", default=0.1, type=float, help="Press duration (s).")
 
     p = subparsers.add_parser("capture", help="Capture UVC frame(s) (no debug bridge needed).")
-    p.add_argument("filename",                          help="Output image file.")
+    p.add_argument("filename",                        help="Output image file.")
     p.add_argument("--frames", default=1, type=int,   help="Number of frames (tiled horizontally).")
     p.add_argument("--fps",    default=2, type=float, help="Capture rate for multiple frames.")
     p.add_argument("--scale",  default=1, type=int,   help="Scale factor.")
     p.add_argument("--size",   default="160x144",     help="UVC frame size (160x144 or 320x288).")
 
     p = subparsers.add_parser("load-rom", help="Run a ROM from the virtual cartridge (PSRAM).")
-    p.add_argument("rom",            help="Game Boy ROM file (.gb/.gbc).")
+    p.add_argument("rom",                  help="Game Boy ROM file (.gb/.gbc).")
     p.add_argument("--save", default=None, help="Cartridge RAM content to restore (.sav).")
 
     p = subparsers.add_parser("save", help="Read the virtual cartridge RAM (save) to a file.")
@@ -273,8 +279,8 @@ def main():
         elif args.command == "sequence":
             run_sequence(chromatic, args.sequence)
         elif args.command == "load-rom":
-            rom  = open(args.rom, "rb").read()
-            save = open(args.save, "rb").read() if args.save else None
+            rom  = _read_file(args.rom)
+            save = _read_file(args.save) if args.save else None
             t0   = time.time()
             cfg  = chromatic.load_rom(rom, save)
             mbc  = {0: "ROM only", 1: "MBC1", 2: "MBC2", 3: "MBC3", 5: "MBC5"}[cfg["mbc"]]
@@ -282,9 +288,10 @@ def main():
             print(f"{rom_title(rom)}: {len(rom)//1024}KB loaded in {time.time() - t0:.1f}s ({mbc}" +
                 (f", RAM {ram//1024}KB" if ram else "") + ").")
         elif args.command == "save":
-            rom  = open(args.rom, "rb").read()
+            rom  = _read_file(args.rom)
             data = chromatic.read_save(rom)
-            open(args.file, "wb").write(data)
+            with open(args.file, "wb") as f:
+                f.write(data)
             print(f"{len(data)} bytes saved to {args.file}.")
         elif args.command == "unload":
             chromatic.unload_rom()

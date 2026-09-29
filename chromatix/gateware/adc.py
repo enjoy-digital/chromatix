@@ -19,7 +19,7 @@ class BatteryADC(LiteXModule):
     updated. Scaling/averaging is done by the system monitor (SystemMonitorControl).
     """
     def __init__(self, pads):
-        self.enable = Signal()   # Held in reset when 0.
+        self.enable = Signal() # Held in reset when 0.
         self.req    = Signal()
         self.ready  = Signal()
         self.value  = Signal(14)

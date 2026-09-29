@@ -21,16 +21,16 @@ stays in Migen: this module exports flat ports for:
 
 from amaranth import *
 
-from luna.gateware.usb.usb2.device                       import USBDevice
-from luna.gateware.usb.usb2.request                      import USBRequestHandler, StallOnlyRequestHandler
-from luna.gateware.usb.usb2.endpoint                     import EndpointInterface
-from luna.gateware.usb.usb2.endpoints.stream             import USBStreamInEndpoint, USBStreamOutEndpoint
+from luna.gateware.usb.usb2.device                          import USBDevice
+from luna.gateware.usb.usb2.request                         import USBRequestHandler, StallOnlyRequestHandler
+from luna.gateware.usb.usb2.endpoint                        import EndpointInterface
+from luna.gateware.usb.usb2.endpoints.stream                import USBStreamInEndpoint, USBStreamOutEndpoint
 from luna.gateware.usb.usb2.endpoints.isochronous_stream_in import USBIsochronousStreamInEndpoint
-from luna.gateware.usb.request.standard                  import StandardRequestHandler
-from luna.gateware.interface.utmi                        import UTMIInterface
+from luna.gateware.usb.request.standard                     import StandardRequestHandler
+from luna.gateware.interface.utmi                           import UTMIInterface
 
-from usb_protocol.types                                  import USBRequestType, USBStandardRequests
-from usb_protocol.emitters                               import DeviceDescriptorCollection
+from usb_protocol.types                                     import USBRequestType, USBStandardRequests
+from usb_protocol.emitters                                  import DeviceDescriptorCollection
 
 # Constants ----------------------------------------------------------------------------------------
 
@@ -109,8 +109,8 @@ class ChromaticRequestBridge(USBRequestHandler):
         pkt_len          = self._pkt_len   = Signal(8)
         pkt_count        = self._pkt_count = Signal(8)
         expecting_ack    = Signal()
-        settle           = Signal(3) # Migen handlers latency (registered lookups/answer).
-        pending          = Signal()  # Bridged SETUP received, to be started from IDLE.
+        settle           = Signal(3)  # Migen handlers latency (registered lookups/answer).
+        pending          = Signal()   # Bridged SETUP received, to be started from IDLE.
 
         m.d.usb += [
             txval_r.eq(Mux(is_get_interface, 1, self.txval)),

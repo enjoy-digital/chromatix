@@ -15,14 +15,21 @@ import shutil
 import hashlib
 import subprocess
 
-from functools import reduce
 from operator import or_
+from functools import reduce
 
 from migen import *
 
 from litex.gen import *
 
+from litex.soc.interconnect import stream
+
+from litex.soc.cores.ram.opi_psram import opi_psram_cmd_layout, opi_psram_wdata_layout
+from litex.soc.cores.ram.opi_psram import opi_psram_rdata_layout
+
 from chromatix.gateware.sources import VERILOG_PATH, VERILOG_SOURCES
+from chromatix.gateware.vcart   import ROM_BASE, RAM_BASE
+from chromatix.gateware.vcart   import MBC_NONE, MBC_MBC1, MBC_MBC2, MBC_MBC3, MBC_MBC5
 
 # VHDL -> Verilog (GHDL) ---------------------------------------------------------------------------
 
@@ -66,8 +73,10 @@ def convert_vhdl(output_dir, ghdl="ghdl"):
     os.makedirs(output_dir, exist_ok=True)
     verilog = os.path.join(output_dir, "gb_vhdl.v")
     stamp   = os.path.join(output_dir, "gb_vhdl.sha1")
-    if os.path.exists(verilog) and os.path.exists(stamp) and open(stamp).read() == digest.hexdigest():
-        return verilog
+    if os.path.exists(verilog) and os.path.exists(stamp):
+        with open(stamp, encoding="utf-8") as f:
+            if f.read() == digest.hexdigest():
+                return verilog
     if shutil.which(ghdl) is None:
         raise OSError("GHDL is required to convert the Game Boy core VHDL sources for simulation.")
 
@@ -104,9 +113,9 @@ def convert_vhdl(output_dir, ghdl="ghdl"):
             modules[top] = modules[top].replace(f"module {top}\n", f"module {top} #({params})\n", 1)
     verilog_code = "\n".join(modules.values())
     verilog_code = re.sub(r"\bdo\b", "do_", verilog_code) # SystemVerilog keyword.
-    with open(verilog, "w") as f:
+    with open(verilog, "w", encoding="utf-8") as f:
         f.write(verilog_code)
-    with open(stamp, "w") as f:
+    with open(stamp, "w", encoding="utf-8") as f:
         f.write(digest.hexdigest())
     return verilog
 
@@ -134,7 +143,7 @@ def rom_init(rom):
 
 def write_rom_init(filename, rom):
     """Rewrite the cartridge ROM $readmemh file (to run another ROM without rebuilding)."""
-    with open(filename, "w") as f:
+    with open(filename, "w", encoding="utf-8") as f:
         f.write("\n".join(f"{b:02x}" for b in rom_init(rom)) + "\n")
 
 class SimCartridge(LiteXModule):
@@ -215,9 +224,6 @@ class SimCartridge(LiteXModule):
 class SimNativePSRAM(LiteXModule):
     """8MB PSRAM model with the OPIPSRAMCore native port (cmd/wdata/rdata, one word per cycle)."""
     def __init__(self, size=8*1024*1024):
-        from litex.soc.interconnect import stream
-        from litex.soc.cores.ram.opi_psram import (opi_psram_cmd_layout, opi_psram_wdata_layout,
-            opi_psram_rdata_layout)
         self.cmd   = cmd   = stream.Endpoint(opi_psram_cmd_layout(log2_int(size)))
         self.wdata = wdata = stream.Endpoint(opi_psram_wdata_layout())
         self.rdata = rdata = stream.Endpoint(opi_psram_rdata_layout())
@@ -278,8 +284,6 @@ class SimPSRAMPort(LiteXModule):
     the request, then one word per cycle (memory port burst protocol).
     """
     def __init__(self, port, dout, rom, latency=16):
-        from chromatix.gateware.vcart import ROM_BASE, RAM_BASE
-
         # # #
 
         self.specials.cart_rom = rom_mem = Memory(8, CART_ROM_SIZE, init=list(rom_init(rom)), name="cart_rom")
@@ -336,8 +340,6 @@ class SimPSRAMPort(LiteXModule):
 class SimVirtualCartConfig(LiteXModule):
     """Virtual cartridge configuration from the ROM header in the "cart_rom" memory (runtime ROM)."""
     def __init__(self, vcart, rom_mem):
-        from chromatix.gateware.vcart import MBC_NONE, MBC_MBC1, MBC_MBC2, MBC_MBC3, MBC_MBC5
-
         # # #
 
         hdr = [rom_mem.get_port(async_read=True, clock_domain="pclk") for _ in range(3)]
@@ -356,8 +358,12 @@ class SimVirtualCartConfig(LiteXModule):
         self.comb += [
             vcart.enable.eq(1),
             vcart.rom_mask.eq((2 << rom_size[0:4]) - 1),
-            Case(ram_size, {3: vcart.ram_mask.eq(0x3), 4: vcart.ram_mask.eq(0xf), 5: vcart.ram_mask.eq(0x7),
-                "default": vcart.ram_mask.eq(0)}),
+            Case(ram_size, {
+                3:         vcart.ram_mask.eq(0x3),
+                4:         vcart.ram_mask.eq(0xf),
+                5:         vcart.ram_mask.eq(0x7),
+                "default": vcart.ram_mask.eq(0),
+            }),
         ]
 
 # Buttons ------------------------------------------------------------------------------------------
@@ -388,7 +394,7 @@ def button_events(presses):
     return events
 
 def write_button_events(filename, presses):
-    with open(filename, "w") as f:
+    with open(filename, "w", encoding="utf-8") as f:
         for frame, mask in button_events(presses):
             f.write(f"{(frame << 8) | mask:08x}\n")
         f.write("ffffffff\n")

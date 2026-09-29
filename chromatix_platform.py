@@ -9,17 +9,18 @@
 #
 # Handheld overview:
 # - FPGA (Gowin GW5A-25 family), clocks: 33.55432MHz (CLK_FPGA), 24MHz, 27MHz.
-# - Display interface: 6-bit parallel (DB[5:0]) + DOTCLK/HSYNC/VSYNC/ENABLE + SPI control + TE + PWM backlight.
+# - Display interface: 6-bit parallel (DB[5:0]) + DOTCLK/HSYNC/VSYNC/ENABLE + SPI control + TE +
+#   PWM backlight.
 # - External memory buses: QSPI + PS_* (CE_N/CLK/DQ[7:0]/DQS).
-# - I/O: Game Boy cartridge bus, link port, IR, USB PHY pins, I2C, audio codec pins, ESP32 control/UART pins.
+# - I/O: Game Boy cartridge bus, link port, IR, USB PHY pins, I2C, audio codec pins, ESP32
+#   control/UART pins.
 
 from types import MethodType
 
 from migen import *
 
 from litex.build.generic_platform import *
-from litex.build.gowin.platform import GowinPlatform
-
+from litex.build.gowin.platform   import GowinPlatform
 from litex.build.gowin.programmer import GowinProgrammer
 from litex.build.openfpgaloader   import OpenFPGALoader
 
@@ -116,14 +117,14 @@ _io = [
 
     # LCD interface.
     ("lcd", 0,
-        Subsignal("pwm",     Pins("P3"), IOStandard("LVCMOS33")),
-        Subsignal("db",      Pins("M9 R5 M11 T5 N12 T6"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
-        Subsignal("dotclk",  Pins("P9"),  IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
-        Subsignal("enable",  Pins("R4"),  IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
-        Subsignal("hsync",   Pins("P8"),  IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
-        Subsignal("vsync",   Pins("T3"),  IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
-        Subsignal("reset",   Pins("M6"),  IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
-        Subsignal("te",      Pins("T7"),  IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
+        Subsignal("pwm",      Pins("P3"), IOStandard("LVCMOS33")),
+        Subsignal("db",       Pins("M9 R5 M11 T5 N12 T6"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
+        Subsignal("dotclk",   Pins("P9"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
+        Subsignal("enable",   Pins("R4"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
+        Subsignal("hsync",    Pins("P8"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
+        Subsignal("vsync",    Pins("T3"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
+        Subsignal("reset",    Pins("M6"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
+        Subsignal("te",       Pins("T7"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
         Subsignal("spi_csx",  Pins("R3"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
         Subsignal("spi_sclk", Pins("M7"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
         Subsignal("spi_sda",  Pins("T4"), IOStandard("LVCMOS33"), Misc("PULL_MODE=NONE")),
@@ -167,7 +168,7 @@ _io = [
         Subsignal("sda", Pins("B14"), IOStandard("LVCMOS33"), Misc("PULL_MODE=UP")),
     ),
 
-    # USB FS PHY pins.
+    # USB PHY pins.
     ("usb", 0,
         # USB 2.0 soft PHY circuit (LiteX USB2PHY): HS driver/receiver pair, HS level inputs, FS
         # transceiver (HS terminations) and 1.5K pull-up.
@@ -274,7 +275,7 @@ def _build_io_constraints(toolchain):
     if toolchain.named_pc:
         cst.extend(toolchain.named_pc)
 
-    with open(toolchain._build_name + ".cst", "w") as f:
+    with open(toolchain._build_name + ".cst", "w", encoding="utf-8") as f:
         f.write("\n".join(cst))
 
     return (f"{toolchain._build_name}.cst", "CST")
@@ -295,10 +296,10 @@ class Platform(GowinPlatform):
         )
 
         # Bitstream generation options.
-        self.toolchain.options["bit_security"] = 0
-        self.toolchain.options["bit_encrypt"]  = 0
-        self.toolchain.options["bit_compress"] = 0
-        self.toolchain.options["bit_format"]   = "bin"
+        self.toolchain.options["bit_security"]   = 0
+        self.toolchain.options["bit_encrypt"]    = 0
+        self.toolchain.options["bit_compress"]   = 0
+        self.toolchain.options["bit_format"]     = "bin"
         self.toolchain.options["bg_programming"] = "jtag_sspi_qsspi"
 
         # Pin repurposing options.

@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 import os
+import re
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from migen import *
 from litex.gen.sim import run_simulation
 
 from chromatix.gateware.usb_class import *
+
 from test.eqcheck import export_migen, eqcheck
 
 # Helpers ------------------------------------------------------------------------------------------
@@ -25,8 +27,8 @@ requires_yosys = pytest.mark.skipif(shutil.which("yosys") is None, reason="Yosys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 # Original sources (from git history, so the checks keep working once they're removed from the tree).
-ORIGINAL_REV  = "ae5fe05"
-ORIGINAL_USB  = "chromatix/verilog/usb"
+ORIGINAL_REV   = "ae5fe05"
+ORIGINAL_USB   = "chromatix/verilog/usb"
 ORIGINAL_FILES = ["usbuvcuart_top.v", "usb_video/usb_defs.v", "usb_video/uvc_defs.v", "usb_video/uac_defs.v", "usb_video/uart_defs.v"]
 
 def fetch_original(tmpdir):
@@ -39,7 +41,6 @@ def fetch_original(tmpdir):
             pytest.skip("original sources not available (git history)")
         if f == "usbuvcuart_top.v":
             # Yosys doesn't support part-selects of concatenations: substitute the constant values.
-            import re
             text = data.decode()
             text = text.replace("{`AUDIO_DATA_EP_NUM}[3:0]", "4'd5")
             text = re.sub(r"\{`UAC_FREQUENCY\}\[(\d+):(\d+)\]",

@@ -7,8 +7,8 @@
 import os
 import random
 import shutil
-import subprocess
 import tempfile
+import subprocess
 
 import pytest
 
@@ -20,6 +20,7 @@ from litex.build.io import DDROutput
 
 from chromatix.gateware.video import ColorCorrection, ST7785PanelMaster, VideoPipeline
 from chromatix.gateware.video import GLYPHS_TIMER, GLYPHS_HEX, BATTERY_FRONT, glyph_lookup
+
 from test.eqcheck import export_migen, eqcheck
 
 # Helpers ------------------------------------------------------------------------------------------
@@ -121,7 +122,7 @@ def test_color_correction_eqcheck():
     workdir = tempfile.mkdtemp(prefix="eqcheck_color_correction_")
     gold    = os.path.join(workdir, "vid_system_top.sv")
     gate    = os.path.join(workdir, "cc_gate.v")
-    with open(gold, "w") as f:
+    with open(gold, "w", encoding="utf-8") as f:
         f.write(fetch_gold_source("vid_system_top.sv"))
         f.write("""
 module cc_gold(input sys_clk, input correct_lcd, input correct_uvc, input valid,

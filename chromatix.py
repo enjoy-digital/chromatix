@@ -23,12 +23,13 @@ from migen import *
 from litex.gen import *
 from litex.gen.genlib.cdc import BusSynchronizer
 
-from litex.soc.cores.uart import UARTBone
 from litex.soc.interconnect import stream
 from litex.soc.interconnect import wishbone
-from litex.soc.integration.soc import SoCRegion, MB
+
+from litex.soc.cores.uart           import UARTBone
+from litex.soc.integration.soc      import SoCRegion, MB
 from litex.soc.integration.soc_core import SoCMini
-from litex.soc.integration.builder import Builder
+from litex.soc.integration.builder  import Builder
 
 from chromatix import Platform
 
@@ -88,7 +89,7 @@ def add_timing_constraints(platform):
 
     def build_timing_constraints(toolchain, vns):
         sdc = original_build_timing_constraints(vns)
-        with open(sdc[0], "a") as f:
+        with open(sdc[0], "a", encoding="utf-8") as f:
             f.write("\n" + "\n".join(constraints) + "\n")
         return sdc
 
@@ -104,20 +105,24 @@ class BaseSoC(SoCMini):
     pipeline, audio I2S with TLV320 codec, Game Boy emulation core, memory controller, USB
     UVC+UART, ESP32 MCU communication, battery ADC, button debouncing, and system monitoring.
     """
-    def __init__(self, platform, with_debug_bridge=False, debug_bridge_baudrate=115200, uvc_frames=None,
-        with_bios=False, with_utmi_monitor=False):
+    def __init__(self, platform,
+        with_debug_bridge     = False,
+        debug_bridge_baudrate = 115200,
+        uvc_frames            = None,
+        with_bios             = False,
+        with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
+        hclk_freq = int(33.55432e6 / 2)
         # LiteX "sys" domain: gClk, or pClk for the BIOS demo CPU.
         sys_clk_freq = pclk_freq if with_bios else gclk_freq
-        hclk_freq = int(33.55432e6 / 2)
         assert not (with_bios and with_debug_bridge) # Both use the USB CDC port.
         with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
 
-        # SoCMini (CSR bus in the sys domain = gClk) -----------------------------------------------
+        # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
-        # LiteX BIOS demo: VexRiscv + BIOS (integrated ROM/SRAM) in place of the Game Boy core, console
-        # on the USB CDC port and on the LCD (so also on the UVC capture).
+        # LiteX BIOS demo: VexRiscv + BIOS (integrated ROM/SRAM) in place of the Game Boy core,
+        # console on the USB CDC port and on the LCD (so also on the UVC capture).
         cpu_kwargs = {} if not with_bios else dict(
             cpu_type             = "vexriscv",
             cpu_variant          = "lite",
@@ -138,27 +143,27 @@ class BaseSoC(SoCMini):
 
         # Platform Resources -----------------------------------------------------------------------
 
-        clk_24    = platform.request("clk_24")
-        clk_27    = platform.request("clk_27")  # Unused but required by platform constraints.
-        buttons   = platform.request("buttons")
-        rgb_led   = platform.request("rgb_led")
-        power     = platform.request("power")
-        esp32     = platform.request("esp32_ctrl")
-        serial    = platform.request("serial")
-        esp_uart  = platform.request("esp32_uart0")
-        qspi      = platform.request("qspi")
-        ps        = platform.request("ps")
-        cart      = platform.request("cart")
-        lcd       = platform.request("lcd")
-        audio     = platform.request("audio_codec")
-        i2s       = platform.request("i2s")
-        ir        = platform.request("ir")
-        link      = platform.request("link")
-        i2c       = platform.request("i2c")
-        usb       = platform.request("usb")
-        hdmi      = platform.request("hdmi")
-        vbat_adc  = platform.request("vbat_adc")
-        sdio_ls   = platform.request("sdio_ls")
+        clk_24   = platform.request("clk_24")
+        clk_27   = platform.request("clk_27")  # Unused but required by platform constraints.
+        buttons  = platform.request("buttons")
+        rgb_led  = platform.request("rgb_led")
+        power    = platform.request("power")
+        esp32    = platform.request("esp32_ctrl")
+        serial   = platform.request("serial")
+        esp_uart = platform.request("esp32_uart0")
+        qspi     = platform.request("qspi")
+        ps       = platform.request("ps")
+        cart     = platform.request("cart")
+        lcd      = platform.request("lcd")
+        audio    = platform.request("audio_codec")
+        i2s      = platform.request("i2s")
+        ir       = platform.request("ir")
+        link     = platform.request("link")
+        i2c      = platform.request("i2c")
+        usb      = platform.request("usb")
+        hdmi     = platform.request("hdmi")
+        vbat_adc = platform.request("vbat_adc")
+        sdio_ls  = platform.request("sdio_ls")
 
         # SDIO level shifter enable.
         self.comb += sdio_ls.eq(1)
@@ -436,6 +441,7 @@ class BaseSoC(SoCMini):
         )
 
         # Virtual Cartridge (ROM/cartridge RAM in the PSRAM, loaded from the host) -----------------
+
         if with_vcart:
             self.vcart     = vcart = VirtualCart(memory.vcart_port, memory.ctrl.dout)
             self.vcart_csr = VirtualCartCSR(vcart)
@@ -482,6 +488,7 @@ class BaseSoC(SoCMini):
             ))
 
         # Emulation System -------------------------------------------------------------------------
+
         if with_bios:
             # Firmware peripherals: buttons, tone generator (audio in place of the Game Boy one).
             self.demo_buttons = ButtonsCSR(btns, menu=~btn_menu_ored)
@@ -491,8 +498,8 @@ class BaseSoC(SoCMini):
                 right.eq(tone.sample),
             ]
 
-            # LCD terminal in place of the Game Boy LCD; cartridge/IR/link idle (as when the Game Boy
-            # core doesn't access them).
+            # LCD terminal in place of the Game Boy LCD; cartridge/IR/link idle (as when the Game
+            # Boy core doesn't access them).
             self.terminal = terminal = LCDTerminal()
             for pad in [cart.d, cart.rst, link.clk]:
                 self.specials += TSTriple(len(pad)).get_tristate(pad) # Not driven.
@@ -813,11 +820,11 @@ def main():
     parser.add_argument("--gowin-path", default=os.environ.get("GOWIN_PATH"), help="Gowin IDE install directory (or GOWIN_PATH env variable, ex: ~/tools/gowin_1.9.12.04/IDE).")
 
     # SoC.
-    parser.add_argument("--with-debug-bridge",     action="store_true",                      help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
-    parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,                 help="Debug bridge baudrate.")
-    parser.add_argument("--uvc-sizes", default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
-    parser.add_argument("--with-bios", action="store_true", help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
-    parser.add_argument("--with-utmi-monitor", action="store_true", help="USB UTMI packet recorder (debug bridge).")
+    parser.add_argument("--with-debug-bridge",     action="store_true",       help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
+    parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,  help="Debug bridge baudrate.")
+    parser.add_argument("--uvc-sizes",             default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
+    parser.add_argument("--with-bios",             action="store_true",       help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
+    parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
 
     # Platform.
@@ -842,8 +849,10 @@ def main():
     )
 
     # Build.
-    builder = Builder(soc, output_dir="build", csr_csv="scripts/csr.csv",
-        bios_lto = True, # BIOS fits the 24KB integrated ROM.
+    builder = Builder(soc,
+        output_dir = "build",
+        csr_csv    = "scripts/csr.csv",
+        bios_lto   = True, # BIOS fits the 24KB integrated ROM.
     )
     if args.build:
         builder.build(build_name="chromatic", run=not args.no_compile)

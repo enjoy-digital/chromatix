@@ -76,6 +76,7 @@ def video_frame_size(width, height):
 def video_transactions(width, height):
     """Isochronous transactions per micro-frame (1024 bytes each) required by a frame size."""
     return 1 if video_frame_size(width, height)*VIDEO_FPS_MAX <= 1012*8000 else 2
+
 YUY2_GUID                      = [0x59, 0x55, 0x59, 0x32, 0x00, 0x00, 0x10, 0x00,
                                   0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71]
 
@@ -262,11 +263,11 @@ class USBDescriptorsLayout:
             # Communication Interface.
             *descriptor(USB_DESCTYPE_INTERFACE, UART_CTRL_IFACE, 0, 1, USB_CLASS_COMMUNICATIONS,
                 0x02, 0x00, 0x01),
-            *descriptor(USB_DESCTYPE_CS_INTERFACE, 0x00, le(0x0120, 2)),                # Header.
+            *descriptor(USB_DESCTYPE_CS_INTERFACE, 0x00, le(0x0120, 2)),                    # Header.
             *descriptor(USB_DESCTYPE_CS_INTERFACE, 0x06, UART_CTRL_IFACE, UART_DATA_IFACE), # Union.
-            *descriptor(USB_DESCTYPE_CS_INTERFACE, 0x01, 0x03, UART_DATA_IFACE),        # Call Mgmt.
-            *descriptor(USB_DESCTYPE_CS_INTERFACE, 0x02, 0x03),                         # ACM.
-            *descriptor(USB_DESCTYPE_ENDPOINT, 0x84, 0x03, le(8, 2), 7),                # Notify EP.
+            *descriptor(USB_DESCTYPE_CS_INTERFACE, 0x01, 0x03, UART_DATA_IFACE),            # Call Mgmt.
+            *descriptor(USB_DESCTYPE_CS_INTERFACE, 0x02, 0x03),                             # ACM.
+            *descriptor(USB_DESCTYPE_ENDPOINT, 0x84, 0x03, le(8, 2), 7),                    # Notify EP.
             # Data Interface + Bulk Endpoints.
             *descriptor(USB_DESCTYPE_INTERFACE, UART_DATA_IFACE, 0, 2, USB_CLASS_CDC_DATA,
                 0x00, 0x00, 0x00),

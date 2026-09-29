@@ -26,17 +26,17 @@ from migen import *
 from litex.gen import *
 
 from litex.build.generic_platform import Pins
-from litex.build.sim import SimPlatform
-from litex.build.sim.config import SimConfig
+from litex.build.sim              import SimPlatform
+from litex.build.sim.config       import SimConfig
 
 from chromatix.gateware.sources import VERILOG_PATH
 from chromatix.gateware.sim     import SIM_VERILOG_PATH, convert_vhdl, verilog_sources
 from chromatix.gateware.sim     import SimCartridge, write_rom_init, check_rom
 from chromatix.gateware.sim     import SimPSRAMPort, SimVirtualCartConfig, SimNativePSRAM
+from chromatix.gateware.sim     import parse_button_sequence, write_button_events
 from chromatix.gateware.memory  import memory_port_layout, MemorySystem
 from chromatix.gateware.video   import VideoPipeline
 from chromatix.gateware.vcart   import VirtualCart
-from chromatix.gateware.sim     import parse_button_sequence, write_button_events
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -50,8 +50,13 @@ _io = [
 # Simulation Top -----------------------------------------------------------------------------------
 
 class SimTop(LiteXModule):
-    def __init__(self, platform, rom, vcart=False, vcart_latency=16, vcart_hold=0, video=False,
-        frame_blend=False, correct=False):
+    def __init__(self, platform, rom,
+        vcart         = False,
+        vcart_latency = 16,
+        vcart_hold    = 0,
+        video         = False,
+        frame_blend   = False,
+        correct       = False):
         # Clocks: pClk from the simulation clocker, hClk = pClk/2 (as the PLL outputs). With the
         # video pipeline: xClk (= fClk) from the clocker, pClk/hClk/gClk = xClk/2, /4, /8.
         self.cd_pclk = ClockDomain("pclk", reset_less=True)
@@ -97,8 +102,8 @@ class SimTop(LiteXModule):
         d        = TSTriple(8)
         self.specials += d.get_tristate(cart_d)
         # Virtual cartridge hold (as the host loader: Game Boy held in reset, then released).
-        vcart_hold_n  = Signal(reset=int(vcart_hold > 0))
-        vcart_hold_c  = Signal(max=max(vcart_hold, 1) + 1)
+        vcart_hold_n = Signal(reset=int(vcart_hold > 0))
+        vcart_hold_c = Signal(max=max(vcart_hold, 1) + 1)
         self.sync.hclk += If(vcart_hold_c != vcart_hold,
             vcart_hold_c.eq(vcart_hold_c + 1),
         ).Else(
@@ -185,7 +190,7 @@ class SimTop(LiteXModule):
             )),
         )
 
-        # Video pipeline (frame buffer/blend, OSD, color correction) on a PSRAM model ----------------
+        # Video pipeline (frame buffer/blend, OSD, color correction) on a PSRAM model.
         if video:
             qspi_pads  = Record([("clk", 1), ("cs_n", 1), ("mosi", 1), ("miso", 1), ("wp_n", 1), ("hd", 1)])
             psram_pads = Record([("ce_n", 1), ("clk", 1), ("dq", 8), ("dqs", 1)])
@@ -232,16 +237,22 @@ class SimTop(LiteXModule):
 
         # LCD capture (PPM frames, ends the simulation).
         self.specials += Instance("gb_lcd_capture",
-            i_clk      = ClockSignal("hclk"),
-            i_clkena   = gb_lcd_clkena,
-            i_data     = gb_lcd_data,
-            i_vsync    = gb_lcd_vsync,
+            i_clk    = ClockSignal("hclk"),
+            i_clkena = gb_lcd_clkena,
+            i_data   = gb_lcd_data,
+            i_vsync  = gb_lcd_vsync,
         )
 
 # Build --------------------------------------------------------------------------------------------
 
-def build_sim(gateware_dir, rom, threads=1, trace=False, vcart=False, vcart_hold=0, video=False,
-    frame_blend=False, correct=False):
+def build_sim(gateware_dir, rom,
+    threads     = 1,
+    trace       = False,
+    vcart       = False,
+    vcart_hold  = 0,
+    video       = False,
+    frame_blend = False,
+    correct     = False):
     platform = SimPlatform("SIM", _io)
     for source in verilog_sources():
         platform.add_source(source)
@@ -255,14 +266,20 @@ def build_sim(gateware_dir, rom, threads=1, trace=False, vcart=False, vcart_hold
     # xClk (video): period rounded to an even number of ps (simulation timebase).
     xclk_freq = 1e12/(2*round(1e12/(2*PCLK_FREQ)/2))
     sim_config.add_clocker("sys_clk", freq_hz=xclk_freq if video else PCLK_FREQ)
-    platform.build(SimTop(platform, rom, vcart=vcart, vcart_hold=vcart_hold, video=video,
-        frame_blend=frame_blend, correct=correct),
-        build_dir   = gateware_dir,
-        sim_config  = sim_config,
-        opt_level   = "O3",
-        threads     = threads,
-        trace       = trace,
-        run         = False,
+    top = SimTop(platform, rom,
+        vcart       = vcart,
+        vcart_hold  = vcart_hold,
+        video       = video,
+        frame_blend = frame_blend,
+        correct     = correct,
+    )
+    platform.build(top,
+        build_dir  = gateware_dir,
+        sim_config = sim_config,
+        opt_level  = "O3",
+        threads    = threads,
+        trace      = trace,
+        run        = False,
     )
     # Compile (LiteX only compiles when also running the simulation).
     subprocess.run(["bash", "build_sim.sh"], cwd=gateware_dir, check=True, stdout=subprocess.DEVNULL)
@@ -293,20 +310,20 @@ def ppm_to_png(ppm, png, scale=1):
 
 def main():
     parser = argparse.ArgumentParser(description="ChromatiX simulation (Verilator): Game Boy core + cartridge + LCD capture.")
-    parser.add_argument("--rom",        required=True,         help="Game Boy ROM (ROM only, MBC1 or MBC5).")
-    parser.add_argument("--frames",     default=60,  type=int, help="Frames to simulate.")
-    parser.add_argument("--every",      default=1,   type=int, help="Capture one frame every N frames.")
-    parser.add_argument("--buttons",    default="",            help="Button presses: button@frame[+frames],... (ex: start@200+10,a@300).")
-    parser.add_argument("--output-dir", default="build/sim",   help="Build/output directory.")
-    parser.add_argument("--scale",      default=2,   type=int, help="PNG scale factor.")
-    parser.add_argument("--threads",    default=1,   type=int, help="Verilator threads.")
-    parser.add_argument("--trace",      action="store_true",   help="Enable waveform tracing (VCD).")
-    parser.add_argument("--no-compile", action="store_true",   help="Run on the previous build (any ROM/frames/buttons).")
-    parser.add_argument("--vcart",      action="store_true",   help="Virtual cartridge (ROM served from a PSRAM model).")
-    parser.add_argument("--vcart-hold", default=0, type=int,   help="Virtual cartridge: Game Boy held in reset for N hClk cycles.")
-    parser.add_argument("--video",       action="store_true",  help="Video pipeline on a PSRAM model (uvc_* frames: LCD panel/UVC output).")
-    parser.add_argument("--frame-blend", action="store_true",  help="Video: frame blending.")
-    parser.add_argument("--correct",     action="store_true",  help="Video: LCD/UVC color correction.")
+    parser.add_argument("--rom",         required=True,         help="Game Boy ROM (ROM only, MBC1 or MBC5).")
+    parser.add_argument("--frames",      default=60,  type=int, help="Frames to simulate.")
+    parser.add_argument("--every",       default=1,   type=int, help="Capture one frame every N frames.")
+    parser.add_argument("--buttons",     default="",            help="Button presses: button@frame[+frames],... (ex: start@200+10,a@300).")
+    parser.add_argument("--output-dir",  default="build/sim",   help="Build/output directory.")
+    parser.add_argument("--scale",       default=2,   type=int, help="PNG scale factor.")
+    parser.add_argument("--threads",     default=1,   type=int, help="Verilator threads.")
+    parser.add_argument("--trace",       action="store_true",   help="Enable waveform tracing (VCD).")
+    parser.add_argument("--no-compile",  action="store_true",   help="Run on the previous build (any ROM/frames/buttons).")
+    parser.add_argument("--vcart",       action="store_true",   help="Virtual cartridge (ROM served from a PSRAM model).")
+    parser.add_argument("--vcart-hold",  default=0,   type=int, help="Virtual cartridge: Game Boy held in reset for N hClk cycles.")
+    parser.add_argument("--video",       action="store_true",   help="Video pipeline on a PSRAM model (uvc_* frames: LCD panel/UVC output).")
+    parser.add_argument("--frame-blend", action="store_true",   help="Video: frame blending.")
+    parser.add_argument("--correct",     action="store_true",   help="Video: LCD/UVC color correction.")
     args = parser.parse_args()
 
     with open(args.rom, "rb") as f:
@@ -320,9 +337,15 @@ def main():
 
     # Build / Run.
     if not args.no_compile:
-        build_sim(gateware_dir, rom, threads=args.threads, trace=args.trace, vcart=args.vcart,
-            vcart_hold=args.vcart_hold, video=args.video, frame_blend=args.frame_blend,
-            correct=args.correct)
+        build_sim(gateware_dir, rom,
+            threads     = args.threads,
+            trace       = args.trace,
+            vcart       = args.vcart,
+            vcart_hold  = args.vcart_hold,
+            video       = args.video,
+            frame_blend = args.frame_blend,
+            correct     = args.correct,
+        )
     ppms = run_sim(gateware_dir, rom, frames=args.frames, every=args.every, presses=presses)
 
     # Frames -> PNG.

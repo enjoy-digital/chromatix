@@ -20,10 +20,9 @@ PHY oversampling clock, created here), "gclk" (video and audio samples).
 from types import SimpleNamespace
 
 from migen import *
+from migen.genlib.cdc import MultiReg
 
 from litex.gen import *
-
-from migen.genlib.cdc import MultiReg
 
 from litex.soc.interconnect     import stream
 from litex.soc.interconnect.csr import *
@@ -36,7 +35,7 @@ from chromatix.gateware.usb_class import *
 from chromatix.gateware.usb_desc  import USBDescriptors, VIDEO_FRAMES
 from chromatix.gateware.usb_luna  import LUNAUSBController, USBDescriptorRequest
 
-# USB Device --------------------------------------------------------------------------------------
+# USB Device ---------------------------------------------------------------------------------------
 
 class USBDevice(LiteXModule):
     """
@@ -127,10 +126,10 @@ class USBDevice(LiteXModule):
         ]
         if with_utmi_monitor:
             utmi = SimpleNamespace(
-                txvalid  = luna.utmi_tx_valid,
-                txready  = usb_phy.tx_ready,
-                dataout  = luna.utmi_tx_data,
-                rxactive = usb_phy.rx_active,
+                txvalid    = luna.utmi_tx_valid,
+                txready    = usb_phy.tx_ready,
+                dataout    = luna.utmi_tx_data,
+                rxactive   = usb_phy.rx_active,
                 rxvalid    = usb_phy.rx_valid,
                 datain     = usb_phy.rx_data,
                 linestate  = usb_phy.line_state,
@@ -289,9 +288,9 @@ class UTMIMonitor(LiteXModule):
     def __init__(self, utmi, depth=256):
         self._control = CSRStorage(fields=[
             CSRField("arm", size=1, offset=0, pulse=True, description="Re-arm the capture."),
-            CSRField("all", size=1, offset=1, description="Record all packets/state changes."),
-            CSRField("ep0", size=1, offset=2, description="Record the EP0 transactions only (from the arming)."),
-            CSRField("sel", size=8, offset=8, description="Entry to read."),
+            CSRField("all", size=1, offset=1,             description="Record all packets/state changes."),
+            CSRField("ep0", size=1, offset=2,             description="Record the EP0 transactions only (from the arming)."),
+            CSRField("sel", size=8, offset=8,             description="Entry to read."),
         ])
         self._status = CSRStatus(fields=[
             CSRField("count", size=9, offset=0, description="Captured entries."),
