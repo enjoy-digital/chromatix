@@ -110,3 +110,30 @@ def test_sim_vcart_mbc1(sim_build_vcart):
     sim, gateware = sim_build_vcart
     ppms = sim.run_sim(gateware, make_test_rom(mbc1=True), frames=31, every=30)
     assert stripes(ppms[-1]) == [BLACK, WHITE, BLACK, WHITE]
+
+# Simulation (Video Pipeline) ----------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def sim_build_video(tmp_path_factory):
+    if shutil.which("verilator") is None or shutil.which("ghdl") is None:
+        pytest.skip("Verilator/GHDL not installed.")
+    sim      = load_sim()
+    gateware = str(tmp_path_factory.mktemp("sim_video") / "gateware")
+    sim.build_sim(gateware, make_test_rom(), video=True)
+    return sim, gateware
+
+def test_sim_video(sim_build_video):
+    """Video pipeline output (frame buffer in the PSRAM model, panel scan, UVC copy): the Game Boy
+    image, pixel exact (no frame blend/color correction)."""
+    from PIL import Image
+    sim, gateware = sim_build_video
+    ppms = sim.run_sim(gateware, make_test_rom(), frames=36, every=1)
+    uvc  = sim.uvc_frames(gateware)
+    assert len(uvc) > 20
+    gb, out = Image.open(ppms[-1]).convert("RGB"), Image.open(uvc[-1]).convert("RGB")
+    assert out.size == gb.size == (160, 144)
+    # RGB555 (Game Boy) -> RGB666 (panel): 2 x the 5-bit component (frame blend path, blend off).
+    gb5  = [tuple(c >> 3 for c in p) for p in gb.getdata()]
+    out6 = [tuple(c >> 2 for c in p) for p in out.getdata()]
+    assert out6 == [tuple(2*c for c in p) for p in gb5]
+    assert stripes(ppms[-1]) == [WHITE, BLACK, WHITE, BLACK]

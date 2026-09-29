@@ -696,7 +696,7 @@ class MemorySystem(LiteXModule):
     (QSPI_CLK rising/falling edges, created here).
     """
     def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64,
-        with_vcart=False):
+        with_vcart=False, psram_factory=None):
         self.reset        = Signal()
         self.menu_init    = Signal()
         self.bist_done    = Signal()
@@ -736,8 +736,12 @@ class MemorySystem(LiteXModule):
         ]
         self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus + with_vcart))
         cd_psram = {"sys": "psram", "sys2x": "psram2x"}
-        self.phy   = phy   = ClockDomainsRenamer(cd_psram)(OPIPSRAMPHY(psram_pads))
-        self.psram = psram = ClockDomainsRenamer(cd_psram)(OPIPSRAMCore(phy, PSRAM_CLK_FREQ))
+        if psram_factory is None:
+            self.phy   = phy   = ClockDomainsRenamer(cd_psram)(OPIPSRAMPHY(psram_pads))
+            self.psram = psram = ClockDomainsRenamer(cd_psram)(OPIPSRAMCore(phy, PSRAM_CLK_FREQ))
+        else:
+            # PSRAM model with the core native port (simulation).
+            self.psram = psram = ClockDomainsRenamer(cd_psram)(psram_factory())
         self.psram_adapter = ClockDomainsRenamer("psram")(PSRAMPortAdapter(ctrl, psram))
         ports = ctrl.ports
         self.comb += ctrl.reset.eq(self.reset)

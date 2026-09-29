@@ -30,6 +30,7 @@ module gb_lcd_capture #(
     reg     [19:0] cycles  = 20'd0;
     integer        frames  = FRAMES;
     integer        every   = EVERY;
+    reg     [14:0] mask;
 
     initial begin
         if ($value$plusargs("frames=%d", frames)) ;
@@ -51,11 +52,11 @@ module gb_lcd_capture #(
                 $sformat(name, "frame_%04d.ppm", frame);
                 f = $fopen(name, "wb");
                 $fwrite(f, "P6\n160 144\n255\n");
+                // Incomplete frames black (masked at runtime: Verilator writes nothing for constant 0 %c).
+                mask = (n == PIXELS) ? 15'h7fff : 15'h0000;
                 for (i = 0; i < PIXELS; i = i + 1)
-                    if (n == PIXELS)
-                        $fwrite(f, "%c%c%c", expand(fb[i][4:0]), expand(fb[i][9:5]), expand(fb[i][14:10]));
-                    else
-                        $fwrite(f, "%c%c%c", 8'd0, 8'd0, 8'd0);
+                    $fwrite(f, "%c%c%c", expand(fb[i][4:0] & mask[4:0]), expand(fb[i][9:5] & mask[9:5]),
+                        expand(fb[i][14:10] & mask[14:10]));
                 $fclose(f);
             end
             frame = frame + 1;

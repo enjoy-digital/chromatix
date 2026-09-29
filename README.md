@@ -115,7 +115,9 @@ Firmware peripherals: buttons (`demo_buttons_status`), square wave tone generato
 
 `chromatix_sim.py` simulates the Game Boy core with Verilator (VHDL parts converted to Verilog
 with GHDL): cartridge model (ROM only, MBC1, MBC5 + RAM) or virtual cartridge with a PSRAM model
-(`--vcart`), scripted buttons and the LCD output captured as PNG frames. The ROM, frames and buttons are runtime inputs, so `--no-compile` runs another ROM or
+(`--vcart`), scripted buttons and the LCD output captured as PNG frames. `--video` adds the video
+pipeline (frame buffer in a PSRAM model, frame blend `--frame-blend`, color correction `--correct`,
+ST7785 panel scan): its UVC copy is captured as `uvc_*` frames. The ROM, frames and buttons are runtime inputs, so `--no-compile` runs another ROM or
 scenario on the same build (~0.5s per Game Boy frame):
 
 ```bash

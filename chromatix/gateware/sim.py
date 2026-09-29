@@ -210,6 +210,65 @@ class SimCartridge(LiteXModule):
             d.o.eq(Mux(a[15], ram_port.dat_r, rom_port.dat_r)),
         ]
 
+# PSRAM Model (Native Port) ------------------------------------------------------------------------
+
+class SimNativePSRAM(LiteXModule):
+    """8MB PSRAM model with the OPIPSRAMCore native port (cmd/wdata/rdata, one word per cycle)."""
+    def __init__(self, size=8*1024*1024):
+        from litex.soc.interconnect import stream
+        from litex.soc.cores.ram.opi_psram import (opi_psram_cmd_layout, opi_psram_wdata_layout,
+            opi_psram_rdata_layout)
+        self.cmd   = cmd   = stream.Endpoint(opi_psram_cmd_layout(log2_int(size)))
+        self.wdata = wdata = stream.Endpoint(opi_psram_wdata_layout())
+        self.rdata = rdata = stream.Endpoint(opi_psram_rdata_layout())
+        self.ready = Signal(reset=1)
+
+        # # #
+
+        self.specials.mem = mem = Memory(16, size//2, name="psram")
+        port = mem.get_port(write_capable=True, async_read=True, we_granularity=8)
+        self.specials += port
+
+        addr  = Signal(log2_int(size) - 1)
+        count = Signal(16)
+        self.comb += [
+            port.adr.eq(addr),
+            port.dat_w.eq(wdata.data),
+            rdata.data.eq(port.dat_r),
+        ]
+        self.fsm = fsm = FSM(reset_state="IDLE")
+        fsm.act("IDLE",
+            cmd.ready.eq(1),
+            If(cmd.valid,
+                NextValue(addr,  cmd.addr[1:]),
+                NextValue(count, cmd.len),
+                If(cmd.we,
+                    NextState("WRITE"),
+                ).Else(
+                    NextState("READ"),
+                )
+            )
+        )
+        fsm.act("READ",
+            rdata.valid.eq(1),
+            NextValue(addr,  addr + 1),
+            NextValue(count, count - 1),
+            If(count == 1,
+                NextState("IDLE"),
+            )
+        )
+        fsm.act("WRITE",
+            wdata.ready.eq(1),
+            port.we.eq(Replicate(wdata.valid, 2) & wdata.we),
+            If(wdata.valid,
+                NextValue(addr,  addr + 1),
+                NextValue(count, count - 1),
+                If(count == 1,
+                    NextState("IDLE"),
+                )
+            )
+        )
+
 # Virtual Cartridge PSRAM Port ---------------------------------------------------------------------
 
 class SimPSRAMPort(LiteXModule):

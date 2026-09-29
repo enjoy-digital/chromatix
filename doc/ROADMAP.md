@@ -23,7 +23,7 @@ Verilog at build time). Next steps:
 
 ## Tooling
 
-- Verilator simulation (done: `chromatix_sim.py`, Game Boy core + cartridge + buttons + LCD
-  capture). Next: add the video pipeline (frame blend, OSD, color correction) with a PSRAM model, and
-  audio capture.
+- Verilator simulation (done: `chromatix_sim.py`, Game Boy core + cartridge or virtual cartridge
+  + buttons + LCD capture, video pipeline on a PSRAM model with the panel/UVC output capture). Next:
+  OSD (ESP32 QSPI writes model), audio capture.
 - CI: re-enable once the GitHub Actions account billing issue is solved.
