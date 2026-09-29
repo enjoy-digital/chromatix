@@ -14,8 +14,11 @@ Verilog at build time). Next steps:
 
 ## Upstreaming
 
-- LiteX: GW5A I/O primitives (OSER4/IDES4/IODELAY, SerDes), x8 OPI PSRAM PHY/controller.
-- litex-boards: a `modretro_chromatic` target (PSRAM, LCD, codec, battery).
+- LiteX (done): GW5A SerDes/IODELAY primitives and `SerDesTristate`, the USB 2.0 UTMI soft PHY
+  (`usb2_phy`), LunaCDCACM UTMI mode, the x8 OPI PSRAM core (`ram/opi_psram`), Gowin PLL generated
+  clock constraints. ChromatiX uses them.
+- litex-boards (done): `modretro_chromatic` target (High-Speed USB CDC-ACM console, PSRAM main RAM,
+  LCD/HDMI, I2S audio, buttons). Next: battery ADC, codec control.
 
 ## Tooling
 

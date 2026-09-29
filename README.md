@@ -42,7 +42,7 @@ with [LiteX](https://github.com/enjoy-digital/litex):
 
 ## Build & Flash
 
-Requires [LiteX](https://github.com/enjoy-digital/litex) (`litex_setup.py`), Gowin EDA and [openFPGALoader](https://github.com/trabucayre/openFPGALoader) (with GWU2X support).
+Requires [LiteX](https://github.com/enjoy-digital/litex) (`litex_setup.py`, recent master: USB 2.0 PHY and OPI PSRAM cores), Gowin EDA and [openFPGALoader](https://github.com/trabucayre/openFPGALoader) (with GWU2X support).
 
 ```bash
 git submodule update --init --recursive   # MiSTer Game Boy core.
