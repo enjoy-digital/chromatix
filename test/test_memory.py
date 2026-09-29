@@ -6,14 +6,16 @@
 
 from migen import *
 
-from litex.gen.sim import run_simulation
+from litex.gen.sim import run_simulation, passive
 
-from chromatix.gateware.psram  import PSRAMController
+from litex.soc.interconnect import stream
+
+from litex.soc.cores.ram.opi_psram import opi_psram_cmd_layout, opi_psram_wdata_layout
+from litex.soc.cores.ram.opi_psram import opi_psram_rdata_layout
+
 from chromatix.gateware.memory import memory_port_layout, MultiPortRAMCtrl, BurstWriteFIFO
 from chromatix.gateware.memory import GBBurstWrite, QSPIBurstWrite, QSPISlave, LineReader
-from chromatix.gateware.memory import MemorySystem, PORT_BIST, PSRAMWishbone
-
-from test.test_psram import SimInstance, PSRAMModel, PSRAMSimPHY
+from chromatix.gateware.memory import MemorySystem, PORT_BIST, PSRAMWishbone, PSRAMPortAdapter
 
 # Helpers ------------------------------------------------------------------------------------------
 
@@ -22,6 +24,73 @@ class ClockDomainsWrapper(Module):
         self.submodules.dut = dut
         for domain in domains:
             setattr(self.clock_domains, f"cd_{domain}", ClockDomain(domain))
+
+class _DFFCSim(Module):
+    """Cycle-based model of the GW5A DFFC (D flip-flop with asynchronous clear)."""
+    def __init__(self, d, clk, clear, q):
+        q_r = Signal()
+        self.comb += q.eq(q_r & ~clear)
+        sync  = getattr(self.sync, clk.cd)
+        sync += q_r.eq(d & ~clear)
+
+
+class SimInstance:
+    """Special override lowering Gowin primitives for simulation: DFFC behavioral model."""
+    @staticmethod
+    def lower(instance):
+        assert instance.of == "DFFC", instance.of
+        ios = {item.name: item.expr for item in instance.items if isinstance(item, Instance._IO)}
+        return _DFFCSim(ios["D"], ios["CLK"], ios["CLEAR"], ios["Q"])
+
+# Native PSRAM Model -------------------------------------------------------------------------------
+
+class NativePSRAM(Module):
+    """LiteX OPIPSRAMCore native port stand-in: ``generator`` serves the accesses from ``mem``
+    (16-bit words), with ``gap`` idle cycles between words."""
+    def __init__(self, *args, **kwargs):
+        self.cmd   = stream.Endpoint(opi_psram_cmd_layout(23))
+        self.wdata = stream.Endpoint(opi_psram_wdata_layout())
+        self.rdata = stream.Endpoint(opi_psram_rdata_layout())
+        self.ready = Signal(reset=1)
+        self.mem   = {}
+        self.accesses = []
+        self.errors   = []
+
+    @passive
+    def generator(self, gap=0):
+        while True:
+            yield self.cmd.ready.eq(1)
+            yield
+            if not (yield self.cmd.valid):
+                continue
+            yield self.cmd.ready.eq(0)
+            we, addr, length = (yield self.cmd.we), (yield self.cmd.addr), (yield self.cmd.len)
+            self.accesses.append((we, addr, length))
+            if addr & 1:
+                self.errors.append(f"Odd address 0x{addr:x}.")
+            for n in range(length):
+                word = addr//2 + n
+                if we:
+                    yield self.wdata.ready.eq(1)
+                    yield
+                    while not (yield self.wdata.valid):
+                        self.errors.append("Write data underrun.")
+                        yield
+                    self.mem[word] = (yield self.wdata.data)
+                    yield self.wdata.ready.eq(0)
+                else:
+                    yield self.rdata.valid.eq(1)
+                    yield self.rdata.data.eq(self.mem.get(word, 0))
+                    yield
+                    yield self.rdata.valid.eq(0)
+                for _ in range(gap):
+                    yield
+
+class PSRAMPortAdapterDUT(Module):
+    def __init__(self, nports=2):
+        self.submodules.ctrl    = ctrl  = MultiPortRAMCtrl(nports=nports)
+        self.submodules.psram   = psram = NativePSRAM()
+        self.submodules.adapter = PSRAMPortAdapter(ctrl, psram)
 
 # Multi-Port RAM Controller ------------------------------------------------------------------------
 
@@ -334,36 +403,70 @@ def test_line_reader():
     assert requests == [0x10000, 0x10000 + 2*LineReader.LINE_DEPTH]
     assert stream == lines[0]
 
+# PSRAM Port Adapter -------------------------------------------------------------------------------
+
+def test_psram_port_adapter():
+    """Arbiter bursts -> native accesses: write_next N-1 times, done after the last written word or
+    with the last read word, data in order."""
+    for gap in [0, 3]:
+        dut  = PSRAMPortAdapterDUT()
+        port = dut.ctrl.ports[0]
+        res  = {"write_next": 0, "done": [], "read": []}
+        words = [0x1000 + i for i in range(6)]
+
+        def main():
+            # Write burst (12 bytes at 0x200).
+            yield port.rnw.eq(0)
+            yield port.addr.eq(0x200)
+            yield port.burst_length.eq(12)
+            yield port.din.eq(words[0])
+            yield port.request.eq(1)
+            yield
+            yield port.request.eq(0)
+            index = 0
+            while True:
+                if (yield port.write_next):
+                    res["write_next"] += 1
+                    index += 1
+                    yield port.din.eq(words[index])
+                if (yield port.done):
+                    res["done"].append(("w", (yield port.write_next)))
+                    break
+                yield
+            yield
+            # Read burst.
+            yield port.rnw.eq(1)
+            yield port.request.eq(1)
+            yield
+            yield port.request.eq(0)
+            while True:
+                if (yield port.dout_valid):
+                    res["read"].append((yield dut.ctrl.dout))
+                if (yield port.done):
+                    res["done"].append(("r", (yield port.dout_valid)))
+                    break
+                yield
+
+        run_simulation(dut, [main(), dut.psram.generator(gap=gap)])
+        assert res["write_next"] == len(words) - 1
+        assert res["done"] == [("w", 0), ("r", 1)]
+        assert res["read"] == words
+        assert dut.psram.accesses == [(1, 0x200, 6), (0, 0x200, 6)]
+        assert dut.psram.errors == []
+
 # PSRAM Wishbone -----------------------------------------------------------------------------------
 
 class PSRAMWishboneDUT(Module):
     def __init__(self, base, data_width):
-        self.submodules.ctrl   = ctrl   = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=2))
-        self.submodules.phy    = phy    = PSRAMSimPHY()
-        self.submodules.psram  = psram  = ClockDomainsRenamer("xclk")(PSRAMController(phy, startup_cycles=16))
-        self.submodules.bridge = bridge = PSRAMWishbone(ctrl.ports[1], ctrl.dout, base=base, data_width=data_width)
-        self.comb += [
-            psram.req_read.eq(ctrl.req_read),
-            psram.req_write.eq(ctrl.req_write),
-            psram.addr.eq(ctrl.addr),
-            psram.din.eq(ctrl.din),
-            psram.burst_length.eq(ctrl.burst_length),
-            ctrl.ready.eq(psram.ready),
-            ctrl.write_next.eq(psram.write_next),
-            ctrl.dout.eq(psram.dout),
-            ctrl.dout_valid.eq(psram.dout_valid),
-            ctrl.done.eq(psram.done),
-        ]
+        self.submodules.ctrl    = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=2))
+        self.submodules.psram   = psram = ClockDomainsRenamer("xclk")(NativePSRAM())
+        self.submodules.adapter = ClockDomainsRenamer("xclk")(PSRAMPortAdapter(ctrl, psram))
+        self.submodules.bridge  = bridge = PSRAMWishbone(ctrl.ports[1], ctrl.dout, base=base, data_width=data_width)
 
 
-def test_psram_wishbone():
-    """128-bit Wishbone lines (sys) written/read back through the arbiter + PSRAM controller (xClk)."""
-    base  = 0x400000
-    dut   = PSRAMWishboneDUT(base, data_width=128)
-    model = PSRAMModel(dut.phy)
-    lines = {0x000: 0x00112233445566778899aabbccddeeff, 0x001: 0x0123456789abcdef0f1e2d3c4b5a6978,
-             0x3ff: 0xdeadbeefcafef00d5555aaaa12345678}
-    res   = {}
+def run_psram_wishbone(data_width, lines, base=0x400000):
+    dut = PSRAMWishboneDUT(base, data_width=data_width)
+    res = {}
 
     def main():
         bus = dut.bridge.bus
@@ -373,80 +476,57 @@ def test_psram_wishbone():
         for adr in reversed(list(lines)):
             res["read"][adr] = (yield from bus.read(adr))
 
-    run_simulation(dut, {"sys": main(), "xclk": model.generator()}, clocks={"sys": 80, "xclk": 10},
-        special_overrides={Instance: SimInstance})
+    run_simulation(dut, {"sys": main(), "xclk": dut.psram.generator(gap=1)},
+        clocks={"sys": 80, "xclk": 10})
     assert res["read"] == lines
-    assert model.errors == []
+    assert dut.psram.errors == []
+    return dut
+
+
+def test_psram_wishbone():
+    """128-bit Wishbone lines (sys) written/read back through the arbiter + PSRAM (xClk)."""
+    base  = 0x400000
+    lines = {0x000: 0x00112233445566778899aabbccddeeff, 0x001: 0x0123456789abcdef0f1e2d3c4b5a6978,
+             0x3ff: 0xdeadbeefcafef00d5555aaaa12345678}
+    dut   = run_psram_wishbone(128, lines, base)
     # Line n at PSRAM byte address base + 16*n (8 words, 16-bit word 0 = data[15:0]).
     for adr, data in lines.items():
-        words = [model.mem[(base + 16*adr)//2 + i] for i in range(8)]
+        words = [dut.psram.mem[(base + 16*adr)//2 + i] for i in range(8)]
         assert words == [(data >> 16*i) & 0xffff for i in range(8)]
 
 
 def test_psram_wishbone_64():
     """64-bit Wishbone lines (as used behind the SoC L2 cache)."""
-    dut   = PSRAMWishboneDUT(0x400000, data_width=64)
-    model = PSRAMModel(dut.phy)
-    lines = {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d}
-    res   = {}
-
-    def main():
-        for adr, data in lines.items():
-            yield from dut.bridge.bus.write(adr, data)
-        res["read"] = {}
-        for adr in lines:
-            res["read"][adr] = (yield from dut.bridge.bus.read(adr))
-
-    run_simulation(dut, {"sys": main(), "xclk": model.generator()}, clocks={"sys": 80, "xclk": 10},
-        special_overrides={Instance: SimInstance})
-    assert res["read"] == lines
-    assert model.errors == []
+    run_psram_wishbone(64, {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d})
 
 # Memory System ------------------------------------------------------------------------------------
 
-def run_memory_system_bist(monkeypatch):
-    """Run the PSRAM BIST of MemorySystem against PSRAMModel, up to the end of its first pattern."""
-    # Short PSRAM startup delay for simulation.
+def test_memory_system_bist(monkeypatch):
+    """PSRAM BIST through the arbiter and the PSRAM adapter (native PSRAM model), all patterns."""
     import chromatix.gateware.memory as memory
-    monkeypatch.setattr(memory, "PSRAMController",
-        lambda phy: PSRAMController(phy, startup_cycles=16))
+    monkeypatch.setattr(memory, "OPIPSRAMPHY",  lambda pads: Module())
+    monkeypatch.setattr(memory, "OPIPSRAMCore", NativePSRAM)
     qspi_pads  = Record([("clk", 1), ("cs_n", 1), ("mosi", 1), ("miso", 1), ("wp_n", 1), ("hd", 1)])
     psram_pads = Record([("ce_n", 1), ("clk", 1), ("dq", 8), ("dqs", 1)])
     dut        = MemorySystem(qspi_pads, psram_pads)
-    model      = PSRAMModel(dut.phy)
     res        = {"reads": 0}
 
     def main():
         yield qspi_pads.cs_n.eq(1)
-        for _ in range(20000):
+        for _ in range(200000):
             res["reads"] += (yield dut.ctrl.ports[PORT_BIST].dout_valid)
-            if (yield dut.bist_failed):
-                break
-            # First pattern written and read back: the BIST starts writing the second pattern.
-            cmds = [cmd for cmd, _ in model.commands if cmd in [PSRAMModel.CMD_READ, PSRAMModel.CMD_WRITE]]
-            if cmds[-1:] == [PSRAMModel.CMD_WRITE] and cmds.count(PSRAMModel.CMD_READ) == 8:
+            if (yield dut.bist_done) or (yield dut.bist_failed):
                 break
             yield
+        res["done"]   = (yield dut.bist_done)
         res["failed"] = (yield dut.bist_failed)
-        res["cmds"]   = cmds
 
     # Video domain (unused here) clocked slowly to speed up the simulation.
-    run_simulation(dut, {"xclk": [main(), model.generator()]}, clocks={"xclk": 10, "hclk": 100000},
-        special_overrides={Instance: SimInstance})
-    return res, model
-
-
-def test_memory_system_bist(monkeypatch):
-    """PSRAM BIST through the arbiter, the PSRAM controller and a behavioral PSRAM (first pattern)."""
-    res, model = run_memory_system_bist(monkeypatch)
+    run_simulation(dut, {"psram": [main(), dut.psram.generator()]},
+        clocks={"psram": 10, "xclk": 10, "fclk": 5, "hclk": 100000}, special_overrides={Instance: SimInstance})
+    assert res["done"]   == 1
     assert res["failed"] == 0
-    assert res["reads"]  == 8*512 # Read data checked by the BIST.
-    # 8 write bursts (bursts 1-7 cross a 1kB row: 2 write commands), 8 read bursts.
-    assert res["cmds"] == [PSRAMModel.CMD_WRITE]*15 + [PSRAMModel.CMD_READ]*8 + [PSRAMModel.CMD_WRITE]
-    assert model.errors == []
-    # First pattern (alternating 0x55aa/0xaa55) written to the 8 x 1kB bursts, split at 1kB rows.
-    for n in range(8):
-        base = n*(512*512 + 1)
-        assert [model.mem[base + i] for i in range(4)] == [0x55aa, 0xaa55]*2
-        assert model.mem[base + 511] == 0xaa55
-
+    assert res["reads"]  == 4*8*512 # 4 patterns, 8 read bursts of 512 words, checked by the BIST.
+    assert dut.psram.errors == []
+    # First access: 512-word write burst at 0, then bursts every 512*512 + 1 words.
+    assert dut.psram.accesses[:2] == [(1, 0, 512), (1, 2*(512*512 + 1), 512)]

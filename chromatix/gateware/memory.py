@@ -13,7 +13,7 @@ from litex.gen import *
 from litex.soc.interconnect import stream
 from litex.soc.interconnect import wishbone
 
-from chromatix.gateware.psram import PSRAMGW5APHY, PSRAMController, PSRAMBIST
+from litex.soc.cores.ram.opi_psram import OPIPSRAMPHY, OPIPSRAMCore
 
 # Memory Port --------------------------------------------------------------------------------------
 
@@ -120,6 +120,172 @@ class MultiPortRAMCtrl(LiteXModule):
                 ),
             ),
         ]
+
+# PSRAM Port Adapter -------------------------------------------------------------------------------
+
+class PSRAMPortAdapter(LiteXModule):
+    """
+    Arbiter PSRAM interface -> LiteX OPIPSRAMCore native port.
+
+    A request (req_read/req_write pulse, addr/burst_length held) is one native access of
+    burst_length/2 words. Writes: din is the current word, write_next requests the next one (not
+    after the last word), done follows the last word. Reads: dout_valid per word, done with the last
+    one.
+    """
+    def __init__(self, ctrl, core):
+        # # #
+
+        pending = Signal()
+        we      = Signal()
+        busy    = Signal()
+        count   = Signal(11)
+        last    = Signal()
+        done    = Signal()
+
+        self.comb += [
+            ctrl.ready.eq(core.ready),
+            last.eq(count == 1),
+            # Command.
+            core.cmd.valid.eq(pending),
+            core.cmd.we.eq(we),
+            core.cmd.addr.eq(Cat(0, ctrl.addr[1:])),
+            core.cmd.len.eq(ctrl.burst_length[1:]),
+            # Write data.
+            core.wdata.valid.eq(busy & we),
+            core.wdata.data.eq(ctrl.din),
+            core.wdata.we.eq(0b11),
+            ctrl.write_next.eq(core.wdata.valid & core.wdata.ready & ~last),
+            # Read data.
+            core.rdata.ready.eq(1),
+            ctrl.dout_valid.eq(core.rdata.valid),
+            ctrl.dout.eq(core.rdata.data),
+            ctrl.done.eq(done | (core.rdata.valid & last)),
+        ]
+        self.sync += [
+            done.eq(0),
+            If(ctrl.req_read | ctrl.req_write,
+                pending.eq(1),
+                we.eq(ctrl.req_write),
+            ),
+            If(core.cmd.valid & core.cmd.ready,
+                pending.eq(0),
+                busy.eq(1),
+                count.eq(ctrl.burst_length[1:]),
+            ),
+            If((core.wdata.valid & core.wdata.ready) | core.rdata.valid,
+                count.eq(count - 1),
+                If(last,
+                    busy.eq(0),
+                    done.eq(we),
+                )
+            ),
+        ]
+
+# PSRAM BIST ---------------------------------------------------------------------------------------
+
+def next_pattern_nv(testtype, din, addr_cnt, from_counter):
+    """Next BIST data pattern (as NextValue statements)."""
+    return Case(testtype, {
+        0: NextValue(din, ~din),
+        1: NextValue(din, addr_cnt[:16] if from_counter else din + 1),
+        2: NextValue(din, 0xffff),
+        3: NextValue(din, 0x0000),
+    })
+
+
+class PSRAMBIST(LiteXModule):
+    """
+    Short PSRAM BIST (port of PSRAMBIST_Burst.vhd, SHORTTEST): write/read bursts with alternating,
+    counting, ones and zeros patterns. Each pattern is written then read back with bursts spread over
+    the lower 4MB (word address stepping by 512*burst_words + 1 until bit 21 is set: 8 bursts).
+
+    `ctrl` provides the arbiter shared ready/dout.
+    """
+    def __init__(self, port, ctrl, burst_words=512):
+        self.reset    = Signal()
+        self.finished = Signal()
+        self.failed   = Signal()
+
+        # # #
+
+        addr_cnt = Signal(22)
+        din      = Signal(16, reset=0xaa55)
+        testtype = Signal(2) # 0: Alternating, 1: Count, 2: Ones, 3: Zeros.
+        req_read = Signal()
+        req_wr   = Signal()
+
+        self.comb += [
+            port.request.eq(req_read | req_wr),
+            port.rnw.eq(req_read),
+            port.din.eq(din),
+            port.burst_length.eq(2*burst_words),
+        ]
+
+        self.fsm = fsm = ResetInserter()(FSM(reset_state="WRITE_START"))
+        self.comb += fsm.reset.eq(self.reset)
+        self.sync += [
+            req_read.eq(0),
+            req_wr.eq(0),
+            If(self.reset,
+                testtype.eq(0),
+                addr_cnt.eq(0),
+                din.eq(0xaa55),
+                self.finished.eq(0),
+                self.failed.eq(0),
+            )
+        ]
+        for start, wait, req in [
+            ("WRITE_START", "WRITE_WAIT", req_wr),
+            ("READ_START",  "READ_WAIT",  req_read),
+        ]:
+            fsm.act(start,
+                If(ctrl.ready,
+                    NextState(wait),
+                    NextValue(req, 1),
+                    NextValue(port.addr, Cat(0, addr_cnt)),
+                    NextValue(addr_cnt, addr_cnt + (512*burst_words) + 1), # Short test.
+                    next_pattern_nv(testtype, din, addr_cnt, from_counter=True),
+                )
+            )
+        fsm.act("WRITE_WAIT",
+            If(port.done,
+                NextState("WRITE_START"),
+                If(addr_cnt[-1],
+                    NextState("READ_START"),
+                    NextValue(addr_cnt, 0),
+                    NextValue(din, 0xaa55),
+                )
+            ),
+            If(port.write_next,
+                next_pattern_nv(testtype, din, addr_cnt, from_counter=False),
+            )
+        )
+        fsm.act("READ_WAIT",
+            If(port.done,
+                NextState("READ_START"),
+                If(addr_cnt[-1],
+                    NextState("WRITE_START"),
+                    NextValue(addr_cnt, 0),
+                    Case(testtype, {
+                        0: NextValue(testtype, 1),
+                        1: NextValue(testtype, 2),
+                        2: NextValue(testtype, 3),
+                        3: NextState("TESTDONE"),
+                    })
+                )
+            ),
+            If(port.dout_valid,
+                If(~port.done,
+                    next_pattern_nv(testtype, din, addr_cnt, from_counter=False),
+                ),
+                If(ctrl.dout != din,
+                    NextValue(self.failed, 1),
+                )
+            )
+        )
+        fsm.act("TESTDONE",
+            NextValue(self.finished, 1),
+        )
 
 # Burst Write FIFO ---------------------------------------------------------------------------------
 
@@ -512,6 +678,8 @@ class PSRAMWishbone(LiteXModule):
 
 # Memory System ------------------------------------------------------------------------------------
 
+PSRAM_CLK_FREQ = 33.55432e6*2 # xclk.
+
 PORT_BIST   = 0 # PSRAM BIST (short test at startup).
 PORT_QSPI   = 1 # ESP32 QSPI writes (menu/OSD framebuffer).
 PORT_FBRD   = 2 # Game Boy framebuffer read (previous frame, for frame blending).
@@ -557,24 +725,21 @@ class MemorySystem(LiteXModule):
         ]
 
         # Arbiter + PSRAM Controller ---------------------------------------------------------------
-        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus))
-        self.phy   = phy   = ClockDomainsRenamer("xclk")(PSRAMGW5APHY(psram_pads))
-        self.psram = psram = ClockDomainsRenamer("xclk")(PSRAMController(phy))
-        ports = ctrl.ports
+        # LiteX OPI PSRAM (APS6408L, 67MHz): xclk (with the memory reset) and fclk (2x) clocks.
+        self.cd_psram   = ClockDomain("psram")
+        self.cd_psram2x = ClockDomain("psram2x", reset_less=True)
         self.comb += [
-            ctrl.reset.eq(self.reset),
-            psram.reset.eq(self.reset),
-            psram.req_read.eq(ctrl.req_read),
-            psram.req_write.eq(ctrl.req_write),
-            psram.addr.eq(ctrl.addr),
-            psram.din.eq(ctrl.din),
-            psram.burst_length.eq(ctrl.burst_length),
-            ctrl.ready.eq(psram.ready),
-            ctrl.write_next.eq(psram.write_next),
-            ctrl.dout.eq(psram.dout),
-            ctrl.dout_valid.eq(psram.dout_valid),
-            ctrl.done.eq(psram.done),
+            self.cd_psram.clk.eq(ClockSignal("xclk")),
+            self.cd_psram.rst.eq(self.reset),
+            self.cd_psram2x.clk.eq(ClockSignal("fclk")),
         ]
+        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus))
+        cd_psram = {"sys": "psram", "sys2x": "psram2x"}
+        self.phy   = phy   = ClockDomainsRenamer(cd_psram)(OPIPSRAMPHY(psram_pads))
+        self.psram = psram = ClockDomainsRenamer(cd_psram)(OPIPSRAMCore(phy, PSRAM_CLK_FREQ))
+        self.psram_adapter = ClockDomainsRenamer("psram")(PSRAMPortAdapter(ctrl, psram))
+        ports = ctrl.ports
+        self.comb += ctrl.reset.eq(self.reset)
 
         # BIST -------------------------------------------------------------------------------------
         self.bist = bist = ClockDomainsRenamer("xclk")(PSRAMBIST(ports[PORT_BIST], ctrl))
