@@ -137,3 +137,26 @@ def test_sim_video(sim_build_video):
     out6 = [tuple(c >> 2 for c in p) for p in out.getdata()]
     assert out6 == [tuple(2*c for c in p) for p in gb5]
     assert stripes(ppms[-1]) == [WHITE, BLACK, WHITE, BLACK]
+
+# Simulation (Window) ------------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def sim_build_window(tmp_path_factory):
+    if shutil.which("verilator") is None or shutil.which("ghdl") is None:
+        pytest.skip("Verilator/GHDL not installed.")
+    if shutil.which("sdl2-config") is None:
+        pytest.skip("SDL2 not installed.")
+    sim      = load_sim()
+    gateware = str(tmp_path_factory.mktemp("sim_window") / "gateware")
+    sim.build_sim(gateware, make_test_rom(), window=True)
+    return sim, gateware
+
+def test_sim_window(sim_build_window, monkeypatch):
+    """Window (gbwindow module, headless SDL): the displayed frame is the Game Boy LCD frame."""
+    from PIL import Image
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    sim, gateware = sim_build_window
+    sim.run_window(gateware, make_test_rom(), frames=31, screenshot_frame=30)
+    shot = Image.open(os.path.join(gateware, "screenshot_0000.bmp")).convert("RGB")
+    assert shot.size == (160, 144)
+    assert [shot.getpixel((x, 70)) for x in (0, 8, 16, 24)] == [WHITE, BLACK, WHITE, BLACK]

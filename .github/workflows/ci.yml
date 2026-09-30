@@ -20,7 +20,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wget build-essential python3 python3-pip
-          sudo apt-get install -y libevent-dev libjson-c-dev zlib1g-dev # LiteX Verilator simulation.
+          sudo apt-get install -y libevent-dev libjson-c-dev zlib1g-dev libsdl2-dev # LiteX Verilator simulation, window.
           python3 -m pip install --user pytest pytest-xdist pillow
 
       # Install Yosys/Yosys-ABC/Verilator (formal equivalence and Verilator tests, Ubuntu packages

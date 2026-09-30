@@ -18,6 +18,7 @@ The ROM, frames and buttons are runtime inputs: --no-compile runs any ROM on the
 
 import os
 import re
+import json
 import glob
 import time
 import shutil
@@ -28,7 +29,7 @@ from migen import *
 
 from litex.gen import *
 
-from litex.build.generic_platform import Pins
+from litex.build.generic_platform import Pins, Subsignal
 from litex.build.sim              import SimPlatform
 from litex.build.sim.config       import SimConfig
 
@@ -49,7 +50,22 @@ GB_FPS    = 4194304/70224 # Game Boy frame rate (59.73 fps).
 _io = [
     ("sys_clk", 0, Pins(1)),
     ("sys_rst", 0, Pins(1)),
+
+    # Window (gbwindow simulation module): Game Boy LCD, keyboard/gamepad buttons, finish.
+    ("gb_lcd", 0,
+        Subsignal("clk",    Pins(1)),
+        Subsignal("clkena", Pins(1)),
+        Subsignal("data",   Pins(15)),
+        Subsignal("vsync",  Pins(1)),
+    ),
+    ("sim_ctrl", 0,
+        Subsignal("keys",   Pins(8)),
+        Subsignal("finish", Pins(1)),
+    ),
 ]
+
+# Simulation modules (LiteX simulation external modules).
+SIM_MODULES_PATH = os.path.join(SIM_VERILOG_PATH, "modules")
 
 # Simulation Top -----------------------------------------------------------------------------------
 
@@ -61,7 +77,8 @@ class SimTop(LiteXModule):
         video         = False,
         frame_blend   = False,
         correct       = False,
-        dual_clock    = False):
+        dual_clock    = False,
+        window        = False):
         # Clocks: hClk from the simulation clocker and pClk = hClk (single clock: the pClk logic,
         # cartridge address latch and button debouncers, runs at the hClk rate, halving the model
         # evaluations), or pClk from the clocker and hClk = pClk/2 (dual_clock, as the PLL outputs).
@@ -139,12 +156,28 @@ class SimTop(LiteXModule):
         self.comb += cart_rst.eq(1) # Cartridge RST pulled up.
 
         # Buttons ({right, left, down, up, start, select, b, a}, from buttons.hex).
-        buttons = Signal(8)
+        buttons  = Signal(8)
+        scripted = Signal(8)
         self.specials += Instance("gb_buttons",
             i_clk     = ClockSignal("hclk"),
             i_vsync   = gb_lcd_vsync,
-            o_buttons = buttons,
+            o_buttons = scripted,
         )
+        self.comb += buttons.eq(scripted)
+
+        # Window: LCD to the gbwindow module, keyboard/gamepad buttons (with the scripted ones),
+        # simulation end when the window is closed.
+        if window:
+            lcd  = platform.request("gb_lcd")
+            ctrl = platform.request("sim_ctrl")
+            self.comb += [
+                lcd.clk.eq(ClockSignal("hclk")),
+                lcd.clkena.eq(gb_lcd_clkena),
+                lcd.data.eq(gb_lcd_data),
+                lcd.vsync.eq(gb_lcd_vsync),
+                buttons.eq(scripted | ctrl.keys),
+            ]
+            self.sync.hclk += If(ctrl.finish, Finish())
 
         # Game Boy core.
         self.specials += Instance("emu_system_top",
@@ -265,7 +298,8 @@ def build_sim(gateware_dir, rom,
     video       = False,
     frame_blend = False,
     correct     = False,
-    dual_clock  = False):
+    dual_clock  = False,
+    window      = False):
     platform = SimPlatform("SIM", _io)
     for source in verilog_sources():
         platform.add_source(source)
@@ -286,7 +320,16 @@ def build_sim(gateware_dir, rom,
         frame_blend = frame_blend,
         correct     = correct,
         dual_clock  = dual_clock,
+        window      = window,
     )
+    extra_mods = {}
+    if window:
+        # Module sources copied to the build directory (LiteX writes its variables.mak there).
+        modules_dir = os.path.join(gateware_dir, "sim_modules")
+        shutil.rmtree(modules_dir, ignore_errors=True)
+        shutil.copytree(os.path.join(SIM_MODULES_PATH, "gbwindow"), os.path.join(modules_dir, "gbwindow"))
+        sim_config.add_module("gbwindow", ["gb_lcd", "sim_ctrl"], args={"scale": 4, "realtime": False})
+        extra_mods = dict(extra_mods=["gbwindow"], extra_mods_path=modules_dir)
     platform.build(top,
         build_dir  = gateware_dir,
         sim_config = sim_config,
@@ -294,6 +337,7 @@ def build_sim(gateware_dir, rom,
         threads    = threads,
         trace      = trace,
         run        = False,
+        **extra_mods,
     )
     # Compile (LiteX only compiles when also running the simulation).
     compile_sim(gateware_dir)
@@ -324,7 +368,10 @@ def pgo_sim(gateware_dir, rom, frames=20):
     pgo_dir = os.path.join(gateware_dir, "pgo")
     shutil.rmtree(pgo_dir, ignore_errors=True)
     compile_sim(gateware_dir, cflags=f"-fprofile-generate -fprofile-dir={pgo_dir}", ldflags="-fprofile-generate")
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy") # Training run without window.
     run_sim(gateware_dir, rom, frames=frames, every=frames + 1)
+    if os.environ["SDL_VIDEODRIVER"] == "dummy":
+        del os.environ["SDL_VIDEODRIVER"]
     compile_sim(gateware_dir, cflags=f"-fprofile-use -fprofile-dir={pgo_dir} -fprofile-partial-training "
         "-Wno-missing-profile", ldflags="-fprofile-use")
 
@@ -340,6 +387,22 @@ def run_sim(gateware_dir, rom, frames=60, every=1, presses=[]):
     write_button_events(os.path.join(gateware_dir, "buttons.hex"), presses)
     subprocess.run(["obj_dir/Vsim", f"+frames={frames}", f"+every={every}"], cwd=gateware_dir, check=True)
     return sorted(glob.glob(os.path.join(gateware_dir, "frame_*.ppm")))
+
+def run_window(gateware_dir, rom, presses=[], scale=4, realtime=False, frames=2**31 - 1,
+    screenshot_frame=-1):
+    """Run the simulation in a window (gbwindow module) until it is closed (or frames)."""
+    config_file = os.path.join(gateware_dir, "sim_config.js")
+    with open(config_file, encoding="utf-8") as f:
+        config = json.load(f)
+    modules = [m for m in config if m.get("module") == "gbwindow"]
+    if not modules:
+        raise ValueError("Simulation not built with --window.")
+    modules[0]["args"] = {"scale": scale, "realtime": realtime, "screenshot_frame": screenshot_frame}
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4)
+    for bmp in glob.glob(os.path.join(gateware_dir, "screenshot_*.bmp")):
+        os.remove(bmp)
+    run_sim(gateware_dir, rom, frames=frames, every=2**31 - 1, presses=presses)
 
 def uvc_frames(gateware_dir):
     """Video pipeline output frames (--video) of the last run."""
@@ -370,6 +433,9 @@ def main():
     parser.add_argument("--correct",     action="store_true",   help="Video: LCD/UVC color correction.")
     parser.add_argument("--dual-clock",  action="store_true",   help="Exact clocking: pClk and hClk = pClk/2 (default: single clock, pClk = hClk, faster).")
     parser.add_argument("--pgo",         action="store_true",   help="Profile-guided optimization of the build (trained on --rom, ~+20% speed).")
+    parser.add_argument("--window",      action="store_true",   help="Play in a window (keyboard/gamepad, until closed): arrows, X: A, Z: B, Enter: Start, Backspace: Select, P: pause, F12: screenshot.")
+    parser.add_argument("--window-scale", default=4,  type=int, help="Window scale.")
+    parser.add_argument("--realtime",    action="store_true",   help="Window: never faster than the Game Boy.")
     parser.add_argument("--bench",       action="store_true",   help="Benchmark: run --frames frames (none written), print the simulation speed.")
     args = parser.parse_args()
 
@@ -393,15 +459,21 @@ def main():
             frame_blend = args.frame_blend,
             correct     = args.correct,
             dual_clock  = args.dual_clock,
+            window      = args.window,
         )
         if args.pgo:
             pgo_sim(gateware_dir, rom)
     if args.bench:
+        if args.window:
+            os.environ["SDL_VIDEODRIVER"] = "dummy" # Benchmark without window display.
         start = time.time()
         run_sim(gateware_dir, rom, frames=args.frames, every=args.frames + 1, presses=presses)
         elapsed = time.time() - start
         fps     = args.frames/elapsed
         print(f"[bench] {args.frames} frames in {elapsed:.1f}s: {fps:.2f} fps, {fps/GB_FPS:.3f}x realtime.")
+        return
+    if args.window:
+        run_window(gateware_dir, rom, presses=presses, scale=args.window_scale, realtime=args.realtime)
         return
     ppms = run_sim(gateware_dir, rom, frames=args.frames, every=args.every, presses=presses)
 
