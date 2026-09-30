@@ -18,6 +18,7 @@ The ROM, frames and buttons are runtime inputs: --no-compile runs any ROM on the
 
 import os
 import glob
+import time
 import argparse
 import subprocess
 
@@ -41,6 +42,7 @@ from chromatix.gateware.vcart   import VirtualCart
 # IOs ----------------------------------------------------------------------------------------------
 
 PCLK_FREQ = 33.55432e6
+GB_FPS    = 4194304/70224 # Game Boy frame rate (59.73 fps).
 
 _io = [
     ("sys_clk", 0, Pins(1)),
@@ -324,6 +326,7 @@ def main():
     parser.add_argument("--video",       action="store_true",   help="Video pipeline on a PSRAM model (uvc_* frames: LCD panel/UVC output).")
     parser.add_argument("--frame-blend", action="store_true",   help="Video: frame blending.")
     parser.add_argument("--correct",     action="store_true",   help="Video: LCD/UVC color correction.")
+    parser.add_argument("--bench",       action="store_true",   help="Benchmark: run --frames frames (none written), print the simulation speed.")
     args = parser.parse_args()
 
     with open(args.rom, "rb") as f:
@@ -346,6 +349,13 @@ def main():
             frame_blend = args.frame_blend,
             correct     = args.correct,
         )
+    if args.bench:
+        start = time.time()
+        run_sim(gateware_dir, rom, frames=args.frames, every=args.frames + 1, presses=presses)
+        elapsed = time.time() - start
+        fps     = args.frames/elapsed
+        print(f"[bench] {args.frames} frames in {elapsed:.1f}s: {fps:.2f} fps, {fps/GB_FPS:.3f}x realtime.")
+        return
     ppms = run_sim(gateware_dir, rom, frames=args.frames, every=args.every, presses=presses)
 
     # Frames -> PNG.
