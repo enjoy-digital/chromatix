@@ -19,6 +19,7 @@ import argparse
 from types import MethodType, SimpleNamespace
 
 from migen import *
+from migen.genlib.cdc import MultiReg
 
 from litex.gen import *
 from litex.gen.genlib.cdc import BusSynchronizer
@@ -41,11 +42,13 @@ from chromatix.gateware.buttons    import Buttons, BUTTONS
 from chromatix.gateware.debug      import DebugControl
 from chromatix.gateware.memory     import MemorySystem
 from chromatix.gateware.vcart      import VirtualCart, VirtualCartCSR
+from chromatix.gateware.chromagic  import VirtualCartControl, CoreHoldVideo
 from chromatix.gateware.demo       import ButtonsCSR, ToneGenerator
 from chromatix.gateware.video      import VideoPipeline
 from chromatix.gateware.lcd        import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_registers
 from chromatix.gateware.sysmon     import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
+from chromatix.gateware.sysmon     import SystemMonitorCartLink
 from chromatix.gateware.adc        import BatteryADC
 from chromatix.gateware.terminal   import LCDTerminal
 
@@ -117,7 +120,8 @@ class BaseSoC(SoCMini):
         # LiteX "sys" domain: gClk, or pClk for the BIOS demo CPU.
         sys_clk_freq = pclk_freq if with_bios else gclk_freq
         assert not (with_bios and with_debug_bridge) # Both use the USB CDC port.
-        with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
+        # Virtual cartridge: loaded by the ESP32 (ChroMagic firmware, SD card) or over the debug bridge.
+        with_vcart = not with_bios
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
@@ -222,15 +226,19 @@ class BaseSoC(SoCMini):
         # 18-bit shift register sampling cart detect pin.
         self.sync.xclk += cart_det_sr.eq(Cat(cart.det, cart_det_sr[:17]))
 
-        # memrst: set when PLL unlocked, or on cart detect transitions.
+        # memrst: set when PLL unlocked, or on cart detect transitions (except during a virtual
+        # cartridge session).
+        vcart_session   = Signal() # gClk.
+        vcart_session_x = Signal()
+        self.specials += MultiReg(vcart_session, vcart_session_x, "xclk")
         self.sync.xclk += [
             If(~crg.pll.locked,
                 memrst.eq(1),
             ).Else(
-                memrst.eq(
+                memrst.eq(~vcart_session_x & (
                     (cart_det_sr[2:18] == 0x7FFF) |
                     (cart_det_sr[2:18] == 0x8000)
-                ),
+                )),
             ),
         ]
 
@@ -317,13 +325,14 @@ class BaseSoC(SoCMini):
             self.comb += btn.eq(getattr(btns_phy, name) | getattr(debug_ctrl, name))
             setattr(btns, name, btn)
 
-        # Menu button: OR physical menu button with MCU menu bit, gate until cart is stable and
-        # menu init is complete.
+        # Menu button: OR physical menu button with MCU menu bit, gate until cart is stable (or the
+        # virtual cartridge enabled) and menu init is complete.
         btn_menu_ored = Signal()
         menu_gated    = Signal()
+        vcart_enabled = Signal() # gClk.
         self.comb += [
             btn_menu_ored.eq(buttons.menu & ~mcu_buttons[8] & ~debug_ctrl.menu),
-            If(q_menu_init & (cart_det_sr[3:7] == 0xF),
+            If(q_menu_init & (vcart_enabled | (cart_det_sr[3:7] == 0xF)),
                 menu_gated.eq(btn_menu_ored),
             ).Else(
                 menu_gated.eq(1),
@@ -443,8 +452,80 @@ class BaseSoC(SoCMini):
         # Virtual Cartridge (ROM/cartridge RAM in the PSRAM, loaded from the host) -----------------
 
         if with_vcart:
-            self.vcart     = vcart = VirtualCart(memory.vcart_port, memory.ctrl.dout)
-            self.vcart_csr = VirtualCartCSR(vcart)
+            self.vcart      = vcart      = VirtualCart(memory.vcart_port, memory.ctrl.dout)
+            self.vcart_ctrl = vcart_ctrl = VirtualCartControl()
+            qspi_slave = memory.qspi_slave
+            self.comb += [
+                vcart_session.eq(vcart_ctrl.session),
+                vcart_enabled.eq(vcart_ctrl.enabled),
+                # Save snapshots (read by the ESP32 over QSPI).
+                vcart.snapshot_request.eq(vcart_ctrl.snapshot_request),
+                vcart.snapshot_block.eq(vcart_ctrl.snapshot_block),
+                vcart.snapshot_sequence.eq(vcart_ctrl.snapshot_sequence),
+                qspi_slave.virtual_ready.eq(vcart.snapshot_ready),
+                qspi_slave.virtual_sequence.eq(vcart.snapshot_ready_sequence),
+                vcart.snapshot_addr.eq(qspi_slave.rd_addr),
+                qspi_slave.rd_data.eq(vcart.snapshot_data),
+                # Status.
+                vcart.quiesce.eq(vcart_ctrl.quiesce),
+                vcart_ctrl.quiesced.eq(vcart.quiesced),
+                vcart_ctrl.initialized.eq(vcart.initialized),
+                vcart_ctrl.save_dirty.eq(vcart.save_dirty),
+                vcart_ctrl.core_reset.eq(vcart.reset),
+                vcart_ctrl.boot_rom_enabled.eq(boot_rom_enabled),
+            ]
+            # Control: ESP32 (ChroMagic) session, else the debug bridge CSRs.
+            esp32_ctrl_active = Signal()
+            vcart_hold        = Signal()
+            self.comb += esp32_ctrl_active.eq(vcart_ctrl.enable | vcart_ctrl.hold)
+            if with_debug_bridge:
+                self.vcart_csr = vcart_csr = VirtualCartCSR(vcart)
+                self.comb += [
+                    If(esp32_ctrl_active,
+                        vcart.enable.eq(vcart_ctrl.enable),
+                        vcart.mbc_type.eq(vcart_ctrl.mbc_type),
+                        vcart.mbc1m.eq(vcart_ctrl.mbc1m),
+                        vcart.mbc30.eq(vcart_ctrl.mbc30),
+                        vcart.has_ram.eq(vcart_ctrl.has_ram),
+                        vcart.rom_mask.eq(vcart_ctrl.rom_mask),
+                        vcart.ram_mask.eq(vcart_ctrl.ram_mask),
+                    ).Else(
+                        vcart.enable.eq(vcart_csr.enable),
+                        vcart.mbc_type.eq(vcart_csr.mbc_type),
+                        vcart.mbc1m.eq(vcart_csr.mbc1m),
+                        vcart.mbc30.eq(vcart_csr.mbc30),
+                        vcart.has_ram.eq(vcart_csr.has_ram),
+                        vcart.rom_mask.eq(vcart_csr.rom_mask),
+                        vcart.ram_mask.eq(vcart_csr.ram_mask),
+                    ),
+                    vcart.flush.eq(vcart_csr.flush),
+                    vcart_hold.eq(vcart_ctrl.hold | vcart_csr.hold),
+                ]
+            else:
+                self.comb += [
+                    vcart.enable.eq(vcart_ctrl.enable),
+                    vcart.mbc_type.eq(vcart_ctrl.mbc_type),
+                    vcart.mbc1m.eq(vcart_ctrl.mbc1m),
+                    vcart.mbc30.eq(vcart_ctrl.mbc30),
+                    vcart.has_ram.eq(vcart_ctrl.has_ram),
+                    vcart.rom_mask.eq(vcart_ctrl.rom_mask),
+                    vcart.ram_mask.eq(vcart_ctrl.ram_mask),
+                    vcart_hold.eq(vcart_ctrl.hold),
+                ]
+            # Core held: hold requests, 16 cycles on enable changes, until the cache is ready.
+            vcart_enable_d   = Signal()
+            vcart_mode_reset = Signal(4)
+            vcart_core_hold  = Signal()
+            self.sync.hclk += [
+                vcart_enable_d.eq(vcart.enable),
+                If(vcart.enable != vcart_enable_d,
+                    vcart_mode_reset.eq(0xf),
+                ).Elif(vcart_mode_reset != 0,
+                    vcart_mode_reset.eq(vcart_mode_reset - 1),
+                )
+            ]
+            self.comb += vcart_core_hold.eq(vcart_hold | (vcart_mode_reset != 0) |
+                (vcart.enable & ~vcart.initialized))
         self.comb += [
             memory.reset.eq(memrst),
             q_menu_init.eq(memory.menu_init),
@@ -519,6 +600,23 @@ class BaseSoC(SoCMini):
                 link.out.eq(0),
             ]
         else:
+            # Game Boy LCD: black frames while the virtual cartridge holds the core (OSD kept).
+            core_lcd = SimpleNamespace(clkena=gb_lcd_clkena, mode=gb_lcd_mode, on=gb_lcd_on,
+                vsync=gb_lcd_vsync, data=gb_lcd_data)
+            if with_vcart:
+                self.hold_video = hold_video = CoreHoldVideo()
+                core_lcd = SimpleNamespace(clkena=hold_video.core_clkena, mode=hold_video.core_mode,
+                    on=hold_video.core_on, vsync=hold_video.core_vsync, data=hold_video.core_data)
+                self.comb += [
+                    hold_video.hold.eq(vcart_ctrl.hold),
+                    hold_video.boot_rom_enabled.eq(boot_rom_enabled),
+                    vcart_ctrl.frame_valid.eq(hold_video.frame_valid),
+                    gb_lcd_clkena.eq(hold_video.clkena),
+                    gb_lcd_mode.eq(hold_video.mode),
+                    gb_lcd_on.eq(hold_video.on),
+                    gb_lcd_vsync.eq(hold_video.vsync),
+                    gb_lcd_data.eq(hold_video.data),
+                ]
             self.specials += Instance("emu_system_top",
                 i_hclk              = ClockSignal("hclk"),
                 i_pclk              = ClockSignal("pclk"),
@@ -569,15 +667,15 @@ class BaseSoC(SoCMini):
                 o_right             = right,
                 # Game Boy LCD.
                 i_LCD_INIT_DONE     = lcd_init_done,
-                o_gb_lcd_clkena     = gb_lcd_clkena,
-                o_gb_lcd_mode       = gb_lcd_mode,
-                o_gb_lcd_on         = gb_lcd_on,
-                o_gb_lcd_vsync      = gb_lcd_vsync,
-                o_gb_lcd_data       = gb_lcd_data,
+                o_gb_lcd_clkena     = core_lcd.clkena,
+                o_gb_lcd_mode       = core_lcd.mode,
+                o_gb_lcd_on         = core_lcd.on,
+                o_gb_lcd_vsync      = core_lcd.vsync,
+                o_gb_lcd_data       = core_lcd.data,
                 # Virtual Cartridge.
                 **(dict(
                     i_VCART_EN      = vcart.enable,
-                    i_VCART_HOLD    = self.vcart_csr.hold,
+                    i_VCART_HOLD    = vcart_core_hold,
                     i_VCART_WAIT    = vcart.wait,
                     i_VCART_DATA    = vcart.data,
                     o_VCART_A       = vcart.a,
@@ -677,7 +775,7 @@ class BaseSoC(SoCMini):
 
         # System Monitor (gClk domain) -------------------------------------------------------------
 
-        sm_num_channels = 10
+        sm_num_channels = 14 # With the cartridge link channels (ChroMagic protocol).
 
         # UART (FPGA <-> ESP32 MCU).
         self.sm_uart = sm_uart = ClockDomainsRenamer("gclk")(SystemMonitorUART(serial, clk_freq=gclk_freq))
@@ -720,6 +818,25 @@ class BaseSoC(SoCMini):
             sm_bridge.tx_byte_count.eq(sm_payloads.tx_byte_count),
             sm_bridge.tx_senddata.eq(sm_payloads.tx_senddata),
         ]
+
+        # Cartridge link (ChroMagic protocol): virtual cartridge control.
+        self.sm_cart_link = sm_cart_link = ClockDomainsRenamer("gclk")(SystemMonitorCartLink())
+        self.comb += [
+            sm_cart_link.rx_address.eq(sm_bridge.rx_address),
+            sm_cart_link.rx_data.eq(sm_bridge.rx_data),
+            sm_cart_link.rx_data_val.eq(sm_bridge.rx_data_val),
+            sm_cart_link.tx_channel.eq(sm_bridge.tx_channel),
+            sm_cart_link.tx_bytepos.eq(sm_bridge.tx_bytepos),
+            sm_cart_link.write_done.eq(sm_bridge.write_done),
+            sm_payloads.cart_new_data.eq(sm_cart_link.new_data),
+            sm_payloads.cart_byte_count.eq(sm_cart_link.byte_count),
+            sm_payloads.cart_senddata.eq(sm_cart_link.senddata),
+        ]
+        if with_vcart:
+            self.comb += [
+                sm_cart_link.request.connect(vcart_ctrl.request),
+                vcart_ctrl.response.connect(sm_cart_link.response),
+            ]
 
         # Menu / UI / Battery / Palette.
         self.sm_ctrl = sm_ctrl = ClockDomainsRenamer("gclk")(SystemMonitorControl(num_channels=sm_num_channels))

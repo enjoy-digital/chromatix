@@ -74,6 +74,7 @@ class VirtualCartControl(LiteXModule):
         self.request  = stream.Endpoint(cart_link_request_layout())
         self.response = stream.Endpoint(cart_link_response_layout())
         self.session  = Signal() # gClk: virtual cartridge session (prepared, starting or enabled).
+        self.enabled  = Signal() # gClk: virtual cartridge enabled.
 
         # Game Boy side (hClk).
         self.enable           = Signal() # Virtual cartridge enabled.
@@ -129,7 +130,10 @@ class VirtualCartControl(LiteXModule):
         stop            = Signal()
         quiesce         = Signal()
         resume          = Signal()
-        self.comb += self.session.eq(enable_g | start_pending_g | prepared_g)
+        self.comb += [
+            self.session.eq(enable_g | start_pending_g | prepared_g),
+            self.enabled.eq(enable_g),
+        ]
 
         # hClk side.
         enable_h      = Signal()

@@ -224,7 +224,7 @@ module emu_system_top
         begin
             CART_RST_r1 <= CART_RST;
             CART_RST_r2 <= CART_RST_r1;
-            gbreset_ungated <= (~LCD_INIT_DONE | VCART_HOLD) ? 1'b1 : ~CART_RST_r2;
+            gbreset_ungated <= (~LCD_INIT_DONE | VCART_HOLD) ? 1'b1 : (~CART_RST_r2 & ~VCART_EN); // CART_RST ignored when virtual.
             if(~ce_2x_r1 & ce_2x & ce)
                 gbreset <= gbreset_ungated;
                 

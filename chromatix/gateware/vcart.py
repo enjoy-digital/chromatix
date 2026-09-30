@@ -555,7 +555,11 @@ class VirtualCart(LiteXModule):
 # Virtual Cartridge CSRs ---------------------------------------------------------------------------
 
 class VirtualCartCSR(LiteXModule):
-    """Virtual cartridge control/status (sys domain) for a VirtualCart (hClk)."""
+    """
+    Virtual cartridge control/status (sys domain) for a VirtualCart (hClk): the control fields are
+    output in the hClk domain (enable, hold, flush pulse and configuration) to be applied to the
+    virtual cartridge (by the SoC, along with the ESP32 control).
+    """
     def __init__(self, vcart):
         self.control = CSRStorage(fields=[
             CSRField("enable",   size=1, offset=0,              description="Serve the ROM/RAM from the PSRAM."),
@@ -572,20 +576,30 @@ class VirtualCartCSR(LiteXModule):
         self.stalls = CSRStatus(32, description="Game Boy stall cycles (hClk).")
         self.reads  = CSRStatus(32, description="Cartridge ROM/RAM reads.")
         self.debug  = CSRStatus(32, description="Debug: [15:0] address, 16 rd, 17 wr, 18 reset, 19 wait, [23:20] state, 24 enable.")
-        self.hold   = Signal()
+
+        # Control (hClk).
+        self.enable   = Signal()
+        self.hold     = Signal()
+        self.flush    = Signal()
+        self.mbc_type = Signal(3)
+        self.rom_mask = Signal(9)
+        self.ram_mask = Signal(4)
+        self.mbc1m    = Signal()
+        self.mbc30    = Signal()
+        self.has_ram  = Signal()
 
         # # #
 
         fields = self.control.fields
         self.specials += [
-            MultiReg(fields.enable,   vcart.enable,   "hclk"),
-            MultiReg(fields.mbc,      vcart.mbc_type, "hclk"),
-            MultiReg(fields.rom_mask, vcart.rom_mask, "hclk"),
-            MultiReg(fields.ram_mask, vcart.ram_mask, "hclk"),
-            MultiReg(fields.mbc1m,    vcart.mbc1m,    "hclk"),
-            MultiReg(fields.mbc30,    vcart.mbc30,    "hclk"),
-            MultiReg(fields.has_ram,  vcart.has_ram,  "hclk"),
-            MultiReg(fields.hold,     self.hold,      "hclk"),
+            MultiReg(fields.enable,   self.enable,   "hclk"),
+            MultiReg(fields.mbc,      self.mbc_type, "hclk"),
+            MultiReg(fields.rom_mask, self.rom_mask, "hclk"),
+            MultiReg(fields.ram_mask, self.ram_mask, "hclk"),
+            MultiReg(fields.mbc1m,    self.mbc1m,    "hclk"),
+            MultiReg(fields.mbc30,    self.mbc30,    "hclk"),
+            MultiReg(fields.has_ram,  self.has_ram,  "hclk"),
+            MultiReg(fields.hold,     self.hold,     "hclk"),
             MultiReg(vcart.misses,    self.misses.status),
             MultiReg(vcart.stalls,    self.stalls.status),
             MultiReg(vcart.reads,     self.reads.status),
@@ -599,4 +613,4 @@ class VirtualCartCSR(LiteXModule):
         self.sync += If(fields.flush, flush_toggle.eq(~flush_toggle))
         self.specials += MultiReg(flush_toggle, flush_sync, "hclk")
         self.sync.hclk += flush_seen.eq(flush_sync)
-        self.comb += vcart.flush.eq(flush_sync != flush_seen)
+        self.comb += self.flush.eq(flush_sync != flush_seen)
