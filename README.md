@@ -146,11 +146,12 @@ Firmware peripherals: buttons (`demo_buttons_status`), square wave tone generato
 ## Simulation
 
 `chromatix_sim.py` simulates the Game Boy core with Verilator (VHDL parts converted to Verilog
-with GHDL): cartridge model (ROM only, MBC1, MBC5 + RAM) or virtual cartridge with a PSRAM model
-(`--vcart`), scripted buttons and the LCD output captured as PNG frames. `--video` adds the video
-pipeline (frame buffer in a PSRAM model, frame blend `--frame-blend`, color correction `--correct`,
-ST7785 panel scan): its UVC copy is captured as `uvc_*` frames. The ROM, frames and buttons are runtime inputs, so `--no-compile` runs another ROM or
-scenario on the same build (~0.5s per Game Boy frame):
+with GHDL): cartridge model (ROM only, MBC1, MBC2, MBC3 without RTC, MBC5 + RAM) or virtual
+cartridge with a PSRAM model (`--vcart`), scripted buttons and the LCD output captured as PNG
+frames. `--video` adds the video pipeline (frame buffer in a PSRAM model, frame blend
+`--frame-blend`, color correction `--correct`, ST7785 panel scan): its UVC copy is captured as
+`uvc_*` frames. The ROM, frames and buttons are runtime inputs, so `--no-compile` runs another ROM
+or scenario on the same build.
 
 ```bash
 ./test/gb_test_rom.py stripes.gb   # Minimal test ROM (8-pixel stripes, A inverts the palette).
@@ -158,6 +159,29 @@ scenario on the same build (~0.5s per Game Boy frame):
 ./chromatix_sim.py --rom game.gb --frames 600 --every 60 --buttons start@300+10 --no-compile
 ls build/sim/frames
 ```
+
+### Window (play in the simulation)
+
+`--window` shows the LCD in an SDL window (SDL2 required) and takes the keyboard or a gamepad until
+the window is closed; the save file (`<rom>.sav`, or `--save`) is loaded and written back at the end:
+
+```bash
+./chromatix_sim.py --rom game.gb --window --pgo            # Build (PGO trained on the ROM) and play.
+./chromatix_sim.py --rom other.gb --window --no-compile    # Another ROM, same build.
+./chromatix_sim.py --rom game.gb --window --no-compile --wav game.wav  # Record the audio.
+```
+
+| Key                      | Game Boy |
+|--------------------------|----------|
+| Arrows                   | D-pad    |
+| X / Z                    | A / B    |
+| Enter                    | Start    |
+| Backspace / Right Shift  | Select   |
+| P / F12 / Escape         | Pause / screenshot (BMP) / quit |
+
+The simulation is cycle accurate (the whole Game Boy core RTL): ~2 fps (0.04x realtime) on a recent
+desktop CPU with `--pgo` (`--bench` measures it), so games play in slow motion; `--audio` plays the
+sound live (only meaningful near realtime), `--wav` records it in simulation time.
 
 ## Credits
 
