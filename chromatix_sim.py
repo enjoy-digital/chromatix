@@ -63,6 +63,10 @@ _io = [
         Subsignal("keys",   Pins(8)),
         Subsignal("finish", Pins(1)),
     ),
+    ("gb_audio", 0,
+        Subsignal("left",   Pins(16)),
+        Subsignal("right",  Pins(16)),
+    ),
 ]
 
 # Simulation modules (LiteX simulation external modules).
@@ -166,9 +170,18 @@ class SimTop(LiteXModule):
         )
         self.comb += buttons.eq(scripted)
 
-        # Window: LCD to the gbwindow module, keyboard/gamepad buttons (with the scripted ones),
-        # simulation end when the window is closed.
+        # Audio (signed 16-bit samples, hClk).
+        audio_left  = Signal(16)
+        audio_right = Signal(16)
+
+        # Window: LCD/audio to the gbwindow module, keyboard/gamepad buttons (with the scripted
+        # ones), simulation end when the window is closed.
         if window:
+            audio = platform.request("gb_audio")
+            self.comb += [
+                audio.left.eq(audio_left),
+                audio.right.eq(audio_right),
+            ]
             lcd  = platform.request("gb_lcd")
             ctrl = platform.request("sim_ctrl")
             self.comb += [
@@ -211,6 +224,8 @@ class SimTop(LiteXModule):
             i_IR_RX             = 1,
             i_LINK_IN           = 1,
             i_LCD_INIT_DONE     = 1,
+            o_left              = audio_left,
+            o_right             = audio_right,
             o_gb_lcd_clkena     = gb_lcd_clkena,
             o_gb_lcd_data       = gb_lcd_data,
             o_gb_lcd_mode       = gb_lcd_mode,
@@ -330,7 +345,7 @@ def build_sim(gateware_dir, rom,
         modules_dir = os.path.join(gateware_dir, "sim_modules")
         shutil.rmtree(modules_dir, ignore_errors=True)
         shutil.copytree(os.path.join(SIM_MODULES_PATH, "gbwindow"), os.path.join(modules_dir, "gbwindow"))
-        sim_config.add_module("gbwindow", ["gb_lcd", "sim_ctrl"], args={"scale": 4, "realtime": False})
+        sim_config.add_module("gbwindow", ["gb_lcd", "sim_ctrl", "gb_audio"], args={"scale": 4, "realtime": False})
         extra_mods = dict(extra_mods=["gbwindow"], extra_mods_path=modules_dir)
     platform.build(top,
         build_dir  = gateware_dir,
@@ -406,7 +421,7 @@ def run_sim(gateware_dir, rom, frames=60, every=1, presses=[], save=None):
     return sorted(glob.glob(os.path.join(gateware_dir, "frame_*.ppm")))
 
 def run_window(gateware_dir, rom, presses=[], scale=4, realtime=False, frames=2**31 - 1,
-    screenshot_frame=-1, save=None):
+    screenshot_frame=-1, save=None, wav=None, audio=False):
     """Run the simulation in a window (gbwindow module) until it is closed (or frames)."""
     config_file = os.path.join(gateware_dir, "sim_config.js")
     with open(config_file, encoding="utf-8") as f:
@@ -414,7 +429,13 @@ def run_window(gateware_dir, rom, presses=[], scale=4, realtime=False, frames=2*
     modules = [m for m in config if m.get("module") == "gbwindow"]
     if not modules:
         raise ValueError("Simulation not built with --window.")
-    modules[0]["args"] = {"scale": scale, "realtime": realtime, "screenshot_frame": screenshot_frame}
+    modules[0]["args"] = {
+        "scale"            : scale,
+        "realtime"         : realtime,
+        "screenshot_frame" : screenshot_frame,
+        "wav"              : os.path.abspath(wav) if wav else "",
+        "audio"            : audio,
+    }
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4)
     for bmp in glob.glob(os.path.join(gateware_dir, "screenshot_*.bmp")):
@@ -453,6 +474,8 @@ def main():
     parser.add_argument("--window",      action="store_true",   help="Play in a window (keyboard/gamepad, until closed): arrows, X: A, Z: B, Enter: Start, Backspace: Select, P: pause, F12: screenshot.")
     parser.add_argument("--window-scale", default=4,  type=int, help="Window scale.")
     parser.add_argument("--realtime",    action="store_true",   help="Window: never faster than the Game Boy.")
+    parser.add_argument("--wav",         default=None,          help="Window: record the audio to a WAV file (simulation time).")
+    parser.add_argument("--audio",       action="store_true",   help="Window: play the audio (only sounds right near realtime).")
     parser.add_argument("--save",        default=None,          help="Save file (cartridge RAM loaded/written back, default with --window: <rom>.sav).")
     parser.add_argument("--no-save",     action="store_true",   help="Don't load/write the save file.")
     parser.add_argument("--bench",       action="store_true",   help="Benchmark: run --frames frames (none written), print the simulation speed.")
@@ -498,7 +521,7 @@ def main():
         save = None # Saves with the cartridge model only.
     if args.window:
         run_window(gateware_dir, rom, presses=presses, scale=args.window_scale, realtime=args.realtime,
-            save=save)
+            save=save, wav=args.wav, audio=args.audio)
         return
     ppms = run_sim(gateware_dir, rom, frames=args.frames, every=args.every, presses=presses, save=save)
 

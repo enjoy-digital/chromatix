@@ -11,12 +11,14 @@
 //             in a window at each vsync (the title shows the simulation speed).
 // - sim_ctrl: keys[7:0] ({right, left, down, up, start, select, b, a}, driven by the module),
 //             finish (driven by the module: window closed or Escape).
+// - gb_audio: left[15:0], right[15:0] (signed samples, hClk): sampled at 32768Hz (simulation time),
+//             recorded to a WAV file and/or played (only sounds right near realtime).
 //
 // Keys: arrows (D-pad), X (A), Z (B), Enter (Start), Backspace/Right Shift (Select), P (pause),
 // F12 (screenshot, BMP), Escape (quit). A connected gamepad is also mapped.
 //
 // Args (JSON): scale (window scale, default 4), realtime (never run faster than the Game Boy),
-// screenshot_frame (screenshot of this frame, tests).
+// screenshot_frame (screenshot of this frame, tests), wav (audio WAV file), audio (live audio).
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +35,9 @@
 #define PIXELS (WIDTH*HEIGHT)
 
 #define GB_FPS (4194304.0/70224.0)
+
+#define AUDIO_RATE    32768 // hClk/512.
+#define AUDIO_DIVIDER 512
 
 // Button bits ({right, left, down, up, start, select, b, a}).
 #define BTN_A      (1 << 0)
@@ -52,6 +57,8 @@ struct session_s {
   char     *vsync;
   char     *keys;
   char     *finish;
+  uint16_t *left;
+  uint16_t *right;
   // State.
   clk_edge_state_t edge;
   char     vsync_d;
@@ -69,6 +76,14 @@ struct session_s {
   uint8_t  pad_buttons;
   unsigned screenshots;
   int64_t  screenshot_frame;
+  // Audio.
+  unsigned audio_count;
+  FILE    *wav;
+  uint32_t wav_samples;
+  int      audio;
+  SDL_AudioDeviceID audio_dev;
+  int16_t  audio_buf[2*1024];
+  unsigned audio_n;
   // Statistics.
   uint64_t frames;
   uint64_t start_ms;
@@ -92,6 +107,66 @@ static int litex_sim_module_pads_get(struct pad_s *pads, char *name, void **sign
     i++;
   }
   return RC_OK;
+}
+
+// Audio --------------------------------------------------------------------------------------------
+
+static void wav_header(struct session_s *s)
+{
+  uint32_t data_bytes = s->wav_samples*4;
+  uint8_t  h[44];
+  memcpy(h, "RIFF", 4);
+  uint32_t v;
+  v = 36 + data_bytes;        memcpy(h +  4, &v, 4);
+  memcpy(h + 8, "WAVEfmt ", 8);
+  v = 16;                     memcpy(h + 16, &v, 4);
+  uint16_t w;
+  w = 1;                      memcpy(h + 20, &w, 2); // PCM.
+  w = 2;                      memcpy(h + 22, &w, 2); // Stereo.
+  v = AUDIO_RATE;             memcpy(h + 24, &v, 4);
+  v = AUDIO_RATE*4;           memcpy(h + 28, &v, 4);
+  w = 4;                      memcpy(h + 32, &w, 2);
+  w = 16;                     memcpy(h + 34, &w, 2);
+  memcpy(h + 36, "data", 4);
+  v = data_bytes;             memcpy(h + 40, &v, 4);
+  long pos = ftell(s->wav);
+  fseek(s->wav, 0, SEEK_SET);
+  fwrite(h, 1, sizeof(h), s->wav);
+  fseek(s->wav, pos ? pos : (long)sizeof(h), SEEK_SET);
+  fflush(s->wav);
+}
+
+static void audio_sample(struct session_s *s)
+{
+  int16_t lr[2] = {(int16_t)*s->left, (int16_t)*s->right};
+  if (s->wav) {
+    fwrite(lr, sizeof(int16_t), 2, s->wav);
+    if ((++s->wav_samples % AUDIO_RATE) == 0)
+      wav_header(s); // Valid file even if the simulation is interrupted.
+  }
+  if (s->audio_dev) {
+    s->audio_buf[s->audio_n++] = lr[0];
+    s->audio_buf[s->audio_n++] = lr[1];
+    if (s->audio_n == sizeof(s->audio_buf)/sizeof(s->audio_buf[0])) {
+      // Limit the latency (simulation faster than realtime): drop when more than 0.25s queued.
+      if (SDL_GetQueuedAudioSize(s->audio_dev) < AUDIO_RATE)
+        SDL_QueueAudio(s->audio_dev, s->audio_buf, sizeof(s->audio_buf));
+      s->audio_n = 0;
+    }
+  }
+}
+
+static struct session_s *exit_session;
+
+static void gbwindow_exit(void)
+{
+  struct session_s *s = exit_session;
+  if (s && s->wav) {
+    wav_header(s);
+    fclose(s->wav);
+    s->wav = NULL;
+    printf("[gbwindow] WAV: %u samples.\n", s->wav_samples);
+  }
 }
 
 // Window -------------------------------------------------------------------------------------------
@@ -122,6 +197,19 @@ static int window_open(struct session_s *s)
         break;
       }
     }
+  }
+  if (s->audio) {
+    SDL_AudioSpec want = {0};
+    want.freq     = AUDIO_RATE;
+    want.format   = AUDIO_S16SYS;
+    want.channels = 2;
+    want.samples  = 1024;
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0)
+      s->audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, NULL, 0);
+    if (s->audio_dev)
+      SDL_PauseAudioDevice(s->audio_dev, 0);
+    else
+      fprintf(stderr, "[gbwindow] No audio: %s\n", SDL_GetError());
   }
   s->start_ms = SDL_GetTicks64();
   s->title_ms = s->start_ms;
@@ -258,10 +346,19 @@ static int gbwindow_new(void **sess, char *args)
         s->realtime = json_object_get_boolean(value);
       if (json_object_object_get_ex(json, "screenshot_frame", &value))
         s->screenshot_frame = json_object_get_int64(value);
+      if (json_object_object_get_ex(json, "audio", &value))
+        s->audio = json_object_get_boolean(value);
+      if (json_object_object_get_ex(json, "wav", &value) && json_object_get_string_len(value)) {
+        s->wav = fopen(json_object_get_string(value), "wb");
+        if (s->wav)
+          wav_header(s);
+      }
       json_object_put(json);
     }
   }
   *sess = (void *)s;
+  exit_session = s;
+  atexit(gbwindow_exit);
   return window_open(s);
 }
 
@@ -276,6 +373,10 @@ static int gbwindow_add_pads(void *sess, struct pad_list_s *plist)
     litex_sim_module_pads_get(plist->pads, "data",   (void **)&s->data);
     litex_sim_module_pads_get(plist->pads, "vsync",  (void **)&s->vsync);
   }
+  if (!strcmp(plist->name, "gb_audio")) {
+    litex_sim_module_pads_get(plist->pads, "left",  (void **)&s->left);
+    litex_sim_module_pads_get(plist->pads, "right", (void **)&s->right);
+  }
   if (!strcmp(plist->name, "sim_ctrl")) {
     litex_sim_module_pads_get(plist->pads, "keys",   (void **)&s->keys);
     litex_sim_module_pads_get(plist->pads, "finish", (void **)&s->finish);
@@ -286,6 +387,8 @@ static int gbwindow_add_pads(void *sess, struct pad_list_s *plist)
 static int gbwindow_close(void *sess)
 {
   struct session_s *s = (struct session_s *)sess;
+  gbwindow_exit();
+  exit_session = NULL;
   if (s->pad)
     SDL_GameControllerClose(s->pad);
   if (s->window) {
@@ -333,6 +436,11 @@ static int gbwindow_tick(void *sess, uint64_t time_ps)
   if (!s->clk || !clk_pos_edge(&s->edge, *s->clk))
     return RC_OK;
   s->time_ps = time_ps;
+  if (s->left && ++s->audio_count == AUDIO_DIVIDER) {
+    s->audio_count = 0;
+    if (s->wav || s->audio_dev)
+      audio_sample(s);
+  }
   if (*s->clkena && s->n < PIXELS) {
     uint16_t d = *s->data;
     uint32_t r = d & 0x1f, g = (d >> 5) & 0x1f, b = (d >> 10) & 0x1f;
