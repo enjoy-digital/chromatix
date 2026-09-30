@@ -113,7 +113,7 @@ class SimTop(LiteXModule):
             # Virtual cartridge (PSRAM port model in pClk as xClk), no cartridge.
             port = Record(memory_port_layout())
             dout = Signal(16)
-            self.vcart     = ClockDomainsRenamer({"xclk": "pclk"})(VirtualCart(port, dout))
+            self.vcart     = ClockDomainsRenamer({"xclk": "pclk", "qspi": "pclk"})(VirtualCart(port, dout))
             self.psram     = ClockDomainsRenamer("pclk")(SimPSRAMPort(port, dout, rom, latency=vcart_latency))
             self.vcart_cfg = SimVirtualCartConfig(self.vcart, self.psram.cart_rom)
         else:

@@ -39,16 +39,18 @@ UVC_HEIGHT = 144
 
 # Virtual cartridge (see chromatix/gateware/vcart.py).
 PSRAM_BASE    = 0x40000000
-VCART_ROM     = 0x400000
-VCART_RAM     = 0x780000
+VCART_ROM     = 0x020000
+VCART_RAM     = 0x420000
 VCART_ROM_MAX = VCART_RAM - VCART_ROM
 VCART_MBC     = {
-    **{t: 0 for t in [0x00]},                         # ROM only.
+    **{t: 0 for t in [0x00, 0x08, 0x09]},             # ROM only.
     **{t: 1 for t in [0x01, 0x02, 0x03]},             # MBC1.
     **{t: 2 for t in [0x05, 0x06]},                   # MBC2.
     **{t: 3 for t in [0x0f, 0x10, 0x11, 0x12, 0x13]}, # MBC3 (RTC not supported).
-    **{t: 5 for t in range(0x19, 0x1f)},              # MBC5.
+    **{t: 4 for t in range(0x19, 0x1f)},              # MBC5.
+    **{t: 5 for t in [0xff]},                         # HuC1.
 }
+VCART_HAS_RAM = [0x02, 0x03, 0x05, 0x06, 0x08, 0x09, 0x10, 0x12, 0x13, 0x1a, 0x1b, 0x1d, 0x1e, 0xff]
 VCART_RAM_SIZES = {0: 0, 1: 2048, 2: 8192, 3: 32768, 4: 131072, 5: 65536} # Header code -> bytes.
 
 STATUS_FIELDS = ["bist_done", "bist_failed", "lcd_init_done", "menu_disabled", "low_battery", "bat_is_li", "headphones"]
@@ -100,9 +102,10 @@ class Chromatic:
         self.set_buttons([])
 
     # Virtual Cartridge.
-    def vcart_control(self, enable, hold, flush=0, mbc=0, rom_mask=0, ram_mask=0):
+    def vcart_control(self, enable, hold, flush=0, mbc=0, rom_mask=0, ram_mask=0, mbc1m=0, mbc30=0, has_ram=0):
         self.bus.regs.vcart_csr_control.write(
-            (enable << 0) | (hold << 1) | (flush << 2) | (mbc << 4) | (rom_mask << 8) | (ram_mask << 20))
+            (enable << 0) | (hold << 1) | (flush << 2) | (mbc << 4) | (rom_mask << 8) | (ram_mask << 20) |
+            (mbc1m << 24) | (mbc30 << 25) | (has_ram << 26))
 
     def write_psram(self, address, data, chunk=64):
         data = bytes(data) + bytes(-len(data) % 4)
@@ -154,11 +157,21 @@ def rom_config(rom):
     if len(rom) > VCART_ROM_MAX:
         raise ValueError(f"ROM too large ({len(rom)} bytes, max {VCART_ROM_MAX}).")
     if rom[0x147] not in VCART_MBC:
-        raise ValueError(f"Unsupported cartridge type 0x{rom[0x147]:02x} (ROM only, MBC1/2/3/5).")
+        raise ValueError(f"Unsupported cartridge type 0x{rom[0x147]:02x} (ROM only, MBC1/2/3/5, HuC1).")
     banks    = max(2, (len(rom) + 0x3fff)//0x4000)
     rom_mask = (1 << (banks - 1).bit_length()) - 1
     ram_mask = {3: 0x3, 4: 0xf, 5: 0x7}.get(rom[0x149], 0)
-    return {"mbc": VCART_MBC[rom[0x147]], "rom_mask": rom_mask, "ram_mask": ram_mask}
+    mbc      = VCART_MBC[rom[0x147]]
+    return {
+        "mbc"      : mbc,
+        "rom_mask" : rom_mask,
+        "ram_mask" : ram_mask,
+        # MBC1 multicart: second Nintendo logo at the start of the 2nd game (ChroMagic detection).
+        "mbc1m"    : int(mbc == 1 and len(rom) >= 0x40134 and rom[0x40104:0x40134] == rom[0x104:0x134]),
+        # MBC30: ROM > 2MB or 64KB RAM.
+        "mbc30"    : int(mbc == 3 and (rom_mask > 0x7f or ram_mask == 0x7)),
+        "has_ram"  : int(rom[0x147] in VCART_HAS_RAM),
+    }
 
 def rom_title(rom):
     return rom[0x134:0x143].split(b"\x00")[0].decode("ascii", errors="replace").strip()
