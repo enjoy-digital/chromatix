@@ -17,8 +17,10 @@ The ROM, frames and buttons are runtime inputs: --no-compile runs any ROM on the
 """
 
 import os
+import re
 import glob
 import time
+import shutil
 import argparse
 import subprocess
 
@@ -58,9 +60,12 @@ class SimTop(LiteXModule):
         vcart_hold    = 0,
         video         = False,
         frame_blend   = False,
-        correct       = False):
-        # Clocks: pClk from the simulation clocker, hClk = pClk/2 (as the PLL outputs). With the
-        # video pipeline: xClk (= fClk) from the clocker, pClk/hClk/gClk = xClk/2, /4, /8.
+        correct       = False,
+        dual_clock    = False):
+        # Clocks: hClk from the simulation clocker and pClk = hClk (single clock: the pClk logic,
+        # cartridge address latch and button debouncers, runs at the hClk rate, halving the model
+        # evaluations), or pClk from the clocker and hClk = pClk/2 (dual_clock, as the PLL outputs).
+        # With the video pipeline: xClk (= fClk) from the clocker, pClk/hClk/gClk = xClk/2, /4, /8.
         self.cd_pclk = ClockDomain("pclk", reset_less=True)
         self.cd_hclk = ClockDomain("hclk", reset_less=True)
         hclk = Signal()
@@ -77,10 +82,15 @@ class SimTop(LiteXModule):
                 self.cd_gclk.clk.eq(div[2]),
             ]
             self.sync.xclk += div.eq(div + 1)
-        else:
+        elif dual_clock:
             self.comb += self.cd_pclk.clk.eq(platform.request("sys_clk"))
             self.sync.pclk += hclk.eq(~hclk)
             self.comb += self.cd_hclk.clk.eq(hclk)
+        else:
+            self.comb += [
+                self.cd_hclk.clk.eq(platform.request("sys_clk")),
+                self.cd_pclk.clk.eq(self.cd_hclk.clk),
+            ]
 
         # Reset: released after a few hClk cycles.
         reset_n = Signal()
@@ -254,7 +264,8 @@ def build_sim(gateware_dir, rom,
     vcart_hold  = 0,
     video       = False,
     frame_blend = False,
-    correct     = False):
+    correct     = False,
+    dual_clock  = False):
     platform = SimPlatform("SIM", _io)
     for source in verilog_sources():
         platform.add_source(source)
@@ -267,13 +278,14 @@ def build_sim(gateware_dir, rom,
     sim_config = SimConfig()
     # xClk (video): period rounded to an even number of ps (simulation timebase).
     xclk_freq = 1e12/(2*round(1e12/(2*PCLK_FREQ)/2))
-    sim_config.add_clocker("sys_clk", freq_hz=xclk_freq if video else PCLK_FREQ)
+    sim_config.add_clocker("sys_clk", freq_hz=xclk_freq if video else PCLK_FREQ if dual_clock else PCLK_FREQ/2)
     top = SimTop(platform, rom,
         vcart       = vcart,
         vcart_hold  = vcart_hold,
         video       = video,
         frame_blend = frame_blend,
         correct     = correct,
+        dual_clock  = dual_clock,
     )
     platform.build(top,
         build_dir  = gateware_dir,
@@ -284,7 +296,37 @@ def build_sim(gateware_dir, rom,
         run        = False,
     )
     # Compile (LiteX only compiles when also running the simulation).
-    subprocess.run(["bash", "build_sim.sh"], cwd=gateware_dir, check=True, stdout=subprocess.DEVNULL)
+    compile_sim(gateware_dir)
+
+def compile_sim(gateware_dir, cflags="", ldflags=""):
+    """
+    Compile the Verilator model with the LiteX simulation Makefile, tuned for speed: generated code
+    not split in small functions (--output-split*: +70% here), optional extra C/LD flags (PGO).
+    """
+    import litex.build.sim
+    litex_makefile = os.path.join(os.path.dirname(litex.build.sim.__file__), "core", "Makefile")
+    with open(litex_makefile, encoding="utf-8") as f:
+        makefile = f.read()
+    makefile = re.sub(r"--output-split(-\w+)? \d+", lambda m: f"--output-split{m.group(1) or ''} 1000000", makefile)
+    makefile = makefile.replace("-LDFLAGS \"$(LDFLAGS)\"", "-LDFLAGS \"$(LDFLAGS) $(EXTRA_LDFLAGS)\"")
+    with open(os.path.join(gateware_dir, "Makefile.sim"), "w", encoding="utf-8") as f:
+        f.write(makefile)
+    with open(os.path.join(gateware_dir, "build_sim.sh"), encoding="utf-8") as f:
+        script = f.read()
+    script = script.replace(f"-f {litex_makefile}", "-f Makefile.sim")
+    script = re.sub(r"OPT_LEVEL=\S+", f"OPT_LEVEL=\"O3 {cflags}\" EXTRA_LDFLAGS=\"{ldflags}\" JOBS={os.cpu_count()}", script)
+    with open(os.path.join(gateware_dir, "build_sim_fast.sh"), "w", encoding="utf-8") as f:
+        f.write(script)
+    subprocess.run(["bash", "build_sim_fast.sh"], cwd=gateware_dir, check=True, stdout=subprocess.DEVNULL)
+
+def pgo_sim(gateware_dir, rom, frames=20):
+    """Profile-guided optimization: instrumented build, run on the ROM, optimized build."""
+    pgo_dir = os.path.join(gateware_dir, "pgo")
+    shutil.rmtree(pgo_dir, ignore_errors=True)
+    compile_sim(gateware_dir, cflags=f"-fprofile-generate -fprofile-dir={pgo_dir}", ldflags="-fprofile-generate")
+    run_sim(gateware_dir, rom, frames=frames, every=frames + 1)
+    compile_sim(gateware_dir, cflags=f"-fprofile-use -fprofile-dir={pgo_dir} -fprofile-partial-training "
+        "-Wno-missing-profile", ldflags="-fprofile-use")
 
 def run_sim(gateware_dir, rom, frames=60, every=1, presses=[]):
     """Run the simulation (ROM/buttons files + plusargs), returns the captured PPM frames."""
@@ -326,6 +368,8 @@ def main():
     parser.add_argument("--video",       action="store_true",   help="Video pipeline on a PSRAM model (uvc_* frames: LCD panel/UVC output).")
     parser.add_argument("--frame-blend", action="store_true",   help="Video: frame blending.")
     parser.add_argument("--correct",     action="store_true",   help="Video: LCD/UVC color correction.")
+    parser.add_argument("--dual-clock",  action="store_true",   help="Exact clocking: pClk and hClk = pClk/2 (default: single clock, pClk = hClk, faster).")
+    parser.add_argument("--pgo",         action="store_true",   help="Profile-guided optimization of the build (trained on --rom, ~+20% speed).")
     parser.add_argument("--bench",       action="store_true",   help="Benchmark: run --frames frames (none written), print the simulation speed.")
     args = parser.parse_args()
 
@@ -348,7 +392,10 @@ def main():
             video       = args.video,
             frame_blend = args.frame_blend,
             correct     = args.correct,
+            dual_clock  = args.dual_clock,
         )
+        if args.pgo:
+            pgo_sim(gateware_dir, rom)
     if args.bench:
         start = time.time()
         run_sim(gateware_dir, rom, frames=args.frames, every=args.frames + 1, presses=presses)

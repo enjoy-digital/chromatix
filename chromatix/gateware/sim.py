@@ -49,6 +49,14 @@ VHDL_ORDER = [
     "Gameboy_MiSTer/rtl/T80/T80_Pack.vhd",
 ]
 
+# Savestate registers for simulation (savestates are not used): the register holds its default
+# value and the savestate bus is idle, so that the conversion/Verilator fold the savestate logic.
+SIM_SAVESTATE_ARCH = """architecture arch of eReg_SavestateV is
+begin
+   Dout     <= def(upper downto lower);
+   BUS_Dout <= (others => '0');
+end architecture;"""
+
 # Simulation-only Verilog sources.
 SIM_VERILOG_PATH = os.path.join(VERILOG_PATH, "sim")
 
@@ -70,6 +78,7 @@ def convert_vhdl(output_dir, ghdl="ghdl"):
         with open(os.path.join(VERILOG_PATH, source), "rb") as f:
             digest.update(f.read())
     digest.update(repr(VHDL_TOPS).encode())
+    digest.update(SIM_SAVESTATE_ARCH.encode())
     os.makedirs(output_dir, exist_ok=True)
     verilog = os.path.join(output_dir, "gb_vhdl.v")
     stamp   = os.path.join(output_dir, "gb_vhdl.sha1")
@@ -91,6 +100,11 @@ def convert_vhdl(output_dir, ghdl="ghdl"):
             vhdl = f.read()
         if source.endswith("T80/T80.vhd"):
             vhdl = re.sub(r"^(\s*)alu : T80_ALU", r"\1u_alu : T80_ALU", vhdl, flags=re.M)
+        if source.endswith("bus_savestates.vhd"):
+            # Savestate registers: constant defaults, idle bus (simulation speed).
+            vhdl, n = re.subn(r"architecture arch of eReg_SavestateV is.*?end architecture;",
+                SIM_SAVESTATE_ARCH, vhdl, count=1, flags=re.S)
+            assert n == 1
         path = os.path.join(work_dir, source.replace("/", "_"))
         with open(path, "w", encoding="latin-1") as f:
             f.write(vhdl)

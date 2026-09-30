@@ -6,7 +6,9 @@
 // Derived from the MiSTer Game Boy core (bus_savestates.vhd, GPL).
 //
 // eReg_SavestateV (MiSTer bus_savestates.vhd) in Verilog for simulation: instantiated from Verilog
-// with per-instance generics (not kept by the GHDL VHDL -> Verilog conversion).
+// with per-instance generics (not kept by the GHDL VHDL -> Verilog conversion). Savestates are not
+// used in simulation: the register holds its default value and the savestate bus is idle (folded
+// by Verilator, faster simulation).
 
 module eReg_SavestateV #(
     parameter integer index = 0,
@@ -24,15 +26,6 @@ module eReg_SavestateV #(
     input  wire [upper:lower] Din,
     output wire [upper:lower] Dout
 );
-    reg  [upper:lower] Dout_buffer = def[upper:lower];
-    wire               hit         = (BUS_Adr == Adr + index);
-
-    always @(posedge clk)
-        if (BUS_rst)
-            Dout_buffer <= def[upper:lower];
-        else if (hit & BUS_wren)
-            Dout_buffer <= BUS_Din[upper:lower];
-
-    assign Dout     = Dout_buffer;
-    assign BUS_Dout = hit ? ({64'd0, Din} << lower) : 64'd0;
+    assign Dout     = def[upper:lower];
+    assign BUS_Dout = 64'd0;
 endmodule
