@@ -105,3 +105,5 @@ def test_soc_io_constraints(tmp_path):
     assert 'IO_LOC "usb_d_p" B11,A11;' in cst
     assert 'IO_PORT "usb_d_p" IO_TYPE=LVCMOS33D' in cst
     assert 'IO_PORT "usb_d_n"' not in cst
+    # ESP32 IO0 open-drain with pull-up (driven high, it prevents the ESP32 SD card init).
+    assert 'IO_PORT "esp32_ctrl_io0" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=UP PULL_STRENGTH=STRONG OPEN_DRAIN=ON;' in cst

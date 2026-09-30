@@ -61,10 +61,11 @@ _io = [
         Subsignal("usbc_flip", Pins("A14"), IOStandard("LVCMOS33")),
     ),
 
-    # ESP32 control.
+    # ESP32 control (IO0 open-drain with pull-up: driven high it prevents the ESP32 SD card init).
     ("esp32_ctrl", 0,
         Subsignal("en",  Pins("J3"), IOStandard("LVCMOS33"), Misc("DRIVE=8")),
-        Subsignal("io0", Pins("E1"), IOStandard("LVCMOS33"), Misc("DRIVE=8")),
+        Subsignal("io0", Pins("E1"), IOStandard("LVCMOS33"), Misc("DRIVE=8"), Misc("PULL_MODE=UP"),
+            Misc("PULL_STRENGTH=STRONG"), Misc("OPEN_DRAIN=ON")),
     ),
 
     # Serial (FPGA <-> ESP32).
