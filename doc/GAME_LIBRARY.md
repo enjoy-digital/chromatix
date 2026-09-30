@@ -107,6 +107,29 @@ Alternatives: our own protocol (simpler, but needs our own ESP32 firmware change
 documented protocol to ModRetro/ChroMagic. Compatibility gets the feature to users fastest and
 keeps ChromatiX usable with the existing community firmware.
 
+## Status (branch `chromagic`)
+
+Implemented (simulation tests replaying the ESP32 sequences, bitstream timing met, no regression with
+the stock ModRetro ESP32 firmware on hardware):
+- `ESP32_IO0` open-drain with pull-up (SD card init).
+- QSPI: command/length decode, read-back (upload status, save snapshot), upload sequence numbers.
+- Cartridge link packets (0x0e requests, 0x0a responses, 14 channels, priority/guard as ChroMagic).
+- Virtual cartridge: ChroMagic PSRAM map and mapper selection (ROM only, MBC1/1M, MBC2, MBC3/30,
+  MBC5, HuC1), save snapshots and dirty flag, quiesce, "VC" commands and boot lifecycle, black
+  frames while held, menu without cartridge, no memory reset during a session.
+
+Not implemented yet: MBC3 RTC (capability bit reported as 0: the ESP32 firmware loads games without
+RTC), cartridge maintenance engine (SYSTEM → CART BACKUP, ChroMagician PC mode: answered as
+unsupported), audio snapshots.
+
+Hardware test with the ChroMagic ESP32 firmware (restorable from the ESP32 flash backup):
+
+```bash
+esptool.py --port /dev/ttyACM0 --baud 460800 write_flash 0x10000 mcu.bin   # ChroMagic 1.0.1 release.
+# SD card (FAT32): /CHROMAGIC/BACKUPS/<game>.gb|.gbc (+ .sav), then BACKUPS tab in the menu.
+esptool.py --port /dev/ttyACM0 --baud 460800 write_flash 0 chromatic_esp32_flash_dump_2026-09-30.bin  # Restore.
+```
+
 ## Open questions
 - ChroMagic's protocol is defined by its code (no spec): versions may change; pin a ChroMagic
   release (1.0.1) and track changes.
