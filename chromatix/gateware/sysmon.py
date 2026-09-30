@@ -9,6 +9,8 @@ from migen import *
 
 from litex.gen import *
 
+from litex.soc.interconnect import stream
+
 from litex.soc.cores.uart import RS232PHY
 
 # System Monitor RX Packet -------------------------------------------------------------------------
@@ -129,8 +131,11 @@ class SystemMonitorArbiterBridge(LiteXModule):
     Latches the per-channel refresh requests and round-robins over the pending channels, issuing
     one packet write per channel (Buttons, channel 2, are interleaved every other packet). When the
     menu is closed, uart_disabled pulses after each packet to return the TX framer to idle/sleep.
+
+    priority_channels (ChroMagic cartridge link response/stream events): served first when pending,
+    their request is cleared once sent even if new data is signaled in the same cycle.
     """
-    def __init__(self, num_channels=10):
+    def __init__(self, num_channels=10, priority_channels=[]):
         self.reset                   = Signal()
         self.channels_new_data_valid = Signal(num_channels)
         self.menu_disabled           = Signal()
@@ -161,15 +166,44 @@ class SystemMonitorArbiterBridge(LiteXModule):
         ]
 
         for i in range(num_channels):
-            self.sync += [
-                If(self.reset,
-                    channels_refresh[i].eq(0),
-                ).Elif(self.channels_new_data_valid[i],
-                    channels_refresh[i].eq(1),
-                ).Elif((active_channel == i) & self.write_done,
-                    channels_refresh[i].eq(0),
-                )
-            ]
+            if i in priority_channels:
+                self.sync += [
+                    If(self.reset,
+                        channels_refresh[i].eq(0),
+                    ).Elif((active_channel == i) & self.write_done,
+                        channels_refresh[i].eq(0),
+                    ).Elif(self.channels_new_data_valid[i],
+                        channels_refresh[i].eq(1),
+                    )
+                ]
+            else:
+                self.sync += [
+                    If(self.reset,
+                        channels_refresh[i].eq(0),
+                    ).Elif(self.channels_new_data_valid[i],
+                        channels_refresh[i].eq(1),
+                    ).Elif((active_channel == i) & self.write_done,
+                        channels_refresh[i].eq(0),
+                    )
+                ]
+
+        # Next channel after a packet: pending priority channels first, then Buttons every other
+        # packet, then round-robin.
+        next_after_write = If(button_next,
+            active_channel.eq(2),
+        ).Else(
+            If(next_channel < (num_channels - 1),
+                next_channel.eq(next_channel + 1),
+                active_channel.eq(next_channel + 1),
+            ).Else(
+                next_channel.eq(0),
+                active_channel.eq(0),
+            )
+        )
+        for i in reversed(priority_channels):
+            next_after_write = If(channels_refresh[i] & (active_channel != i),
+                active_channel.eq(i),
+            ).Else(next_after_write)
 
         self.sync += [
             If(self.reset,
@@ -203,17 +237,7 @@ class SystemMonitorArbiterBridge(LiteXModule):
                             ),
                             write_active.eq(0),
                             button_next.eq(~button_next),
-                            If(button_next,
-                                active_channel.eq(2),
-                            ).Else(
-                                If(next_channel < (num_channels - 1),
-                                    next_channel.eq(next_channel + 1),
-                                    active_channel.eq(next_channel + 1),
-                                ).Else(
-                                    next_channel.eq(0),
-                                    active_channel.eq(0),
-                                )
-                            )
+                            next_after_write,
                         )
                     )
                 )
@@ -229,6 +253,9 @@ class SystemMonitorTxPacket(LiteXModule):
     Sends SOF (0x8F), address, byte count, payload (tx_senddata for each tx_bytepos) and CRC-8 (same
     format as SystemMonitorRxPacket), one byte every 16 cycles at most. When the menu is closed
     (ESP32 may be asleep), each packet is preceded by 0x00 bytes to wake the ESP32 UART up.
+
+    Cartridge link channels (0x0A response, 0x0D stream event, ChroMagic protocol) send their bytes
+    once the UART has been idle for 80 cycles (instead of the 16-cycle slots).
     """
     def __init__(self):
         self.reset         = Signal()
@@ -262,7 +289,24 @@ class SystemMonitorTxPacket(LiteXModule):
         TX_AWAKE = 8
         TX_START = 9
 
-        self.comb += self.write_done.eq((tx_state == TX_DONE) & ~self.uart_tx_busy & (cnt == 0))
+        # Byte slots.
+        guard_cycles = 80
+        guard        = Signal(max=guard_cycles + 1, reset=guard_cycles)
+        byte_slot    = Signal()
+        self.sync += [
+            If(self.reset | self.uart_tx_busy | self.uart_tx_val,
+                guard.eq(0),
+            ).Elif(guard < guard_cycles,
+                guard.eq(guard + 1),
+            )
+        ]
+        self.comb += If((self.tx_address == 0x0a) | (self.tx_address == 0x0d),
+            byte_slot.eq(~self.uart_tx_busy & ~self.uart_tx_val & (guard == guard_cycles)),
+        ).Else(
+            byte_slot.eq(~self.uart_tx_busy & (cnt == 0)),
+        )
+
+        self.comb += self.write_done.eq((tx_state == TX_DONE) & byte_slot)
 
         self.sync += [
             If(self.reset,
@@ -281,7 +325,7 @@ class SystemMonitorTxPacket(LiteXModule):
                     If((tx_state == TX_IDLE) | (tx_state == TX_SLEEP),
                         self.uart_tx_val.eq(self.write),
                     ).Else(
-                        If((cnt == 0) & (tx_state != TX_DONE),
+                        If(byte_slot & (tx_state != TX_DONE),
                             self.uart_tx_val.eq(1),
                         )
                     )
@@ -315,7 +359,7 @@ class SystemMonitorTxPacket(LiteXModule):
             ).Elif(self.uart_disabled,
                 crc.eq(0xFF),
                 bit_count.eq(0),
-            ).Elif((tx_state == TX_IDLE) & ~self.write,
+            ).Elif((tx_state == TX_IDLE) | ((tx_state == TX_START) & byte_slot),
                 crc.eq(0xFF),
                 bit_count.eq(0),
             ).Elif(self.uart_tx_val & (tx_state != TX_SLEEP) & (tx_state != TX_AWAKE) & (tx_state != TX_START),
@@ -342,26 +386,31 @@ class SystemMonitorTxPacket(LiteXModule):
                 ).Else(
                     Case(tx_state, {
                         TX_IDLE: [
-                            If(self.menu_disabled,
+                            If(~self.uart_tx_busy & self.write,
+                                If(self.menu_disabled,
+                                    tx_state.eq(TX_AWAKE),
+                                    bytecount.eq(20),
+                                ).Else(
+                                    tx_state.eq(TX_ADDR),
+                                )
+                            ).Elif(self.menu_disabled,
                                 tx_state.eq(TX_SLEEP),
-                            ).Elif(~self.uart_tx_busy & self.write,
-                                tx_state.eq(TX_ADDR),
                             )
                         ],
                         TX_ADDR: [
-                            If(~self.uart_tx_busy & (cnt == 0),
+                            If(byte_slot,
                                 tx_state.eq(TX_COUNT),
                             )
                         ],
                         TX_COUNT: [
-                            If(~self.uart_tx_busy & (cnt == 0),
+                            If(byte_slot,
                                 bytecount.eq(self.tx_byte_count),
                                 self.tx_bytepos.eq(0),
                                 tx_state.eq(TX_DATA),
                             )
                         ],
                         TX_DATA: [
-                            If(~self.uart_tx_busy & (cnt == 0),
+                            If(byte_slot,
                                 If(bytecount == 1,
                                     tx_state.eq(TX_CRC),
                                 ).Else(
@@ -371,12 +420,12 @@ class SystemMonitorTxPacket(LiteXModule):
                             )
                         ],
                         TX_CRC: [
-                            If(~self.uart_tx_busy & (cnt == 0),
+                            If(byte_slot,
                                 tx_state.eq(TX_DONE),
                             )
                         ],
                         TX_DONE: [
-                            If(~self.uart_tx_busy & (cnt == 0),
+                            If(byte_slot,
                                 tx_state.eq(TX_IDLE),
                             )
                         ],
@@ -387,7 +436,7 @@ class SystemMonitorTxPacket(LiteXModule):
                             )
                         ],
                         TX_AWAKE: [
-                            If(~self.uart_tx_busy & (cnt == 0),
+                            If(byte_slot,
                                 If(bytecount == 1,
                                     tx_state.eq(TX_START),
                                 ).Else(
@@ -396,7 +445,7 @@ class SystemMonitorTxPacket(LiteXModule):
                             )
                         ],
                         TX_START: [
-                            If(~self.uart_tx_busy & (cnt == 0),
+                            If(byte_slot,
                                 tx_state.eq(TX_ADDR),
                             )
                         ],
@@ -440,7 +489,8 @@ class SystemMonitorBridge(LiteXModule):
         write         = Signal()
 
         self.rx_packet = rx_packet = SystemMonitorRxPacket()
-        self.arbiter   = arbiter   = SystemMonitorArbiterBridge(num_channels=num_channels)
+        self.arbiter   = arbiter   = SystemMonitorArbiterBridge(num_channels=num_channels,
+            priority_channels=[c for c in CART_LINK_CHANNELS if c < num_channels])
         self.tx_packet = tx_packet = SystemMonitorTxPacket()
 
         self.comb += [
@@ -484,6 +534,10 @@ class SystemMonitorPayloads(LiteXModule):
     Channels: 0/1: AA/Li-ion voltage, 2: Buttons, 3: Audio + Brightness, 4: System Control, 5: PMIC
     status, 6: Version, 7: Reserved, 8: System Status Extended, 9: Game Palette Data. 14-bit values
     are sent as upper 6 bits then lower 8 bits.
+
+    With 14 channels (ChroMagic protocol): 10: Cartridge link response (from a SystemMonitorCartLink:
+    tx_senddata/byte count provided through cart_senddata/cart_byte_count), 11/12: Audio snapshots
+    (not implemented, never sent), 13: Cartridge stream event (not implemented, never sent).
     """
     # Version: 1 bit reserved, 1 bit LiteX build marker, 6 bits minor (42), 6 bits major (63).
     VERSION = (1 << 12) | (42 << 6) | 63
@@ -520,6 +574,10 @@ class SystemMonitorPayloads(LiteXModule):
         self.channels_new_data_valid        = Signal(num_channels)
         self.tx_byte_count                  = Signal(8)
         self.tx_senddata                    = Signal(8)
+        # Cartridge link (channel 10).
+        self.cart_new_data                  = Signal()
+        self.cart_byte_count                = Signal(8)
+        self.cart_senddata                  = Signal(8)
 
         # # #
 
@@ -527,7 +585,7 @@ class SystemMonitorPayloads(LiteXModule):
         audio_brightness = Signal(14)
         mic_sys_status   = Signal(14)
         version          = Constant(self.VERSION, 14)
-        byte_counts      = Array(Constant(v, 8) for v in [2, 2, 2, 2, 2, 2, 2, 4, 4, 8])
+        byte_counts      = Array(Constant(v, 8) for v in [2, 2, 2, 2, 2, 2, 2, 4, 4, 8, 4, 10, 10, 1][:num_channels])
 
         def upper14(value):
             return Cat(value[8:14], Constant(0, 2))
@@ -548,7 +606,7 @@ class SystemMonitorPayloads(LiteXModule):
             )),
             audio_brightness.eq(Cat(self.h_volume, self.h_headphones, self.brightness, Constant(0, 2))),
             mic_sys_status.eq(Cat(self.pmic_sys_status, Constant(0, 6))),
-            self.channels_new_data_valid.eq(Cat(
+            self.channels_new_data_valid[:10].eq(Cat(
                 (~self.menu_disabled & self.transmit_volt & ~self.bat_is_li),
                 (~self.menu_disabled & self.transmit_volt & self.bat_is_li),
                 (~self.menu_disabled | self.request_buttons),
@@ -563,6 +621,13 @@ class SystemMonitorPayloads(LiteXModule):
             self.tx_byte_count.eq(byte_counts[self.tx_channel]),
             self.tx_senddata.eq(0),
         ]
+        if num_channels > CART_LINK_RESPONSE:
+            self.comb += [
+                self.channels_new_data_valid[CART_LINK_RESPONSE].eq(self.cart_new_data),
+                If(self.tx_channel == CART_LINK_RESPONSE,
+                    self.tx_byte_count.eq(self.cart_byte_count),
+                )
+            ]
 
         channel_cases = {
             0: [Case(self.tx_bytepos, {
@@ -607,7 +672,105 @@ class SystemMonitorPayloads(LiteXModule):
                 7: [self.tx_senddata.eq(self.gpd[56:64])],
             })],
         }
+        if num_channels > CART_LINK_RESPONSE:
+            channel_cases[CART_LINK_RESPONSE] = [self.tx_senddata.eq(self.cart_senddata)]
         self.comb += Case(self.tx_channel, channel_cases)
+
+# System Monitor Cartridge Link --------------------------------------------------------------------
+
+CART_LINK_REQUEST  = 0x0e # ESP32 -> FPGA: cartridge link request.
+CART_LINK_RESPONSE = 10   # FPGA -> ESP32: cartridge link response channel (address 0x0a).
+CART_LINK_STREAM   = 13   # FPGA -> ESP32: cartridge stream event channel (address 0x0d).
+CART_LINK_CHANNELS = [CART_LINK_RESPONSE, CART_LINK_STREAM]
+
+def cart_link_request_layout():
+    return [
+        ("operation",   3),
+        ("tag",         8),
+        ("address",    16),
+        ("value",       8),
+        ("aux_address", 16),
+        ("aux_value",   8),
+    ]
+
+def cart_link_response_layout():
+    return [
+        ("operation", 3),
+        ("tag",       8),
+        ("status",    4),
+        ("count",     3), # Valid data bytes.
+        ("data",     32),
+    ]
+
+class SystemMonitorCartLink(LiteXModule):
+    """
+    Cartridge link (ChroMagic protocol) over the system monitor packets.
+
+    - Requests (ESP32 -> FPGA, address 0x0e, 8 bytes): operation[2:0] (upper bits must be 0), tag,
+      address (16-bit), value, aux_address (16-bit), aux_value; aux fields must be 0 except for
+      operation 7. Invalid encodings are passed as operation 7. Presented on `request` (valid/ready).
+    - Responses (FPGA -> ESP32, channel 10): operation, tag, status, count, count data bytes (LSB
+      first). A response is sent once `response.valid` rises and consumed (ready) once sent.
+    """
+    def __init__(self):
+        # From the RX decoder / TX arbiter.
+        self.rx_address  = Signal(7)
+        self.rx_data     = Signal(80)
+        self.rx_data_val = Signal()
+        self.tx_channel  = Signal(4)
+        self.tx_bytepos  = Signal(8)
+        self.write_done  = Signal()
+        # To the payloads.
+        self.new_data    = Signal()
+        self.byte_count  = Signal(8)
+        self.senddata    = Signal(8)
+        # Requests / responses.
+        self.request     = stream.Endpoint(cart_link_request_layout())
+        self.response    = stream.Endpoint(cart_link_response_layout())
+
+        # # #
+
+        # Requests.
+        rx       = self.rx_data
+        request  = self.request
+        write_op = (rx[56:59] == 7)
+        valid    = Signal()
+        self.comb += valid.eq((rx[59:64] == 0) & (write_op | (rx[0:24] == 0)))
+        self.sync += [
+            If(request.valid & request.ready,
+                request.valid.eq(0),
+            ),
+            If(self.rx_data_val & (self.rx_address == CART_LINK_REQUEST) & (~request.valid | request.ready),
+                request.valid.eq(1),
+                request.operation.eq(Mux(valid, rx[56:59], 7)),
+                request.tag.eq(rx[48:56]),
+                request.address.eq(rx[32:48]),
+                request.value.eq(rx[24:32]),
+                request.aux_address.eq(rx[8:24]),
+                request.aux_value.eq(rx[0:8]),
+            )
+        ]
+
+        # Responses.
+        response = self.response
+        valid_d  = Signal()
+        self.sync += valid_d.eq(response.valid)
+        self.comb += [
+            self.new_data.eq(response.valid & ~valid_d),
+            response.ready.eq(self.write_done & (self.tx_channel == CART_LINK_RESPONSE)),
+            self.byte_count.eq(response.count + 4),
+            Case(self.tx_bytepos, {
+                0: self.senddata.eq(response.operation),
+                1: self.senddata.eq(response.tag),
+                2: self.senddata.eq(response.status),
+                3: self.senddata.eq(response.count),
+                4: self.senddata.eq(response.data[0:8]),
+                5: self.senddata.eq(response.data[8:16]),
+                6: self.senddata.eq(response.data[16:24]),
+                7: self.senddata.eq(response.data[24:32]),
+                "default": self.senddata.eq(0),
+            }),
+        ]
 
 # System Monitor UART ------------------------------------------------------------------------------
 
