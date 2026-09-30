@@ -89,3 +89,34 @@ Threads: evaluations are ~1us, thread synchronization costs more than the parall
 
 Baseline 1.74 fps -> microcode table + gbc_snd + `--pgo`: ~3.5 fps (~0.06x); with fast-forward
 fixed: ~5-6 fps (~0.1x).
+
+## C models (estimates, not measured)
+
+Simulation speed ~ (clock rate Verilator sustains on the remaining RTL) / (clock the RTL needs):
+moving blocks to C only pays off if the RTL left is small or runs at a lower clock. Today the whole
+design evaluates like a ~0.5MHz clock, for 16.78MHz needed.
+
+### A: CPU (T80) + APU in C, rest of the Game Boy (PPU, DMA, timers, glue) and SoC verilated
+- Removes ~50-55% of the time (CPU ~30%: microcode 20% + T80 8.5% + ALU/regs; gbc_snd 21%).
+- C models are negligible (a C Game Boy CPU/APU runs hundreds of times realtime; one DPI call per
+  CPU cycle = ~1M calls/s).
+- Estimate: ~2x -> ~3.5-4 fps, ~5 fps with PGO (~0.08x).
+- Remaining limit: PPU/glue still clocked at 16.78MHz (2 evaluations per cycle). Clocking them at
+  the Game Boy rate (4.19MHz, one evaluation per dot) could give another 2-4x (~10-15 fps,
+  0.2-0.25x), but that is a clocking rework of the core (same issue as fast-forward).
+- Still tests the real PPU gateware.
+
+### B: whole Game Boy in C (existing emulator, e.g. SameBoy, MIT) driving the LCD interface
+- Emulator ~free (~1-2% of a CPU core for realtime); speed set by the remaining RTL:
+  - Control side only (sysmon/ESP32 link, virtual cartridge, debug bridge, CSRs), frame sent
+    directly to the window: small and mostly idle logic, could approach realtime.
+  - With the SoC CPU (VexRiscv at 33MHz) and the video pipeline (LCD -> scaler -> PSRAM ->
+    panel/UVC): Verilator typically sustains ~1-3MHz on a LiteX SoC -> ~0.05-0.1x, no faster than
+    today (the video pipeline/SoC become the bottleneck).
+- Only path to near-realtime, but only without the high-rate video/PSRAM pipeline: useful to
+  develop the menu, virtual cartridge and ESP32 protocol, not to check the video gateware.
+
+### Hybrid
+A per-subsystem switch (Game Boy in C or RTL, video pipeline on/off) to choose speed or fidelity per
+debug session. Before implementing: time the SoC-only and video-only parts of the current sim to
+check these estimates.
