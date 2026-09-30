@@ -1,116 +1,115 @@
-# Game Library Study (games stored on the console, selected from the menu)
+# Game Library Study (SD card games in the Chromatic menu)
 
-Goal: store Game Boy games on the console and pick them from the regular Chromatic menu (the ESP32
-menu), without a cartridge. This document records the hardware facts, then proposes an architecture,
-the FPGA/ESP32 protocol and the options for the ESP32 side.
+Goal: play Game Boy games stored on the SD card, selected from the regular Chromatic (ESP32) menu,
+with ChromatiX as the FPGA design. Reference: [ChroMagic](https://github.com/cursedtoast2/ChroMagic)
+(open custom firmware for the Chromatic, GPL, v1.0.1 September 2026), which already does this on
+top of ModRetro's firmware and FPGA v18.8.
 
-## Findings (2026-09-30, on hardware)
+## Hardware and firmware facts
 
-### No SD card
-- **FPGA:** no SD/SDIO/MMC signal in the original ModRetro constraints (`evt1_x2.cst`), `top.v`,
-  the ChromatiX platform or the litex-boards platform. `SDIO_LS` (N5) is an undocumented
-  level-shifter enable, tied to 1 in every design.
-- **ESP32 ↔ FPGA:** the ESP32 lines reaching the FPGA are QSPI (GPIO5/18/23/19/22/21), UART, I2S,
-  EN/IO0 and two spares (GPIO9/10); none are the ESP32 SD card pins.
-- **ESP32 firmware:** no SD card or FAT driver is linked (no `sdmmc`/`sdspi`/`vfs_fat`), only the
-  UART and SPI master drivers.
+- **SD card: on the ESP32**, SDMMC slot 1 (IOMUX: CLK GPIO14, CMD GPIO15, D0 GPIO2), used in 1-bit
+  mode at 20MHz (ChroMagic `mcu/main/sd_card.c`). Not visible from the FPGA sources, which is why
+  no SD pin appears in the constraints; stock ModRetro firmware doesn't use it.
+- **FPGA dependency:** ChroMagic's SD init fix (v1.0.1) makes the FPGA's `ESP32_IO0` pin open-drain
+  with a strong pull-up instead of push-pull `DRIVE=8`. ChromatiX drives it push-pull like stock
+  v18.8 (`chromatix_platform.py` `esp32_ctrl`/`io0`, `ESP32Control` in `chromatix/gateware/misc.py`):
+  to change for SD support. `SDIO_LS` (N5) is left at 1 by everyone (role still undocumented).
+- **ESP32 firmware is open source (GPL):**
+  [ModRetro/oss-chromatic-console-mcu](https://github.com/ModRetro/oss-chromatic-console-mcu)
+  (ESP-IDF + LVGL, ~1.2k lines in `main/`; tags v0.13.2..v4.2). The console tested here runs
+  v0.13.2 (4MB flash dump saved: `chromatic_esp32_flash_dump_2026-09-30.bin`, factory 1MB app, no
+  OTA/filesystem partition). It installs over USB-C with `esptool` through the ChromatiX
+  CDC ↔ ESP32 bridge (DTR/RTS), validated.
 
-Unless a socket is physically present (to be checked on the board), there is no SD card to use.
+## How ChroMagic does it
 
-### ESP32 (ModRetro MCU)
-- ESP32 rev 3, ESP32-MINI-1 (embedded **4MB** flash), read-only dump saved
-  (`chromatic_esp32_flash_dump_2026-09-30.bin`, sha256 `1b83c7d4…`, two identical reads).
-- Firmware: ModRetro `mcu_fw` **v0.13.2** (May 12 2025, ESP-IDF v5.3), 677KB, LVGL menu
-  (`MenuSystem`, `MenuControls`, `MenuDisplay`, `MenuStatus`), settings in NVS (frame blend, color
-  correction LCD/USB, player number, mute, backlight, transitions, D-pad diagonals, low battery
-  indicator), `fpga_tx_task`/`fpga_rx_task` (UART + QSPI), power manager, console REPL on UART0.
-- Partition table: `nvs` (24KB), `phy_init` (4KB), `factory` app (1MB at 0x10000). **No OTA slots,
-  no filesystem partition.**
-- **0x110000–0x400000 (~2.9MB) is unused**: it only holds leftovers of Espressif's factory ESP-AT
-  firmware (Wi-Fi/HTTP/AT strings found there are not part of ModRetro's app).
-- The ESP32 has Wi-Fi/Bluetooth, unused by the current firmware.
-- The standard ChromatiX bitstream bridges USB CDC to the ESP32 UART with DTR/RTS: `esptool` works
-  over the console's USB-C port (flash read at 460800 baud: 4MB in 99s).
+### ESP32 side (~8.2k new lines on top of ModRetro's firmware)
+- **Menu:** a **BACKUPS** tab (folder browser of `/sdcard/CHROMAGIC/BACKUPS`, `.gb`/`.gbc`, A to
+  load, B up) and **SYSTEM → CART BACKUP** (dumps the inserted cartridge + save to the SD card),
+  plus a **C. MAGICIAN** toggle for the PC companion app (ChroMagician: SD file manager, cartridge
+  dump/save restore/flash cart programming over USB).
+- **Load:** header checks (logo, header and global checksums, exact size), mapper/masks decoded on
+  the ESP32, then PREPARE (core held), ROM uploaded 1KB at a time over QSPI (each block
+  acknowledged), `.sav` uploaded, RTC restored, START, then the boot is followed through a status
+  lifecycle (reset → boot ROM → first frame) with retries. The menu is closed with an emulated MENU
+  press.
+- **Saves:** the ESP32 polls an FPGA "save dirty" flag every 250ms and pulls cartridge RAM back in
+  1KB blocks (FPGA snapshot buffer read over QSPI, read twice and compared), written to the SD card
+  atomically (`.tmp` → rename, `.old` recovery). RTC saved every 60s. QUIESCE/RESUME around game
+  switches.
+- **Limits:** ROM ≤ 4MB, no menu entry to return to the physical cartridge, SD mounted per
+  operation, catalog read in the UI task.
 
-## Architecture
+### FPGA side (~3.1k new RTL lines + ~1.5k modified, Gowin 1.9.9)
+- **Virtual cartridge:** MiSTer mappers in the FPGA (ROM-only, MBC1 incl. MBC1M, MBC2, MBC3 incl.
+  MBC30 + RTC, MBC5 incl. rumble, HuC1), a 2-way set-associative cache (64B lines, 4KB ROM + 4KB
+  cartridge RAM, write-back, early restart) on the PSRAM arbiter's highest priority port.
+- **Misses stall the CPU only** (T80 `WAIT_n`, OAM DMA/HDMA frozen), the PPU/APU/timers keep
+  running.
+- **PSRAM map:** OSD 0x000000, framebuffer 0x010000, ROM 0x020000 (≤ 4MB), cartridge RAM 0x420000
+  (≤ 128KB).
+- **Protocol:**
+  - UART cart request 0x0E (op/tag/address/value/aux, 8 bytes); virtual cartridge commands on
+    op 7 with magic address 0x5643 ("VC"): STOP, START, STATUS, PREPARE, SAVE_BLOCK,
+    RTC_RESTORE_LOW/HIGH, RTC_SNAPSHOT, QUIESCE, RESUME. Responses on channel 0x0A, stream events
+    0x0D/acks 0x10.
+  - QSPI: PSRAM writes with an upload sequence number in `addr[31:24]`; a new **quad read-back**
+    (command 0, length 0x155, `addr[31:16]` = "CB") returning a 12-byte header (status, sequence,
+    CRC32) + 1KB: upload status, save snapshot block or cartridge block.
+- **Cartridge maintenance engine** (backup path): takes the physical cartridge bus, reads 1KB
+  blocks (~1MB/s, CRC32), writes (MBC registers, save restore, flash cart programming), streams to
+  USB for the PC app.
+- **Menu without cartridge, black LCD timing while the core is held** (OSD stays visible), no
+  memory reset on cart-detect changes during a virtual session.
+- `rtl/virtual_cart_rebuild/` is an unshipped "never stall" redesign (patched T80, retention and
+  admission logic, MBC1/2/5 only).
 
-Storage: a filesystem partition in the free ESP32 flash (~2.8MB: e.g. 3–10 typical games, 32KB–1MB
-each). Games get there over USB (host tool through the CDC/ESP32 link) or Wi-Fi (upload page on the
-ESP32). An SD card would only change the storage backend if one is found.
+## Comparison with ChromatiX
 
-```
- Storage (ESP32 flash FS)  ──►  ESP32 menu "Games"  ──QSPI (1KB bursts)──►  PSRAM 0x400000 (ROM)
-                                     │                                        │
-                                     └──UART cmd: vcart config/hold/start──►  Virtual cartridge ──► Game Boy core
- <game>.sav  ◄──── save read-back (UART or QSPI read) ◄──── PSRAM 0x780000 (cartridge RAM)
-```
+| | ChroMagic (FPGA 18.38) | ChromatiX today |
+|---|---|---|
+| Mappers | ROM, MBC1/1M, MBC2, MBC3/30 + RTC, MBC5, HuC1 | ROM, MBC1, MBC2, MBC3 (no RTC), MBC5 |
+| Cache | 2-way, 64B lines, 4KB ROM + 4KB RAM, write-back | Direct-mapped 4KB (16B lines), RAM write-through |
+| Miss stall | CPU only (`WAIT_n`), DMA frozen | Whole core (speedcontrol `cart_wait`) |
+| ROM/RAM in PSRAM | 0x020000 / 0x420000 | 0x400000 / 0x780000 |
+| Control | ESP32 (UART "VC" + QSPI read-back) | Host debug bridge (CSRs) |
+| ROM source | SD card via the ESP32 menu | PC (`load-rom`), ~0.1s/256KB |
+| Cartridge backup | Yes (maintenance engine) | No |
+| Menu without cartridge | Yes | No (menu gated by cart-detect) |
 
-The virtual cartridge (`chromatix/gateware/vcart.py`: MBC1/2/3/5, 4KB cache, cartridge RAM written
-through to the PSRAM) is validated on hardware with ROMs loaded from the PC. Here the ESP32 takes
-the role of the PC.
+## Recommendation: be ChroMagic-compatible
 
-### FPGA changes (all in the standard bitstream)
-1. **Virtual cartridge always built:** remove `with_vcart = with_debug_bridge` (`chromatix.py`); the
-   control comes from the ESP32 instead of the debug bridge CSRs (both kept).
-2. **UART commands** on free addresses (in use: 0x2, 0x4, 0x5, 0x6, 0x9, 0xB, 0xC, 0xD, see
-   `SystemMonitorControl` in `chromatix/gateware/sysmon.py`):
+Implement ChroMagic's FPGA-side protocol in ChromatiX, so that the **ChroMagic ESP32 firmware (GPL,
+based on ModRetro's) runs unchanged with the ChromatiX bitstream**: SD playback and cartridge
+backup inside the regular menu, no new ESP32 firmware to write or maintain, and the same PC app.
 
-   | Addr | Payload | Action |
-   |------|---------|--------|
-   | 0x3 | `enable[0] hold[1] flush[2] mbc[6:4] rom_mask[16:8] ram_mask[23:20]` | Same fields as `VirtualCartCSR.control` |
-   | 0x7 | `offset[23:0]`, `length[15:0]` | Save RAM read-back request (answered on a new FPGA→ESP32 channel) |
-   | 0x8 | none | Request the virtual cartridge status (enabled, loaded ROM size, save dirty flag) |
+Steps (each checked on hardware with the ChroMagic MCU firmware installed via `esptool`, ESP32
+backup ready for restore):
+1. **SD enable:** `ESP32_IO0` open-drain with pull-up (platform/`ESP32Control`), then check the
+   BACKUPS tab mounts the card (stock FPGA protocol is enough for browsing).
+2. **Protocol:** UART 0x0E/0x0A/0x0D/0x10 in `sysmon.py` (new channels and priority), QSPI upload
+   sequence + quad read-back in `memory.py` (`QSPISlave`: drive the data lines after the address
+   phase), "VC" command decoder + status/lifecycle word.
+3. **Virtual cartridge:** PSRAM map configurable (ChroMagic map in this mode), PREPARE/START/STOP
+   lifecycle and status bits, save dirty flag + 1KB snapshot buffer, QUIESCE/RESUME; add MBC1M,
+   MBC30, HuC1 and MBC3 RTC (restore/snapshot); consider 2-way + write-back cache and CPU-only
+   stall (`WAIT_n`) as ChroMagic, or keep speedcontrol if audio/video pacing tolerates it (measure
+   stall statistics with the existing counters).
+4. **Menu without cartridge** and black LCD timing while the core is held (the `LCDTerminal` timing
+   approach), no `memrst` on cart-detect during a virtual session.
+5. **Cartridge maintenance engine** (backup to SD, save restore, flash carts) and USB streaming for
+   ChroMagician: second phase.
 
-3. **Capability flag** in the version channel (payload 6, `SystemMonitorPayloads.VERSION`): one bit
-   "virtual cartridge available", so the ESP32 firmware only shows the Games entry on a capable
-   bitstream (and keeps working with the official one).
-4. **Save read-back:** UART first (a new FPGA→ESP32 channel streaming cartridge RAM: an 8KB save
-   takes ~0.8s at 115200 baud, 32KB ~3s); QSPI read later if needed (drive the QSPI data lines
-   after the address phase, the command bit is ignored today).
-5. **Menu without cartridge:** the menu button is ignored until cart-detect is stable high
-   (`chromatix.py`, `cart_det_sr`), and a cart-detect change resets the core/PSRAM (`memrst`). Allow
-   the menu when the virtual cartridge is enabled or no cartridge is present, and keep `memrst` for
-   physical insert/remove only. A physical cartridge inserted takes priority (disables the virtual
-   cartridge).
-6. **Display while loading:** with `hold` the core stops and so does the LCD/OSD timing. Loading is
-   short (256KB over QSPI at up to 40MHz in a few tens of ms, dominated by the ESP32 flash read:
-   ~0.1–0.5s), so a brief blank screen is acceptable. Otherwise, reuse the `LCDTerminal` timing
-   approach (`chromatix/gateware/terminal.py`) to keep the OSD visible while the core is held.
+Tests: Migen simulations of the protocol (UART packets, QSPI read-back) and of the virtual cartridge
+lifecycle, ChroMagic's host tests as a reference; hardware with the ChroMagic MCU firmware.
 
-### Load / start / exit sequence (ESP32 side)
-1. UART 0x3: `enable=0, hold=1`.
-2. QSPI: write the ROM to PSRAM 0x400000+ in **1024-byte transactions** (fixed burst length, see
-   `QSPIBurstWrite`, `memory.py`; the last one padded), and the `.sav` to 0x780000 if present.
-3. UART 0x3: `enable=1, hold=1, flush=1` + `mbc`/`rom_mask`/`ram_mask` from the ROM header (same rules
-   as `rom_config()` in `scripts/chromatic.py`).
-4. UART 0x3: `enable=1, hold=0`: the game starts; close the menu.
-5. Save: UART 0x7 read-back of `ram_size` bytes, written to `<game>.sav` (on menu open, on game
-   exit and periodically when the save dirty flag is set).
-6. Exit: UART 0x3 `enable=0, hold=1` then `hold=0` (back to the physical cartridge / menu).
-
-## ESP32 side: options
-
-| Option | What | Pros | Cons |
-|--------|------|------|------|
-| **A. ModRetro firmware** | ModRetro adds a Games menu, a flash FS partition and the protocol above to `mcu_fw` | Best integration, users keep official updates | Depends on ModRetro; their partition table changes (1MB app → app + FS) |
-| **B. Open replacement firmware** | Open `mcu_fw` (ESP-IDF + LVGL) with the same menus (settings, palettes, battery, brightness, OSD over QSPI) + Games, installed with `esptool` over USB (backup/restore like the FPGA flasher) | Fully open, no dependency | Reimplement the whole menu; battery/power management and settings behavior must match; ModRetro updates would overwrite it |
-| **C. No menu change** | Keep ModRetro's firmware; library selected from the PC (existing `chromatix-vcart` + `load-rom`) | Works today | Needs a PC, not "on the console" |
-
-The FPGA side of the ESP32 protocol is fully known (it is in our gateware: UART packets in
-`sysmon.py`, OSD/QSPI writes in `memory.py`/`video.py`), so option B is feasible without ModRetro
-documentation. The work is mostly on the ESP32: menu UI, OSD rendering and power management.
-
-## Recommendation
-1. Implement the FPGA changes (they are small and useful for every option) and test them in
-   simulation (extend `test/test_sysmon*.py`, `test/test_vcart.py`) and on hardware through the
-   debug bridge, emulating the ESP32 sequence from the host.
-2. Propose the protocol to ModRetro (option A) with this document and the reference gateware.
-3. In parallel, prototype option B as a minimal firmware (Games list + load/save only, OSD over
-   QSPI) installed as a **second app**: this needs an OTA partition table (factory 1MB + ota_0 +
-   FS), validated first on the console with the ESP32 backup ready for restore.
+Alternatives: our own protocol (simpler, but needs our own ESP32 firmware changes), or proposing a
+documented protocol to ModRetro/ChroMagic. Compatibility gets the feature to users fastest and
+keeps ChromatiX usable with the existing community firmware.
 
 ## Open questions
-- Physical check of the board for a microSD socket (not found in any source).
-- `SDIO_LS` role (N5): unknown; a test build driving it low would show what it gates.
-- ModRetro's interest in option A and their firmware update process (does the ModRetro updater
-  rewrite the whole ESP32 flash, which would erase a game partition?).
+- ChroMagic's protocol is defined by its code (no spec): versions may change; pin a ChroMagic
+  release (1.0.1) and track changes.
+- License: ChroMagic is GPL (as ModRetro's sources); ChromatiX's ports of ModRetro's design are
+  GPL-3.0 already, a reimplementation of the protocol in Migen is our own code.
+- `SDIO_LS` role and whether other ESP32 strap pins driven by the FPGA affect the SD card.
