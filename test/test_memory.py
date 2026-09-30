@@ -270,13 +270,19 @@ def test_qspi_burst_write():
         for _ in range(32):
             yield
 
+    sequences = []
+
     def qspi_gen():
         yield qbw.cs.eq(1)
         yield
-        yield from transfer(words, 0xff345678)
+        yield from transfer(words, 0x7f345678)
+        sequences.append(((yield qbw.upload_busy), (yield qbw.upload_sequence)))
+        yield from transfer([], 0x43420800) # Read transfer: no data, no burst.
         yield from transfer(words[:2], 0x00000002)
+        sequences.append(((yield qbw.upload_busy), (yield qbw.upload_sequence)))
         yield qbw.ram_ready.eq(0)
-        yield from transfer(words[:2], 0x00000004)
+        yield from transfer(words[:2], 0x05000004)
+        sequences.append(((yield qbw.upload_busy), (yield qbw.upload_sequence)))
 
     @passive
     def xclk_gen():
@@ -289,14 +295,19 @@ def test_qspi_burst_write():
                 addr = (yield port.addr)
                 n    = 2 if len(bursts) else len(words)
                 bursts.append((addr, (yield from burst_write_pop(port, n))))
+                yield port.done.eq(1)
+                yield
+                yield port.done.eq(0)
             yield
 
     run_simulation(dut, {"qspi_n": qspi_gen(), "xclk": xclk_gen()}, clocks={"qspi_n": 17, "xclk": 10})
     assert bursts == [(0x345678, words), (0x000002, words[:2])]
+    # Upload sequence (address[31:24]) reported once written, busy while the RAM is not ready.
+    assert sequences == [(0, 0x7f), (0, 0x00), (1, 0x00)]
 
 # QSPI Slave ---------------------------------------------------------------------------------------
 
-def qspi_transfer(pads, address, data, command=0):
+def qspi_transfer(pads, address, data, command=1):
     """ESP32 QSPI transfer: command, length and address on MOSI, 3 dummy clocks, data nibbles on 4 lines."""
     bits  = [command] + [(len(data) >> (9 - i)) & 1 for i in range(10)]
     bits += [(address >> (31 - i)) & 1 for i in range(32)]
@@ -320,7 +331,7 @@ def qspi_transfer(pads, address, data, command=0):
 def test_qspi_slave():
     """Address/data decoding, 16-bit word assembly, CS async reset and menu init (2nd transfer to 0)."""
     pads  = Record([("cs_n", 1), ("mosi", 1), ("miso", 1), ("wp_n", 1), ("hd", 1)])
-    slave = QSPISlave(pads)
+    slave = QSPISlave(pads, with_tristate=False)
     dut   = ClockDomainsWrapper(slave, ["qspi", "qspi_n"])
     data  = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]
     log   = {"words": [], "addresses": [], "menu_init": []}
@@ -328,7 +339,7 @@ def test_qspi_slave():
     def gen():
         yield pads.cs_n.eq(1)
         yield
-        for address in [0x00c0ffee, 0x00000000, 0x00000000]:
+        for address in [0x00c0ffee, 0x00000000, 0x80000000, 0x00000000]:
             yield from qspi_transfer(pads, address, data)
             log["addresses"].append((yield slave.address))
             log["menu_init"].append((yield slave.menu_init))
@@ -343,9 +354,65 @@ def test_qspi_slave():
     # SPI mode 0: master drives on QSPI_CLK falling edges, the slave samples on rising edges.
     run_simulation(dut, {"qspi_n": [gen(), monitor()]}, clocks={"qspi": 10, "qspi_n": (10, 5)},
         special_overrides={Instance: SimInstance})
-    assert log["addresses"] == [0x00c0ffee, 0x00000000, 0x00000000]
-    assert log["menu_init"] == [0, 0, 1]
+    assert log["addresses"] == [0x00c0ffee, 0x00000000, 0x80000000, 0x00000000]
+    assert log["menu_init"] == [0, 0, 0, 1]
+    # Cartridge write buffer transfers (address bit 31) are not forwarded to the PSRAM.
     assert log["words"] == [0x3412, 0x7856, 0xbc9a]*3
+
+
+def qspi_read(pads, slave, address, nbytes):
+    """ESP32 QSPI read (ChroMagic protocol): command 0, length 0x155, address, 3 dummy clocks, then
+    the nibbles driven by the slave (sampled on the rising edges)."""
+    bits  = [0] + [(0x155 >> (9 - i)) & 1 for i in range(10)]
+    bits += [(address >> (31 - i)) & 1 for i in range(32)]
+    bits += [0]*3
+    yield pads.cs_n.eq(0)
+    for bit in bits:
+        yield pads.mosi.eq(bit)
+        yield
+    yield # First nibble driven on the next QSPI_CLK falling edge (sampled on the next rising one).
+    data = []
+    for _ in range(nbytes):
+        byte = 0
+        for _ in range(2):
+            assert (yield slave.dq_oe)
+            byte = (byte << 4) | (yield slave.dq_o)
+            yield
+        data.append(byte)
+    yield pads.cs_n.eq(1)
+    for _ in range(4):
+        yield
+    return data
+
+
+def test_qspi_slave_read():
+    """Read-back (ChroMagic protocol): upload status and virtual cartridge block (header + data)."""
+    pads  = Record([("cs_n", 1), ("mosi", 1), ("miso", 1), ("wp_n", 1), ("hd", 1)])
+    slave = QSPISlave(pads, with_tristate=False)
+    block = [(i*7 + 3) & 0xff for i in range(1024)]
+    mem   = Memory(8, 1024, init=block)
+    port  = mem.get_port(clock_domain="qspi")
+    slave.specials += mem, port
+    slave.comb += [port.adr.eq(slave.rd_addr), slave.rd_data.eq(port.dat_r)]
+    dut   = ClockDomainsWrapper(slave, ["qspi", "qspi_n"])
+    res   = {}
+
+    def gen():
+        yield pads.cs_n.eq(1)
+        yield slave.upload_sequence.eq(0x5a)
+        yield slave.virtual_ready.eq(1)
+        yield slave.virtual_sequence.eq(0x1234)
+        for _ in range(4):
+            yield
+        res["status"]  = yield from qspi_read(pads, slave, 0x43420800, 8)
+        res["virtual"] = yield from qspi_read(pads, slave, 0x43421000, 12 + 1024)
+        res["write"]   = (yield slave.data_valid)
+
+    run_simulation(dut, {"qspi_n": gen()}, clocks={"qspi": 10, "qspi_n": (10, 5)},
+        special_overrides={Instance: SimInstance})
+    assert res["status"] == [0x43, 0x42, 0x01, 0x01, 0x5a, 0x00, 0x00, 0x04]
+    assert res["virtual"][:12] == [0x43, 0x42, 0x01, 0x01, 0x34, 0x12, 0x00, 0x04, 0, 0, 0, 0]
+    assert res["virtual"][12:] == block
 
 # Line Reader --------------------------------------------------------------------------------------
 
@@ -508,7 +575,7 @@ def test_memory_system_bist(monkeypatch):
     monkeypatch.setattr(memory, "OPIPSRAMCore", NativePSRAM)
     qspi_pads  = Record([("clk", 1), ("cs_n", 1), ("mosi", 1), ("miso", 1), ("wp_n", 1), ("hd", 1)])
     psram_pads = Record([("ce_n", 1), ("clk", 1), ("dq", 8), ("dqs", 1)])
-    dut        = MemorySystem(qspi_pads, psram_pads)
+    dut        = MemorySystem(qspi_pads, psram_pads, qspi_tristate=False)
     res        = {"reads": 0}
 
     def main():

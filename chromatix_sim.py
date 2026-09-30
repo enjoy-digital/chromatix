@@ -196,7 +196,7 @@ class SimTop(LiteXModule):
             psram_pads = Record([("ce_n", 1), ("clk", 1), ("dq", 8), ("dqs", 1)])
             lcd_pads   = Record([("dotclk", 1), ("db", 6), ("enable", 1), ("hsync", 1), ("vsync", 1)])
             self.comb += qspi_pads.cs_n.eq(1)
-            self.memory = memory = MemorySystem(qspi_pads, psram_pads, psram_factory=SimNativePSRAM)
+            self.memory = memory = MemorySystem(qspi_pads, psram_pads, psram_factory=SimNativePSRAM, qspi_tristate=False)
             self.video  = video  = VideoPipeline(lcd_pads)
             mem_reset = Signal(reset=1)
             mem_count = Signal(8)

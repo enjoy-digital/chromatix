@@ -389,14 +389,19 @@ class QSPIBurstWrite(LiteXModule):
     ESP32 QSPI memory-mapped transfer -> PSRAM burst write (ported from mm_burst_write.v).
 
     Data is written on QSPI_CLK falling edges ("qspi_n" domain), the burst request is issued in the
-    xClk domain when QSPI_CS rises (end of transfer).
+    xClk domain when QSPI_CS rises (end of a transfer that carried data).
+
+    Upload tracking (ChroMagic protocol): the address bits [31:24] of a transfer are an upload
+    sequence number, reported in upload_sequence once its burst is written (upload_busy low).
     """
     def __init__(self, port):
-        self.ram_ready  = Signal() # xClk.
-        self.cs         = Signal()
-        self.address    = Signal(32)
-        self.data_valid = Signal()
-        self.data       = Signal(16)
+        self.ram_ready       = Signal() # xClk.
+        self.cs              = Signal()
+        self.address         = Signal(32)
+        self.data_valid      = Signal()
+        self.data            = Signal(16)
+        self.upload_busy     = Signal()  # xClk.
+        self.upload_sequence = Signal(8) # xClk: sequence of the last completed upload.
 
         # # #
 
@@ -407,39 +412,89 @@ class QSPIBurstWrite(LiteXModule):
             fifo.data.eq(self.data),
             fifo.re.eq(port.write_next | port.request),
             port.din.eq(fifo.q),
-            port.addr.eq(self.address[:23]),
         ]
 
-        # xClk: burst request on QSPI_CS rising edge.
-        x_cs_sr = Signal(4)
+        # xClk: burst request on QSPI_CS rising edge (transfers with data only: not the reads).
+        x_cs_sr  = Signal(4)
+        pending  = Signal()
+        sequence = Signal(8)
         self.sync.xclk += [
             x_cs_sr.eq(Cat(self.cs, x_cs_sr[:3])),
             port.request.eq(0),
-            If(x_cs_sr[2:4] == 0b01,
-                port.request.eq(self.ram_ready),
+            If(self.upload_busy & ~pending & port.done,
+                self.upload_busy.eq(0),
+                self.upload_sequence.eq(sequence),
+            ),
+            If(pending & self.ram_ready,
+                port.request.eq(1),
+                pending.eq(0),
+            ),
+            If((x_cs_sr[2:4] == 0b01) & ~fifo.empty,
+                port.addr.eq(self.address[:23]),
+                sequence.eq(self.address[24:32]),
+                pending.eq(1),
+                self.upload_busy.eq(1),
             ),
         ]
 
 # QSPI Slave ---------------------------------------------------------------------------------------
 
+QSPI_READ_LENGTH  = 0x155  # Read transfer length field (ChroMagic protocol).
+QSPI_READ_MAGIC   = 0x4342 # Read transfer address[31:16] ("CB").
+QSPI_READ_NIBBLES = 2*(12 + 1024) # Response: 12-byte header + 1KB block.
+
 class QSPISlave(LiteXModule):
     """
     ESP32 QSPI slave (port of qspi_slave.v): 1 command bit, 10 length bits and 32 address bits on
-    MOSI, then data bytes on the 4 lines (2 clocks per byte), assembled into 16-bit words.
+    MOSI, 3 dummy clocks, then data bytes on the 4 lines (2 clocks per byte).
+
+    - Writes (command 1): data assembled into 16-bit words (data_valid/data), except for address
+      bit 31 set (cartridge write buffer, not forwarded to the PSRAM).
+    - Reads (command 0, length 0x155, address[31:16] "CB", ChroMagic protocol): the slave drives
+      the 4 lines (QSPI_CLK falling edges) with a 12-byte header ("CB", protocol 1, ready, 16-bit
+      sequence, 0x00, 0x04, CRC32) followed by a 1KB block: upload status (address bit 11) or
+      virtual cartridge save snapshot (address bit 12, rd_addr/rd_data: byte read port clocked by
+      QSPI_CLK rising edges).
 
     The state registers are asynchronously reset by CS (QSPI_CLK stops while CS is high): they are
-    implemented with GW5A DFFC (async clear) flip-flops. Runs in the "qspi" domain (QSPI_CLK rising).
+    implemented with GW5A DFFC (async clear) flip-flops. Runs in the "qspi" (QSPI_CLK rising) and
+    "qspi_n" (falling) domains. With with_tristate=False, the data lines are read from the pads and
+    driven through dq_o/dq_oe (simulation).
     """
-    def __init__(self, pads):
+    def __init__(self, pads, with_tristate=True):
         self.menu_init  = Signal()
         self.data_valid = Signal()
         self.data       = Signal(16)
+        self.command    = Signal()
+        self.length     = Signal(10)
         self.address    = Signal(32)
+        # Read sources (any domain, resynchronized to QSPI_CLK).
+        self.upload_busy      = Signal()
+        self.upload_sequence  = Signal(8)
+        self.virtual_ready    = Signal()
+        self.virtual_sequence = Signal(16)
+        self.rd_addr          = Signal(10) # qspi_n.
+        self.rd_data          = Signal(8)  # Byte at rd_addr (read port clocked by "qspi").
+        # Data lines (mosi, miso, wp_n, hd).
+        self.dq_o  = Signal(4)
+        self.dq_oe = Signal()
 
         # # #
 
-        cs   = pads.cs_n
-        pins = Cat(pads.mosi, pads.miso, pads.wp_n, pads.hd)
+        cs = pads.cs_n
+        if with_tristate:
+            pins = Signal(4)
+            for i, name in enumerate(["mosi", "miso", "wp_n", "hd"]):
+                t = TSTriple()
+                self.specials += t.get_tristate(getattr(pads, name))
+                self.comb += [
+                    t.o.eq(self.dq_o[i]),
+                    t.oe.eq(self.dq_oe),
+                    pins[i].eq(t.i),
+                ]
+        else:
+            pins = Cat(pads.mosi, pads.miso, pads.wp_n, pads.hd)
+        mosi = pins[0]
 
         # Async cleared (CS) registers: next values computed combinatorially.
         cycle_count = Signal(8)
@@ -480,12 +535,18 @@ class QSPISlave(LiteXModule):
             ),
         ]
         self.sync.qspi += If(~cs,
-            # Address.
-            If((cycle_count >= 11) & (cycle_count <= 42),
-                self.address.eq(Cat(pads.mosi, self.address[:31])),
+            # Command, length, address.
+            If(cycle_count == 0,
+                self.command.eq(mosi),
             ),
-            # Menu init: second transfer to address 0.
-            If((cycle_count == 43) & (self.address == 0),
+            If((cycle_count >= 1) & (cycle_count <= 10),
+                self.length.eq(Cat(mosi, self.length[:9])),
+            ),
+            If((cycle_count >= 11) & (cycle_count <= 42),
+                self.address.eq(Cat(mosi, self.address[:31])),
+            ),
+            # Menu init: second write transfer to address 0.
+            If((cycle_count == 43) & self.command & (self.address == 0),
                 menu_init1.eq(1),
                 If(menu_init1,
                     menu_init2.eq(1),
@@ -505,8 +566,61 @@ class QSPISlave(LiteXModule):
         )
         self.comb += [
             self.menu_init.eq(menu_init2),
-            self.data_valid.eq(valid & valid_phase),
+            self.data_valid.eq(self.command & ~self.address[31] & valid & valid_phase),
             self.data.eq(Cat(data_byte_r, data_byte)),
+        ]
+
+        # Reads (ChroMagic protocol) ---------------------------------------------------------------
+        upload_busy      = Signal()
+        upload_sequence  = Signal(8)
+        virtual_ready    = Signal()
+        virtual_sequence = Signal(16)
+        self.specials += [
+            MultiReg(self.upload_busy,      upload_busy,      "qspi"),
+            MultiReg(self.upload_sequence,  upload_sequence,  "qspi"),
+            MultiReg(self.virtual_ready,    virtual_ready,    "qspi"),
+            MultiReg(self.virtual_sequence, virtual_sequence, "qspi"),
+        ]
+
+        read_selected    = Signal()
+        virtual_selected = Signal()
+        status_selected  = Signal()
+        self.comb += [
+            read_selected.eq(~self.command & (self.length == QSPI_READ_LENGTH) &
+                (self.address[16:32] == QSPI_READ_MAGIC)),
+            virtual_selected.eq(read_selected & self.address[12]),
+            status_selected.eq(read_selected & ~self.address[12] & self.address[11]),
+        ]
+
+        # Response nibbles, driven on QSPI_CLK falling edges from cycle 46 (the index is reset
+        # during the command/address phase, cycle_count being cleared by CS).
+        index      = Signal(12)
+        ready      = Signal()
+        sequence   = Signal(16)
+        resp_byte  = Signal(8)
+        header     = [0x43, 0x42, 0x01, ready, sequence[0:8], sequence[8:16], 0x00, 0x04, 0, 0, 0, 0]
+        self.comb += [
+            resp_byte.eq(self.rd_data),
+            Case(index[1:], {i: resp_byte.eq(v) for i, v in enumerate(header)}),
+        ]
+        self.sync.qspi_n += [
+            self.dq_oe.eq(0),
+            If(cycle_count < 46,
+                index.eq(0),
+            ).Elif(read_selected & (index < QSPI_READ_NIBBLES),
+                self.dq_oe.eq(1),
+                If(index == 0,
+                    ready.eq(Mux(virtual_selected, virtual_ready, ~upload_busy & status_selected)),
+                    sequence.eq(Mux(virtual_selected, virtual_sequence,
+                        Mux(status_selected, upload_sequence, 0))),
+                    self.rd_addr.eq(self.address[:10]),
+                ),
+                self.dq_o.eq(Mux(index[0], resp_byte[0:4], resp_byte[4:8])),
+                If(index[0] & (index[1:] >= 12),
+                    self.rd_addr.eq(self.rd_addr + 1),
+                ),
+                index.eq(index + 1),
+            ),
         ]
 
 # Line Reader --------------------------------------------------------------------------------------
@@ -696,7 +810,7 @@ class MemorySystem(LiteXModule):
     (QSPI_CLK rising/falling edges, created here).
     """
     def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64,
-        with_vcart=False, psram_factory=None):
+        with_vcart=False, psram_factory=None, qspi_tristate=True):
         self.reset       = Signal()
         self.menu_init   = Signal()
         self.bist_done   = Signal()
@@ -756,7 +870,7 @@ class MemorySystem(LiteXModule):
 
         # QSPI Writes (ESP32) ----------------------------------------------------------------------
         port = ports[PORT_QSPI]
-        self.qspi_slave = qspi_slave = QSPISlave(qspi_pads)
+        self.qspi_slave = qspi_slave = QSPISlave(qspi_pads, with_tristate=qspi_tristate)
         self.qspi_write = qspi_write = QSPIBurstWrite(port)
         self.comb += [
             self.menu_init.eq(qspi_slave.menu_init),
@@ -765,6 +879,8 @@ class MemorySystem(LiteXModule):
             qspi_write.address.eq(qspi_slave.address),
             qspi_write.data_valid.eq(qspi_slave.data_valid),
             qspi_write.data.eq(qspi_slave.data),
+            qspi_slave.upload_busy.eq(qspi_write.upload_busy),
+            qspi_slave.upload_sequence.eq(qspi_write.upload_sequence),
             port.rnw.eq(0),
             port.burst_length.eq(1024),
         ]
