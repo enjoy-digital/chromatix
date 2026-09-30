@@ -54,7 +54,7 @@ def test_rom_init():
     with pytest.raises(ValueError):
         check_rom(rom[:0x100])
     with pytest.raises(ValueError):
-        check_rom(rom[:0x147] + bytes([0x0f]) + rom[0x148:]) # MBC3.
+        check_rom(rom[:0x147] + bytes([0x20]) + rom[0x148:]) # MBC6.
 
 # Simulation ---------------------------------------------------------------------------------------
 
@@ -87,6 +87,17 @@ def test_sim_buttons(sim_build):
         presses=parse_button_sequence("a@40+5"))
     assert stripes(ppms[1]) == [WHITE, BLACK, WHITE, BLACK] # Frame 30.
     assert stripes(ppms[2]) == [BLACK, WHITE, BLACK, WHITE] # Frame 60.
+
+def test_sim_save(sim_build, tmp_path):
+    """Cartridge RAM loaded from the save file (palette), written back at the end (counter)."""
+    sim, gateware = sim_build
+    save = tmp_path / "test.sav"
+    save.write_bytes(bytes([0x1b, 0x05]) + bytes(8190))
+    ppms = sim.run_sim(gateware, make_test_rom(save=True), frames=31, every=30, save=str(save))
+    assert stripes(ppms[-1]) == [BLACK, WHITE, BLACK, WHITE] # Palette 0x1b from the save.
+    data = save.read_bytes()
+    assert len(data) == 8192
+    assert data[:2] == bytes([0x1b, 0x06])                   # Counter incremented.
 
 # Simulation (Virtual Cartridge) -------------------------------------------------------------------
 

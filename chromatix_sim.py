@@ -36,6 +36,7 @@ from litex.build.sim.config       import SimConfig
 from chromatix.gateware.sources import VERILOG_PATH
 from chromatix.gateware.sim     import SIM_VERILOG_PATH, convert_vhdl, verilog_sources
 from chromatix.gateware.sim     import SimCartridge, write_rom_init, check_rom
+from chromatix.gateware.sim     import write_ram_init, read_ram_dump, cart_ram_size
 from chromatix.gateware.sim     import SimPSRAMPort, SimVirtualCartConfig, SimNativePSRAM
 from chromatix.gateware.sim     import parse_button_sequence, write_button_events
 from chromatix.gateware.memory  import memory_port_layout, MemorySystem
@@ -304,7 +305,8 @@ def build_sim(gateware_dir, rom,
     for source in verilog_sources():
         platform.add_source(source)
     platform.add_source(convert_vhdl(os.path.join(os.path.dirname(gateware_dir), "vhdl")))
-    for source in ["ereg_savestatev.v", "gb_buttons.v", "gb_lcd_capture.v", "uvc_capture.v", "dffc.v"]:
+    for source in ["ereg_savestatev.v", "gb_buttons.v", "gb_lcd_capture.v", "uvc_capture.v", "dffc.v",
+        "gb_cart_ram.v"]:
         platform.add_source(os.path.join(SIM_VERILOG_PATH, source))
     # LiteX simulation DDR output model (LCD dot clock).
     import litex.build.sim
@@ -375,8 +377,11 @@ def pgo_sim(gateware_dir, rom, frames=20):
     compile_sim(gateware_dir, cflags=f"-fprofile-use -fprofile-dir={pgo_dir} -fprofile-partial-training "
         "-Wno-missing-profile", ldflags="-fprofile-use")
 
-def run_sim(gateware_dir, rom, frames=60, every=1, presses=[]):
-    """Run the simulation (ROM/buttons files + plusargs), returns the captured PPM frames."""
+def run_sim(gateware_dir, rom, frames=60, every=1, presses=[], save=None):
+    """
+    Run the simulation (ROM/buttons files + plusargs), returns the captured PPM frames. save: save
+    file (cartridge RAM loaded from it if it exists, written back at the end).
+    """
     # Boot ROM ($readmemh relative path, from the simulation directory).
     bootroms = os.path.join(gateware_dir, "BootROMs")
     if not os.path.exists(bootroms):
@@ -384,12 +389,24 @@ def run_sim(gateware_dir, rom, frames=60, every=1, presses=[]):
     for ppm in glob.glob(os.path.join(gateware_dir, "*_*.ppm")):
         os.remove(ppm)
     write_rom_init(os.path.join(gateware_dir, "sim_cart_rom.init"), rom)
+    save_data = None
+    if save is not None and os.path.exists(save):
+        with open(save, "rb") as f:
+            save_data = f.read()
+    write_ram_init(os.path.join(gateware_dir, "sim_cart_ram.init"), save_data)
+    ram_dump = os.path.join(gateware_dir, "sim_cart_ram.out")
+    if os.path.exists(ram_dump):
+        os.remove(ram_dump)
     write_button_events(os.path.join(gateware_dir, "buttons.hex"), presses)
     subprocess.run(["obj_dir/Vsim", f"+frames={frames}", f"+every={every}"], cwd=gateware_dir, check=True)
+    if save is not None and cart_ram_size(rom) and os.path.exists(ram_dump):
+        with open(save, "wb") as f:
+            f.write(read_ram_dump(ram_dump, cart_ram_size(rom)))
+        print(f"[sim] Save written: {save}.")
     return sorted(glob.glob(os.path.join(gateware_dir, "frame_*.ppm")))
 
 def run_window(gateware_dir, rom, presses=[], scale=4, realtime=False, frames=2**31 - 1,
-    screenshot_frame=-1):
+    screenshot_frame=-1, save=None):
     """Run the simulation in a window (gbwindow module) until it is closed (or frames)."""
     config_file = os.path.join(gateware_dir, "sim_config.js")
     with open(config_file, encoding="utf-8") as f:
@@ -402,7 +419,7 @@ def run_window(gateware_dir, rom, presses=[], scale=4, realtime=False, frames=2*
         json.dump(config, f, indent=4)
     for bmp in glob.glob(os.path.join(gateware_dir, "screenshot_*.bmp")):
         os.remove(bmp)
-    run_sim(gateware_dir, rom, frames=frames, every=2**31 - 1, presses=presses)
+    run_sim(gateware_dir, rom, frames=frames, every=2**31 - 1, presses=presses, save=save)
 
 def uvc_frames(gateware_dir):
     """Video pipeline output frames (--video) of the last run."""
@@ -436,6 +453,8 @@ def main():
     parser.add_argument("--window",      action="store_true",   help="Play in a window (keyboard/gamepad, until closed): arrows, X: A, Z: B, Enter: Start, Backspace: Select, P: pause, F12: screenshot.")
     parser.add_argument("--window-scale", default=4,  type=int, help="Window scale.")
     parser.add_argument("--realtime",    action="store_true",   help="Window: never faster than the Game Boy.")
+    parser.add_argument("--save",        default=None,          help="Save file (cartridge RAM loaded/written back, default with --window: <rom>.sav).")
+    parser.add_argument("--no-save",     action="store_true",   help="Don't load/write the save file.")
     parser.add_argument("--bench",       action="store_true",   help="Benchmark: run --frames frames (none written), print the simulation speed.")
     args = parser.parse_args()
 
@@ -472,10 +491,16 @@ def main():
         fps     = args.frames/elapsed
         print(f"[bench] {args.frames} frames in {elapsed:.1f}s: {fps:.2f} fps, {fps/GB_FPS:.3f}x realtime.")
         return
+    save = args.save
+    if save is None and args.window:
+        save = os.path.splitext(args.rom)[0] + ".sav"
+    if args.no_save or args.vcart or args.video:
+        save = None # Saves with the cartridge model only.
     if args.window:
-        run_window(gateware_dir, rom, presses=presses, scale=args.window_scale, realtime=args.realtime)
+        run_window(gateware_dir, rom, presses=presses, scale=args.window_scale, realtime=args.realtime,
+            save=save)
         return
-    ppms = run_sim(gateware_dir, rom, frames=args.frames, every=args.every, presses=presses)
+    ppms = run_sim(gateware_dir, rom, frames=args.frames, every=args.every, presses=presses, save=save)
 
     # Frames -> PNG.
     os.makedirs(frames_dir, exist_ok=True)

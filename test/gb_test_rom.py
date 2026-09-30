@@ -14,8 +14,10 @@ palette, turns the LCD on, then waits for the A button to invert the BG palette 
 - ROM only (32KB): BG palette 0xe4 (white/black stripes, starting with white).
 - MBC1 (64KB): BG palette read from ROM bank 2 (0x1b: inverted stripes, starting with black), to
   check the MBC banking.
+- Save (MBC1+RAM+battery, 8KB RAM): BG palette read from the cartridge RAM ($A000) and $A001
+  incremented, to check the save load/write back.
 
-    ./test/gb_test_rom.py stripes.gb [--mbc1]
+    ./test/gb_test_rom.py stripes.gb [--mbc1|--save]
 """
 
 import sys
@@ -60,6 +62,14 @@ PALETTE_MBC1 = [
     0xfa, 0x00, 0x40, # ld   a, ($4000)
 ]
 
+PALETTE_SAVE = [
+    0x3e, 0x0a,       # ld   a, $0a
+    0xea, 0x00, 0x00, # ld   ($0000), a      ; RAM enable.
+    0x21, 0x01, 0xa0, # ld   hl, $a001
+    0x34,             # inc  (hl)            ; Save counter.
+    0xfa, 0x00, 0xa0, # ld   a, ($a000)      ; Palette from the save.
+]
+
 EPILOGUE = [
     0xe0, 0x47,       # ldh  ($47), a        ; BGP.
     0xaf,             # xor  a
@@ -78,17 +88,17 @@ EPILOGUE = [
     0x18, 0xfe,       # jr   $               ; Loop.
 ]
 
-def make_test_rom(mbc1=False):
+def make_test_rom(mbc1=False, save=False):
     rom = bytearray([0xff]*(0x10000 if mbc1 else 0x8000))
     rom[0x100:0x104] = bytes([0x00, 0xc3, 0x50, 0x01]) # nop; jp $0150.
     rom[0x104:0x134] = bytes(0x30)                      # No logo.
     rom[0x134:0x143] = b"CHROMATIX".ljust(15, b"\x00") # Title.
     rom[0x143] = 0x00                                   # DMG.
-    rom[0x147] = 0x01 if mbc1 else 0x00                 # MBC1 / ROM only.
+    rom[0x147] = 0x03 if save else 0x01 if mbc1 else 0x00 # MBC1+RAM+battery / MBC1 / ROM only.
     rom[0x148] = 0x01 if mbc1 else 0x00                 # 64KB / 32KB.
-    rom[0x149] = 0x00                                   # No RAM.
+    rom[0x149] = 0x02 if save else 0x00                 # 8KB RAM / No RAM.
     rom[0x14d] = (-sum(rom[0x134:0x14d]) - 25) & 0xff   # Header checksum.
-    program = PROGRAM + (PALETTE_MBC1 if mbc1 else PALETTE) + EPILOGUE
+    program = PROGRAM + (PALETTE_SAVE if save else PALETTE_MBC1 if mbc1 else PALETTE) + EPILOGUE
     rom[0x150:0x150 + len(program)] = bytes(program)
     if mbc1:
         rom[0x4000] = 0xe4 # Bank 1 (not selected).
@@ -97,4 +107,4 @@ def make_test_rom(mbc1=False):
 
 if __name__ == "__main__":
     with open(sys.argv[1], "wb") as f:
-        f.write(make_test_rom(mbc1="--mbc1" in sys.argv))
+        f.write(make_test_rom(mbc1="--mbc1" in sys.argv, save="--save" in sys.argv))
