@@ -475,8 +475,15 @@ class BaseSoC(SoCMini):
         if with_vcart:
             self.vcart     = vcart = VirtualCart(memory.vcart_port, memory.ctrl.dout)
             self.vcart_csr = VirtualCartCSR(vcart)
+        # Memory reset: memrst (PLL lock, cartridge insertion/removal) or, without the Game Boy core,
+        # PLL lock only (a reset during a CPU access would lose it: CPU/bus stall).
+        if with_cpu:
+            mem_reset = Signal(reset=1)
+            self.sync.xclk += mem_reset.eq(~crg.pll.locked)
+        else:
+            mem_reset = memrst
         self.comb += [
-            memory.reset.eq(memrst),
+            memory.reset.eq(mem_reset),
             q_menu_init.eq(memory.menu_init),
             # Game Boy framebuffer write.
             memory.gb_new_line.eq(h_gb_newline),

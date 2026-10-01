@@ -56,9 +56,10 @@ void DG_SetPalette(const uint8_t *rgb)
 	hal_lcd_palette(palette);
 }
 
-/* Frames rate (console). */
+/* Frames rate (console) and frames counter (read by the host: scripts/chromatic.py doom-fps). */
 static uint32_t fps_time;
 static uint32_t fps_frames;
+volatile uint32_t dg_frames;
 
 void DG_DrawFrame(void)
 {
@@ -72,6 +73,7 @@ void DG_DrawFrame(void)
 	}
 	hal_lcd_present();
 
+	dg_frames++;
 	fps_frames++;
 	if (hal_ticks_ms() - fps_time >= 5000) {
 		uint32_t tenths = fps_frames*10000/(hal_ticks_ms() - fps_time);

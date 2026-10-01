@@ -4,14 +4,15 @@
 ([doomgeneric](https://github.com/ozkl/doomgeneric), Chocolate Doom based) from the PSRAM, on the
 Chromatic LCD (and so over UVC), with the console buttons and sound effects.
 
-Status: the port runs on the PC (SDL emulation of the Chromatic, same platform code) and the SoC
-firmware runs in `litex_sim` (VexRiscv `standard`, single-cycle RAM: init, title, demo playback, frame
-below); **hardware bring-up pending** (frames rate to be measured).
+Status: **runs on the Chromatic** (title, demos, menus, playable with the console buttons), at
+**~3.5-4.5 fps** (demo, firmware frames counter); also on the PC (SDL emulation of the Chromatic, same
+platform code) and in `litex_sim` (frame below).
 
 <img src="images/doom_litex_sim.png" width="320" alt="Doom demo frame rendered by the SoC firmware in litex_sim (LCD dump)">
 
-In `litex_sim`, the demo takes ~5M CPU cycles per frame (title: ~0.7M): ~6-7 fps at 33.5MHz at best,
-before the PSRAM/L2 cache misses (not modeled there).
+Performance (hardware, `firmware/fbtest`): main RAM 32-bit writes 6.6MB/s, reads 6.8MB/s, memcpy
+2.2MB/s, random read (cache miss) latency 3.4us (~114 CPU cycles). In `litex_sim` (single-cycle RAM)
+the demo takes ~5M CPU cycles per frame (~6-7 fps at 33.5MHz): the PSRAM latency costs ~40%.
 
 ## SoC (`./chromatix.py --with-doom`)
 
@@ -103,5 +104,18 @@ gamepad, SDL audio); `chromatix_dg.c` (display/input/WAD) and `sound.c` (mixer) 
 - Sound: 8 channels software mixer of the DMX lumps (8-bit, 11025Hz) refilling the PCM FIFO from its
   interrupt (independent of the frames rate). No music (MUS/OPL).
 - No filesystem: no config/savegames.
-- Next (hardware): measure the frames rate, then tune (`-O3`, low detail mode, cache sizes, CPU
-  variant/frequency, hot tables).
+- `dg_frames` (firmware global, see `doom.elf.map`): frames counter, readable from the host over the
+  bridge (frames rate without the console).
+
+## Known issues / next
+
+- Performance: reduce the PSRAM miss latency (3.4us: request/acknowledge clock domain crossings,
+  arbitration, 8-byte L2 lines: longer bursts/lines), larger CPU caches (BSRAM is full: 55/56, the
+  framebuffer could move to the PSRAM), `-O3`, low detail mode, CPU frequency (pClk Fmax 66MHz).
+- Tearing: the LCD framebuffer is updated while displayed (no double buffering): wait for the vsync
+  (`framebuffer_frame`) or double buffer.
+- Host link: `litex_server` can get out of sync when a client is killed during a transaction (reads
+  return 0 or time out): restart it. Long read-backs (`run` verification) were seen stalling: use
+  `--no-verify` for now (writes: ~2.3MB/s, WAD loaded in ~2s).
+- Console: the crossover UART output is dropped when the host doesn't read it fast enough (the
+  firmware never blocks on it).
