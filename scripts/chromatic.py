@@ -180,6 +180,31 @@ def rom_config(rom):
 def rom_title(rom):
     return rom[0x134:0x143].split(b"\x00")[0].decode("ascii", errors="replace").strip()
 
+# WAD ----------------------------------------------------------------------------------------------
+
+def align_wad(wad):
+    """
+    Doom WAD with 4-byte aligned lumps (the firmware uses the lumps in place: no misaligned accesses
+    on RISC-V), directory at the end. Same as firmware/doom/wad_align.h.
+    """
+    if len(wad) < 12 or wad[:4] not in [b"IWAD", b"PWAD"]:
+        raise ValueError("Not a WAD file.")
+    numlumps  = int.from_bytes(wad[4:8],  "little")
+    directory = int.from_bytes(wad[8:12], "little")
+    if directory + 16*numlumps > len(wad):
+        raise ValueError("Invalid WAD directory.")
+    lumps = bytearray()
+    entries = bytearray()
+    for i in range(numlumps):
+        entry  = wad[directory + 16*i:directory + 16*(i + 1)]
+        filepos = int.from_bytes(entry[0:4], "little")
+        length  = int.from_bytes(entry[4:8], "little")
+        if filepos + length > len(wad):
+            raise ValueError("Invalid WAD lump.")
+        entries += (12 + len(lumps)).to_bytes(4, "little") + entry[4:16]
+        lumps   += wad[filepos:filepos + length] + bytes(-length % 4)
+    return wad[:4] + numlumps.to_bytes(4, "little") + (12 + len(lumps)).to_bytes(4, "little") + lumps + entries
+
 # Capture ------------------------------------------------------------------------------------------
 
 def find_uvc_device():
@@ -323,7 +348,7 @@ def main():
             firmware = _read_file(args.firmware)
             files    = [(int(offset, 0), _read_file(name)) for name, offset in args.file]
             if args.wad:
-                files.append((DOOM_WAD_OFFSET, _read_file(args.wad)))
+                files.append((DOOM_WAD_OFFSET, align_wad(_read_file(args.wad))))
             size = len(firmware) + sum(len(data) for _, data in files)
             t0   = time.time()
             chromatic.run_firmware(firmware, files, verify=not args.no_verify)
