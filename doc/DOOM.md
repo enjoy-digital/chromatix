@@ -5,27 +5,44 @@
 Chromatic LCD (and so over UVC), with the console buttons and sound effects.
 
 Status: **runs on the Chromatic** (title, demos, menus, playable with the console buttons), at
-**~3.5-4.5 fps** (demo, firmware frames counter); also on the PC (SDL emulation of the Chromatic, same
-platform code) and in `litex_sim` (left: Chromatic over UVC, right: litex_sim LCD dump).
+**~15 fps** (timedemo, see Performance); also on the PC (SDL emulation of the Chromatic, same platform
+code) and in `litex_sim` (left: Chromatic over UVC, right: litex_sim LCD dump).
 
 <img src="images/doom_chromatic.png" width="320" alt="Doom on the Chromatic, captured over UVC"> <img src="images/doom_litex_sim.png" width="320" alt="Doom demo frame rendered by the SoC firmware in litex_sim (LCD dump)">
 
-Performance (hardware, `firmware/fbtest`): main RAM 32-bit writes 6.6MB/s, reads 6.8MB/s, memcpy
-2.2MB/s, random read (cache miss) latency 3.4us (~114 CPU cycles). In `litex_sim` (single-cycle RAM)
-the demo takes ~5M CPU cycles per frame (~6-7 fps at 33.5MHz): the PSRAM latency costs ~40%.
+## Performance
+
+`./scripts/chromatic.py --serial /dev/ttyACM0 doom-bench firmware/doom/doom.bin --wad doom1.wad --profile`:
+timedemo of `demo1` (first 700 gametics), main RAM counters (`MemoryCounters` CSRs) and a 1kHz PC
+sampling profile mapped to the firmware functions.
+
+| Step | fps | Notes |
+|---|---|---|
+| Baseline (CPU 33.5MHz) | 6.44 | PSRAM busy 46% of cycles, 18.3 cycles/request |
+| 32-bit `FixedDiv` (bit exact) | 6.51 | no 64-bit software division |
+| Low detail, displayed columns only | 9.26 | the LCD shows 1 column out of 2: drawers write only those |
+| Synchronous PSRAM bridge, no frame blend traffic | 10.65 | 13.9 cycles/request (max 115, was 306) |
+| **CPU at 67.1MHz (sys = xClk)** | **15.32** | timing met (Fmax 72.5MHz), PSRAM busy 60% |
+
+Tried and kept out: `-O3` (8.80 fps vs 9.26: 4KB I-cache), `-Os` (8.93). Framebuffer stores are ~10%
+only (measured without them: 10.27 vs 9.26). Profile at 15 fps: drawers ~34% (`R_DrawColumnLow`,
+`R_DrawSpanLow`, fuzz), `R_StoreWallRange` 9%, LCD downscale (`DG_DrawFrame`) 8%, `R_MapPlane` 7%.
+
+Main RAM (hardware, `firmware/fbtest`, CPU 33.5MHz): 32-bit writes 6.6MB/s, reads 6.8MB/s, memcpy
+2.2MB/s, random read (cache miss) latency 3.4us.
 
 ## SoC (`./chromatix.py --with-doom`)
 
 | | |
 |---|---|
-| CPU | VexRiscv `standard` (rv32im, 4KB I$/D$, single-cycle mul), 33.5MHz (pClk, Fmax 61MHz) |
+| CPU | VexRiscv `standard` (rv32im, 4KB I$/D$, single-cycle mul), 67.1MHz (sys = xClk, as the PSRAM controller) |
 | Boot | no ROM: the CPU starts at the main RAM start, held in reset (ctrl `cpu_rst`) while the host loads the firmware |
 | Main RAM | PSRAM 0x080000-0x7FFFFF (7.5MB) at 0x40000000, behind an 8KB L2 cache (8-byte lines) |
 | LCD | `LCDFramebuffer`: 160x144 8-bit indexed + 256 colors RGB555 palette (BSRAM, Wishbone at 0x90000000), Game Boy LCD stream into the video pipeline (OSD, color correction, panel, UVC) |
 | Audio | `PCMAudio`: stereo 16-bit samples FIFO (512) at 11025Hz, IRQ when less than half full |
 | Buttons | `demo_buttons_status` |
 | Host link | USB CDC: UARTBone (fast loads, ~MB/s) + crossover UART (console, `litex_term crossover`) |
-| Resources | Logic 57%, BSRAM 55/56 |
+| Resources | Logic 58%, BSRAM 53/56 |
 
 Main RAM layout (`firmware/common/main_ram.ld`): firmware (code/data/bss) from 0x40000000, heap
 (Doom zone: 2MB) and stack (64KB) up to 0x40370000, then the WAD (up to 4.06MB: shareware
@@ -109,13 +126,14 @@ gamepad, SDL audio); `chromatix_dg.c` (display/input/WAD) and `sound.c` (mixer) 
 
 ## Known issues / next
 
-- Performance: reduce the PSRAM miss latency (3.4us: request/acknowledge clock domain crossings,
-  arbitration, 8-byte L2 lines: longer bursts/lines), larger CPU caches (BSRAM is full: 55/56, the
-  framebuffer could move to the PSRAM), `-O3`, low detail mode, CPU frequency (pClk Fmax 66MHz).
+- Performance (memory bound now: PSRAM busy 60%): 32-byte PSRAM bursts/line buffer (L2 8-byte lines:
+  sequential misses as separate requests), larger CPU caches (BSRAM 53/56: the LCD framebuffer could
+  move to the PSRAM), GCC 12 (GCC 10.1 used).
 - Tearing: the LCD framebuffer is updated while displayed (no double buffering): wait for the vsync
   (`framebuffer_frame`) or double buffer.
-- Host link: `litex_server` can get out of sync when a client is killed during a transaction (reads
-  return 0 or time out): restart it. Long read-backs (`run` verification) were seen stalling: use
-  `--no-verify` for now (writes: ~2.3MB/s, WAD loaded in ~2s).
+- Host link: reads over the USB CDC (UARTBone) get stuck from time to time (~1 per 100KB: reply
+  bytes held until the next request, LUNA bulk IN path, root cause not found). `--serial` (direct
+  link, no `litex_server`) resynchronizes and retries; with `litex_server`, restart it when stuck.
+  Writes are reliable (~2MB/s, WAD loaded in ~2s).
 - Console: the crossover UART output is dropped when the host doesn't read it fast enough (the
   firmware never blocks on it).

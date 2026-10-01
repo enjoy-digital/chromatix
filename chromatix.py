@@ -121,9 +121,12 @@ class BaseSoC(SoCMini):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
         hclk_freq = int(33.55432e6 / 2)
-        # LiteX "sys" domain: gClk, or pClk for the CPU (BIOS demo, Doom).
+        # LiteX "sys" domain: gClk, pClk for the BIOS demo CPU, xClk for Doom (CPU and PSRAM controller
+        # in the same domain).
+        xclk_freq    = int(33.55432e6*2)
         with_cpu     = with_bios or with_doom
-        sys_clk_freq = pclk_freq if with_cpu else gclk_freq
+        sys_clk      = {(True, False): "pclk", (False, True): "xclk"}.get((with_bios, with_doom), "gclk")
+        sys_clk_freq = {"gclk": gclk_freq, "pclk": pclk_freq, "xclk": xclk_freq}[sys_clk]
         assert not (with_bios and with_doom)
         assert not (with_cpu and with_debug_bridge) # Both use the USB CDC port.
         with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
@@ -164,7 +167,7 @@ class BaseSoC(SoCMini):
 
         # CRG --------------------------------------------------------------------------------------
 
-        self.crg = crg = CRG(platform, sys_clk="pclk" if with_cpu else "gclk")
+        self.crg = crg = CRG(platform, sys_clk=sys_clk)
 
         # Platform Resources -----------------------------------------------------------------------
 
