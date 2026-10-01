@@ -457,15 +457,16 @@ def test_psram_port_adapter():
 # PSRAM Wishbone -----------------------------------------------------------------------------------
 
 class PSRAMWishboneDUT(Module):
-    def __init__(self, base, data_width):
+    def __init__(self, base, data_width, synchronous=False):
         self.submodules.ctrl    = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=2))
         self.submodules.psram   = psram = ClockDomainsRenamer("xclk")(NativePSRAM())
         self.submodules.adapter = ClockDomainsRenamer("xclk")(PSRAMPortAdapter(ctrl, psram))
-        self.submodules.bridge  = bridge = PSRAMWishbone(ctrl.ports[1], ctrl.dout, base=base, data_width=data_width)
+        self.submodules.bridge  = bridge = PSRAMWishbone(ctrl.ports[1], ctrl.dout, base=base,
+            data_width=data_width, synchronous=synchronous)
 
 
-def run_psram_wishbone(data_width, lines, base=0x400000):
-    dut = PSRAMWishboneDUT(base, data_width=data_width)
+def run_psram_wishbone(data_width, lines, base=0x400000, synchronous=False):
+    dut = PSRAMWishboneDUT(base, data_width=data_width, synchronous=synchronous)
     res = {}
 
     def main():
@@ -476,8 +477,9 @@ def run_psram_wishbone(data_width, lines, base=0x400000):
         for adr in reversed(list(lines)):
             res["read"][adr] = (yield from bus.read(adr))
 
+    # Synchronous: sys = xClk/2 from the same PLL (as pClk/xClk), else unrelated clocks.
     run_simulation(dut, {"sys": main(), "xclk": dut.psram.generator(gap=1)},
-        clocks={"sys": 80, "xclk": 10})
+        clocks={"sys": 20 if synchronous else 80, "xclk": 10})
     assert res["read"] == lines
     assert dut.psram.errors == []
     return dut
@@ -498,6 +500,11 @@ def test_psram_wishbone():
 def test_psram_wishbone_64():
     """64-bit Wishbone lines (as used behind the SoC L2 cache)."""
     run_psram_wishbone(64, {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d})
+
+def test_psram_wishbone_64_synchronous():
+    """64-bit Wishbone lines, synchronous bridge (sys = xClk/2, CPU builds)."""
+    run_psram_wishbone(64, {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d},
+        synchronous=True)
 
 # Memory System ------------------------------------------------------------------------------------
 

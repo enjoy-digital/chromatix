@@ -608,8 +608,11 @@ class PSRAMWishbone(LiteXModule):
     front of it) at `base` + adr * bytes. Only full-width writes are supported (sel is ignored), as
     done by a LiteX L2 cache. The request/acknowledge cross the domains with toggles; the address,
     data and read data are quasi-static during an access.
+
+    synchronous: sys and xClk from the same PLL (related clocks, timing analyzed): the toggles are used
+    directly (no synchronizers: lower latency).
     """
-    def __init__(self, port, ram_dout, base=0x000000, data_width=64):
+    def __init__(self, port, ram_dout, base=0x000000, data_width=64, synchronous=False):
         assert data_width % 16 == 0
         nwords = data_width // 16
         self.bus = bus = wishbone.Interface(data_width=data_width, address_width=32, addressing="word")
@@ -629,7 +632,10 @@ class PSRAMWishbone(LiteXModule):
         we         = Signal()
         dat_w      = Signal(data_width)
         dat_r      = Signal(data_width)
-        self.specials += MultiReg(ack_toggle, ack_sync)
+        if synchronous:
+            self.comb += ack_sync.eq(ack_toggle)
+        else:
+            self.specials += MultiReg(ack_toggle, ack_sync)
         self.comb += [
             bus.dat_r.eq(dat_r),
             bus.ack.eq(pending & (ack_sync != ack_seen)),
@@ -655,7 +661,10 @@ class PSRAMWishbone(LiteXModule):
         busy     = Signal()
         index    = Signal(max=max(nwords, 2))
         words    = [dat_r[16*i:16*(i + 1)] for i in range(nwords)]
-        self.specials += MultiReg(req_toggle, req_sync, "xclk")
+        if synchronous:
+            self.comb += req_sync.eq(req_toggle)
+        else:
+            self.specials += MultiReg(req_toggle, req_sync, "xclk")
         self.comb += [
             port.rnw.eq(~we),
             port.addr.eq(adr),
@@ -742,7 +751,7 @@ class MemorySystem(LiteXModule):
     (QSPI_CLK rising/falling edges, created here).
     """
     def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64,
-        with_vcart=False, psram_factory=None):
+        with_vcart=False, with_frame_blend=True, bus_synchronous=False, psram_factory=None):
         self.reset       = Signal()
         self.menu_init   = Signal()
         self.bist_done   = Signal()
@@ -834,7 +843,9 @@ class MemorySystem(LiteXModule):
                 port.burst_length.eq(320),
                 port.din.eq(0),
             ]
-            reader = LineReader(port, ctrl.dout, base, self.bist_done)
+            # Previous frame reads only with frame blending (free PSRAM bandwidth for a CPU otherwise).
+            ram_ready = self.bist_done if (with_frame_blend or n != PORT_FBRD) else 0
+            reader = LineReader(port, ctrl.dout, base, ram_ready)
             self.add_module(name=name, module=reader)
             self.comb += [
                 reader.valid.eq(valid),
@@ -847,7 +858,7 @@ class MemorySystem(LiteXModule):
         port = ports[PORT_FBWR]
         self.gb_burst_write = gb_burst_write = GBBurstWrite(port)
         self.comb += [
-            gb_burst_write.ram_ready.eq(self.bist_done),
+            gb_burst_write.ram_ready.eq(self.bist_done if with_frame_blend else 0),
             gb_burst_write.vsync.eq(self.h_vsync),
             gb_burst_write.new_line.eq(self.gb_new_line),
             gb_burst_write.address.eq(self.gb_address),
@@ -864,7 +875,8 @@ class MemorySystem(LiteXModule):
         # CPU Main RAM (optional) ------------------------------------------------------------------
         if with_bus:
             self.bus_bridge = bus_bridge = PSRAMWishbone(ports[PORT_CPU], ctrl.dout,
-                base       = bus_base,
-                data_width = bus_data_width,
+                base        = bus_base,
+                data_width  = bus_data_width,
+                synchronous = bus_synchronous,
             )
             self.bus = bus_bridge.bus

@@ -406,7 +406,7 @@ class BaseSoC(SoCMini):
             video.menu_disabled.eq(menu_disabled),
             video.lcd_init_done.eq(lcd_init_done),
             video.lcd_en.eq(lcd_en),
-            video.frame_blend.eq(system_control[1]),
+            video.frame_blend.eq(system_control[1] & (not with_cpu)),
             video.correct_lcd.eq(system_control[2]),
             video.correct_uvc.eq(system_control[3]),
             video.voltage_low.eq(low_battery),
@@ -468,6 +468,10 @@ class BaseSoC(SoCMini):
             bus_base       = main_ram_offset,
             bus_data_width = 64 if with_cpu else 32,
             with_vcart     = with_vcart,
+            # Frame blending only for the Game Boy (CPU builds: PSRAM bandwidth for the CPU).
+            with_frame_blend = not with_cpu,
+            # CPU (sys = pClk) and PSRAM (xClk) clocks from the same PLL: synchronous bus bridge.
+            bus_synchronous  = with_cpu,
         )
 
         # Virtual Cartridge (ROM/cartridge RAM in the PSRAM, loaded from the host) -----------------
