@@ -122,6 +122,7 @@ void DG_SetWindowTitle(const char *title)
 
 extern boolean menuactive;
 extern int     joybspeed;
+extern int     detailLevel;
 extern int     key_nextweapon;
 extern int     key_prevweapon;
 
@@ -276,6 +277,8 @@ static size_t mem_wad_read(wad_file_t *wad, unsigned int offset, void *buffer, s
 void DG_Init(void)
 {
 	display_init();
+	/* Low detail (160 columns rendered: the displayed ones, see DOOMGENERIC_LOWDETAIL_HALF). */
+	detailLevel    = 1;
 	/* Controls: always run, weapons keys. */
 	joybspeed      = 29;
 	key_nextweapon = KEY_NEXT_WEAPON;
