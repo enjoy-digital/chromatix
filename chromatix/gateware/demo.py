@@ -13,6 +13,7 @@ from litex.gen import *
 
 from litex.soc.interconnect import stream
 from litex.soc.interconnect.csr import *
+from litex.soc.interconnect.csr_eventmanager import *
 
 from chromatix.gateware.buttons import BUTTONS
 
@@ -71,13 +72,16 @@ class PCMAudio(LiteXModule):
     """
     PCM audio player (sys domain): stereo signed 16-bit samples written by the CPU (data CSR) in a
     FIFO, played at sample_rate (fractional clock division from clk_freq). On underrun, the last
-    sample is held.
+    sample is held. IRQ (level): FIFO less than half full (refill from an interrupt handler).
     """
     def __init__(self, clk_freq, sample_rate=11025, depth=512):
         self.data  = CSRStorage(32, description="Sample write: {right[15:0], left[15:0]} (signed).")
         self.level = CSRStatus(bits_for(depth), description="FIFO level (samples).")
         self.left  = Signal(16)
         self.right = Signal(16)
+        self.ev    = EventManager()
+        self.ev.low = EventSourceLevel(description="FIFO less than half full.")
+        self.ev.finalize()
 
         # # #
 
@@ -87,6 +91,7 @@ class PCMAudio(LiteXModule):
             fifo.sink.valid.eq(self.data.re),
             fifo.sink.data.eq(self.data.storage),
             self.level.status.eq(fifo.level),
+            self.ev.low.trigger.eq(fifo.level < depth//2),
         ]
 
         # Sample rate tick (phase accumulator).

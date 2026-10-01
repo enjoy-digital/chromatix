@@ -42,3 +42,18 @@ def test_pcm_rate_and_underrun():
     assert out[0] == (0, 0)
     assert [l for l, r in out[1:]] == samples
     assert all(r == (~l & 0xffff) for l, r in out[1:])
+
+def test_pcm_irq():
+    """IRQ pending while the FIFO is less than half full."""
+    dut = PCMAudio(clk_freq=1000, sample_rate=10, depth=16)
+
+    def gen():
+        yield
+        assert (yield dut.ev.low.trigger) == 1
+        for i in range(10):
+            yield from dut.data.write(i)
+        yield
+        assert (yield dut.ev.low.trigger) == 0
+
+    run_simulation(dut, gen())
+

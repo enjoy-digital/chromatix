@@ -107,6 +107,7 @@ def test_soc_doom_elaboration(tmp_path):
     assert "csr_register,ctrl_reset," in csrs
     assert "csr_register,framebuffer_frame," in csrs
     assert "csr_register,pcm_data," in csrs
+    assert "constant,pcm_interrupt," in csrs
     assert "csr_register,demo_buttons_status," in csrs
     assert f"memory_region,main_ram,0x40000000,{target.DOOM_RAM_SIZE},cached" in csrs
     assert "memory_region,framebuffer,0x90000000,65536,io" in csrs

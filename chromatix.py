@@ -532,6 +532,7 @@ class BaseSoC(SoCMini):
                 ]
             else:
                 self.pcm = pcm = PCMAudio(sys_clk_freq)
+                self.irq.add("pcm", use_loc_if_exists=True)
                 self.sync.hclk += [ # pClk -> hClk (same PLL, samples quasi-static).
                     left.eq(pcm.left),
                     right.eq(pcm.right),
