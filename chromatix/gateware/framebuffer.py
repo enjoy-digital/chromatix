@@ -26,16 +26,16 @@ from litex.soc.interconnect.csr import *
 
 class GBLCDTiming(LiteXModule):
     """
-    Game Boy LCD timing ("hclk" domain): 4 hClk per pixel clock, line_dots pixel clocks per line (160
-    visible from h_start), frame_lines lines per frame (144 visible), vsync during line 0 (as the
-    Game Boy core: the video pipeline, LCD panel and line readers re-align on its rising edge).
+    Game Boy LCD timing ("hclk" domain): 4 hClk per pixel clock, line_dots pixel clocks per line
+    (160 visible from h_start), frame_lines lines per frame (144 visible), vsync during line 0 (as
+    the Game Boy core: the video pipeline, LCD panel and line readers re-align on its rising edge).
     """
     def __init__(self, line_dots=456, h_start=80, frame_lines=154):
-        self.phase    = phase   = Signal(2)               # hClk cycles per pixel clock.
-        self.dot      = dot     = Signal(max=line_dots)   # Pixel clock in line.
-        self.line     = line    = Signal(max=frame_lines) # Line in frame.
-        self.x        = x       = Signal(8)               # Visible pixel (mode 3).
-        self.visible  = visible = Signal()
+        self.phase     = phase   = Signal(2)               # hClk cycles per pixel clock.
+        self.dot       = dot     = Signal(max=line_dots)   # Pixel clock in line.
+        self.line      = line    = Signal(max=frame_lines) # Line in frame.
+        self.x         = x       = Signal(8)               # Visible pixel (mode 3).
+        self.visible   = visible = Signal()
         self.gb_clkena = Signal()
         self.gb_mode   = Signal(2)
         self.gb_vsync  = Signal()
@@ -65,7 +65,7 @@ class GBLCDTiming(LiteXModule):
         ]
         self.comb += [
             self.gb_clkena.eq(visible & (phase == 3)),
-            # Modes: 2 (OAM) / 3 (pixels) then 0 (hblank), 1 during vblank; mode[1] is used as hsync.
+            # Modes: 2 (OAM) / 3 (pixels) then 0 (hblank), 1 during vblank; mode[1]: hsync.
             If(line >= 144,
                 self.gb_mode.eq(1),
             ).Elif(dot < (h_start + 160),
@@ -81,8 +81,8 @@ class GBLCDTiming(LiteXModule):
 class LCDFramebuffer(LiteXModule):
     """
     bus ("sys" domain, 32-bit words): pixels at word 0 (4 pixels per word, little endian: pixel x at
-    byte x of the line, lines of width bytes), palette at word `PALETTE_OFFSET` (256 entries, RGB555:
-    {B[4:0], G[4:0], R[4:0]}). Byte writes are supported (sel).
+    byte x of the line, lines of width bytes), palette at word `PALETTE_OFFSET` (256 entries,
+    RGB555: {B[4:0], G[4:0], R[4:0]}). Byte writes are supported (sel).
 
     Pixels ("hclk" domain): Game Boy LCD interface, same timings as the LCD terminal (4 hClk per
     pixel clock, line_dots pixel clocks per line, 160 visible from h_start, frame_lines lines, 144
@@ -94,7 +94,8 @@ class LCDFramebuffer(LiteXModule):
 
     def __init__(self, width=160, height=144, line_dots=456, h_start=80, frame_lines=154):
         assert width % 4 == 0
-        self.bus       = bus = wishbone.Interface(data_width=32, address_width=32, addressing="word")
+        self.bus       = bus = wishbone.Interface(data_width=32, address_width=32,
+            addressing="word")
         # Game Boy LCD interface (hClk).
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
@@ -181,10 +182,10 @@ class LCDPSRAMFramebuffer(LiteXModule):
     start of a frame.
 
     - bus ("sys" domain, 32-bit words): nslots line buffers of 40 words (8-bit indexed pixels, 4 per
-      word, little endian) at words 40*slot, and the palette (256 x RGB555) at word PALETTE_OFFSET.
-      The `line` CSR copies a line buffer to a frame buffer line in the PSRAM (xClk domain: palette
-      lookup, then burst write on `port`), line buffers copied in order: a line buffer can be written
-      again once copied (status busy).
+      word, little endian) at words 40*slot, and the palette (256 x RGB555) at word
+      PALETTE_OFFSET. The `line` CSR copies a line buffer to a frame buffer line in the PSRAM (xClk
+      domain: palette lookup, then burst write on `port`), line buffers copied in order: a line
+      buffer can be written again once copied (status busy).
     - Pixels ("hclk" domain): Game Boy LCD interface (GBLCDTiming), pixel data from a PSRAM line
       reader of the displayed buffer (fb_base, fb_data: the video pipeline's frame buffer reader).
     """
@@ -197,7 +198,8 @@ class LCDPSRAMFramebuffer(LiteXModule):
         assert nbuffers <= 4
         assert nslots in [2, 4]
         assert nslots*self.LINE_WORDS <= self.PALETTE_OFFSET
-        self.bus       = bus = wishbone.Interface(data_width=32, address_width=32, addressing="word")
+        self.bus       = bus = wishbone.Interface(data_width=32, address_width=32,
+            addressing="word")
         # Game Boy LCD interface (hClk).
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
@@ -212,13 +214,13 @@ class LCDPSRAMFramebuffer(LiteXModule):
             CSRField("front", size=2, description="Buffer to display (from the next frame)."),
         ])
         self.line = CSRStorage(fields=[
-            CSRField("line",   size=8, description="Frame buffer line (write: copy of the line buffer)."),
+            CSRField("line",   size=8, description="Frame buffer line (write: line buffer copy)."),
             CSRField("buffer", size=2, description="Frame buffer."),
             CSRField("slot",   size=2, description="Line buffer."),
         ])
         self.status = CSRStatus(fields=[
             CSRField("front", size=2, description="Displayed buffer (current frame)."),
-            CSRField("busy",  size=4, description="Line buffers being copied to the PSRAM (1 bit per line buffer)."),
+            CSRField("busy",  size=4, description="Line buffers being copied (1 bit per buffer)."),
         ])
         self._frame = CSRStatus(32, description="Frames counter (incremented at each vsync).")
 
@@ -234,12 +236,15 @@ class LCDPSRAMFramebuffer(LiteXModule):
         stage    = Memory(16, self.LINE_PIXELS)
         stage_wr = stage.get_port(write_capable=True, clock_domain="xclk")
         stage_rd = stage.get_port(clock_domain="xclk")
-        self.specials += lines, lines_wr, lines_rd, palette, pal_wr, pal_rd, stage, stage_wr, stage_rd
+        self.specials += lines, lines_wr, lines_rd
+        self.specials += palette, pal_wr, pal_rd
+        self.specials += stage, stage_wr, stage_rd
 
         # Wishbone (writes only, reads return 0) ---------------------------------------------------
         is_palette = Signal()
         self.comb += [
-            is_palette.eq(bus.adr[log2_int(self.PALETTE_OFFSET)]), # Region offset bit (bus.adr is absolute).
+            # Region offset bit (bus.adr is the absolute word address).
+            is_palette.eq(bus.adr[log2_int(self.PALETTE_OFFSET)]),
             lines_wr.adr.eq(bus.adr),
             lines_wr.dat_w.eq(bus.dat_w),
             pal_wr.adr.eq(bus.adr[:8]),
@@ -278,8 +283,8 @@ class LCDPSRAMFramebuffer(LiteXModule):
         )
 
         # xClk: line buffers copied in order. Palette lookup of the line to the staging buffer (1
-        # pixel per cycle, 2 cycles latency), then 320 bytes burst write from the staging buffer (the
-        # PSRAM port data is the last popped word, popped on request/write_next: read ahead).
+        # pixel per cycle, 2 cycles latency), then 320 bytes burst write from the staging buffer
+        # (the PSRAM port data is the last popped word, popped on request/write_next: read ahead).
         slot  = Signal(max=nslots)
         pend  = Signal(nslots)
         index = Signal(max=self.LINE_PIXELS + 3) # Pixel read from the line buffer.

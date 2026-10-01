@@ -503,8 +503,8 @@ def test_psram_wishbone_64():
 
 def test_psram_wishbone_64_synchronous():
     """64-bit Wishbone lines, synchronous bridge (sys = xClk/2, CPU builds)."""
-    run_psram_wishbone(64, {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d},
-        synchronous=True)
+    lines = {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d}
+    run_psram_wishbone(64, lines, synchronous=True)
 
 # Memory System ------------------------------------------------------------------------------------
 

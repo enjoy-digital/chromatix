@@ -121,12 +121,16 @@ class BaseSoC(SoCMini):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
         hclk_freq = int(33.55432e6 / 2)
-        # LiteX "sys" domain: gClk, pClk for the BIOS demo CPU, xClk for Doom (CPU and PSRAM controller
-        # in the same domain).
-        xclk_freq    = int(33.55432e6*2)
+        xclk_freq = int(33.55432e6 * 2)
+        # LiteX "sys" domain: gClk, pClk for the BIOS demo CPU, xClk for Doom (CPU and PSRAM
+        # controller in the same domain).
         with_cpu     = with_bios or with_doom
-        sys_clk      = {(True, False): "pclk", (False, True): "xclk"}.get((with_bios, with_doom), "gclk")
-        sys_clk_freq = {"gclk": gclk_freq, "pclk": pclk_freq, "xclk": xclk_freq}[sys_clk]
+        sys_clk      = "pclk" if with_bios else "xclk" if with_doom else "gclk"
+        sys_clk_freq = {
+            "gclk" : gclk_freq,
+            "pclk" : pclk_freq,
+            "xclk" : xclk_freq,
+        }[sys_clk]
         assert not (with_bios and with_doom)
         assert not (with_cpu and with_debug_bridge) # Both use the USB CDC port.
         with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
@@ -478,7 +482,7 @@ class BaseSoC(SoCMini):
             with_vcart     = with_vcart,
             # Frame blending only for the Game Boy (CPU builds: PSRAM bandwidth for the CPU).
             with_frame_blend = not with_cpu,
-            # Doom: LCD frame buffers in the PSRAM (CPU line writes, read by the framebuffer reader).
+            # Doom: LCD frame buffers in the PSRAM (CPU line writes, framebuffer reader reads).
             with_lcd_framebuffer = with_doom,
             # CPU (sys = pClk) and PSRAM (xClk) clocks from the same PLL: synchronous bus bridge.
             bus_synchronous  = with_cpu,
@@ -492,8 +496,8 @@ class BaseSoC(SoCMini):
         if with_vcart:
             self.vcart     = vcart = VirtualCart(memory.vcart_port, memory.ctrl.dout)
             self.vcart_csr = VirtualCartCSR(vcart)
-        # Memory reset: memrst (PLL lock, cartridge insertion/removal) or, without the Game Boy core,
-        # PLL lock only (a reset during a CPU access would lose it: CPU/bus stall).
+        # Memory reset: memrst (PLL lock, cartridge insertion/removal) or, without the Game Boy
+        # core, PLL lock only (the cartridge isn't used, a reset during a CPU access would lose it).
         if with_cpu:
             mem_reset = Signal(reset=1)
             self.sync.xclk += mem_reset.eq(~crg.pll.locked)
@@ -953,7 +957,7 @@ def main():
         output_dir = "build",
         csr_csv    = "scripts/csr.csv",
         bios_lto   = True, # BIOS fits the 24KB integrated ROM.
-        libc_mode  = "full" if args.with_doom else "minimal", # Doom: full picolibc (stdio, malloc...).
+        libc_mode  = "full" if args.with_doom else "minimal", # Doom: full picolibc (stdio...).
     )
     if args.build:
         builder.build(build_name="chromatic", run=not args.no_compile)

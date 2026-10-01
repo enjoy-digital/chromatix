@@ -4,7 +4,7 @@
 # Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 # SPDX-License-Identifier: BSD-2-Clause
 
-"""LCDFramebuffer: Wishbone pixels/palette writes -> 160x144 Game Boy LCD pixels."""
+"""LCD framebuffers (BSRAM, PSRAM): Wishbone pixel/palette writes -> 160x144 Game Boy LCD pixels."""
 
 import random
 
@@ -12,7 +12,10 @@ from migen import *
 
 from litex.gen.sim import run_simulation
 
-from chromatix.gateware.framebuffer import LCDFramebuffer
+from chromatix.gateware.memory      import MultiPortRAMCtrl, PSRAMPortAdapter, LineReader
+from chromatix.gateware.framebuffer import LCDFramebuffer, LCDPSRAMFramebuffer
+
+from test.test_memory import NativePSRAM
 
 # Helpers ------------------------------------------------------------------------------------------
 
@@ -36,7 +39,8 @@ def render(width, height, pixels, palette, byte_writes=False):
         done.append(True)
 
     def reader():
-        # Wait for the writer, then capture a frame: 144 lines of 160 pixels from the vsync rising edge.
+        # Wait for the writer, then capture a frame: 144 lines of 160 pixels from the vsync rising
+        # edge.
         while not done:
             yield
         while (yield dut.gb_vsync):
@@ -89,20 +93,22 @@ def test_framebuffer_frame_counter():
 # LCD PSRAM Framebuffer ----------------------------------------------------------------------------
 
 def test_psram_framebuffer():
-    """8-bit lines written in the line buffers, copied to frame buffer 1 in the PSRAM (model) through
-    the palette, displayed after the front buffer change: LCD stream pixels from the PSRAM line
-    reader."""
-    from test.test_memory import NativePSRAM
-    from chromatix.gateware.memory import MultiPortRAMCtrl, PSRAMPortAdapter, LineReader
-    from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
-
+    """8-bit lines written in the line buffers, copied to frame buffer 1 in the PSRAM (model)
+    through the palette, displayed after the front buffer change: LCD stream pixels from the PSRAM
+    line reader."""
     class DUT(Module):
         def __init__(self):
-            self.submodules.ctrl    = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=2))
-            self.submodules.psram   = psram = ClockDomainsRenamer("xclk")(NativePSRAM())
-            self.submodules.adapter = ClockDomainsRenamer("xclk")(PSRAMPortAdapter(ctrl, psram))
-            self.submodules.fb      = fb    = LCDPSRAMFramebuffer(ctrl.ports[1], line_dots=166, h_start=2, frame_lines=146)
-            ctrl.ports[0].rnw.reset       = 1
+            xclk = ClockDomainsRenamer("xclk")
+            self.submodules.ctrl    = ctrl  = xclk(MultiPortRAMCtrl(nports=2))
+            self.submodules.psram   = psram = xclk(NativePSRAM())
+            self.submodules.adapter = xclk(PSRAMPortAdapter(ctrl, psram))
+            # Short blankings.
+            self.submodules.fb      = fb    = LCDPSRAMFramebuffer(ctrl.ports[1],
+                line_dots   = 166,
+                h_start     = 2,
+                frame_lines = 146,
+            )
+            ctrl.ports[0].rnw.reset          = 1
             ctrl.ports[0].burst_length.reset = 320
             self.submodules.reader  = reader = LineReader(ctrl.ports[0], ctrl.dout, fb.fb_base, 1)
             self.comb += [
@@ -134,7 +140,8 @@ def test_psram_framebuffer():
             while ((yield fb.status.fields.busy) >> slot) & 1:
                 yield
             for i in range(40):
-                yield from fb.bus.write(region + slot*40 + i, sum(p << 8*j for j, p in enumerate(pixels[4*i:4*i + 4])))
+                word = sum(p << 8*j for j, p in enumerate(pixels[4*i:4*i + 4]))
+                yield from fb.bus.write(region + slot*40 + i, word)
             yield from fb.line.write(y | (1 << 8) | (slot << 10))
         while (yield fb.status.fields.busy):
             yield

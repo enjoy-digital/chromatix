@@ -75,13 +75,16 @@ class PCMAudio(LiteXModule):
     sample is held. IRQ (level): FIFO less than half full (refill from an interrupt handler).
     """
     def __init__(self, clk_freq, sample_rate=11025, depth=512):
-        self.data  = CSRStorage(32, description="Sample write: {right[15:0], left[15:0]} (signed).")
+        self.data = CSRStorage(fields=[
+            CSRField("left",  size=16, description="Left sample (signed, write: pushed in the FIFO)."),
+            CSRField("right", size=16, description="Right sample (signed)."),
+        ])
         self.level = CSRStatus(bits_for(depth), description="FIFO level (samples).")
-        self.left  = Signal(16)
-        self.right = Signal(16)
         self.ev    = EventManager()
         self.ev.low = EventSourceLevel(description="FIFO less than half full.")
         self.ev.finalize()
+        self.left  = Signal(16)
+        self.right = Signal(16)
 
         # # #
 

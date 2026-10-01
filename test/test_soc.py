@@ -87,8 +87,8 @@ def test_soc_bios_elaboration(tmp_path):
     assert platform.sources == [] or all("emu" not in path for path, _, _ in platform.sources)
 
 def test_soc_doom_elaboration(tmp_path):
-    """Doom: VexRiscv (I/D caches, no ROM: reset in the PSRAM main RAM) + framebuffer/PCM audio in place
-    of the Game Boy core, UARTBone + crossover UART on the USB CDC."""
+    """Doom: VexRiscv (I/D caches, no ROM: reset in the PSRAM main RAM) + framebuffer/PCM audio in
+    place of the Game Boy core, UARTBone + crossover UART on the USB CDC."""
     target   = load_target()
     platform = Platform()
     target.add_timing_constraints(platform)

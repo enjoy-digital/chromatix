@@ -603,6 +603,10 @@ class LineReader(LiteXModule):
 
 # PSRAM Wishbone -----------------------------------------------------------------------------------
 
+def _slices(signal, width, n):
+    """n slices of width bits of signal (LSB first)."""
+    return [signal[width*i:width*(i + 1)] for i in range(n)]
+
 class PSRAMWishbone(LiteXModule):
     """
     Wishbone slave (sys domain) -> PSRAM burst port (xClk domain), for a CPU main RAM.
@@ -612,22 +616,24 @@ class PSRAMWishbone(LiteXModule):
     done by a LiteX L2 cache. The request/acknowledge cross the domains with toggles; the address,
     data and read data are quasi-static during an access.
 
-    synchronous: sys and xClk from the same PLL (related clocks, timing analyzed): the toggles are used
-    directly (no synchronizers: lower latency).
+    synchronous: sys and xClk from the same PLL (related clocks, timing analyzed): the toggles are
+    used directly (no synchronizers: lower latency).
 
-    fetch/buffers: reads fetch the aligned block of `fetch` bus words in one burst, kept in `buffers`
-    block buffers (round-robin): the next reads in a buffered block are answered without a PSRAM
-    access (sequential misses of the cache in front: code, textures...). Writes go to the PSRAM and
-    update a buffered copy.
+    fetch/buffers: reads fetch the aligned block of `fetch` bus words in one burst, kept in
+    `buffers` block buffers (round-robin): the next reads in a buffered block are answered without
+    a PSRAM access (sequential misses of the cache in front: code, textures...). Writes go to the
+    PSRAM and update a buffered copy.
     """
-    def __init__(self, port, ram_dout, base=0x000000, data_width=64, synchronous=False, fetch=1, buffers=0):
+    def __init__(self, port, ram_dout, base=0x000000, data_width=64, synchronous=False,
+        fetch=1, buffers=0):
         assert data_width % 16 == 0
         assert fetch & (fetch - 1) == 0
         assert (fetch == 1) or (buffers >= 1)
-        nwords     = data_width // 16
-        nbytes     = data_width // 8
-        fbits      = log2_int(fetch)
-        self.bus   = bus = wishbone.Interface(data_width=data_width, address_width=32, addressing="word")
+        nwords   = data_width//16
+        nbytes   = data_width//8
+        fbits    = log2_int(fetch)
+        self.bus = bus = wishbone.Interface(data_width=data_width, address_width=32,
+            addressing="word")
         # Statistics (sys): new PSRAM request (pulse), access pending.
         self.request = Signal()
         self.pending = Signal()
@@ -644,37 +650,38 @@ class PSRAMWishbone(LiteXModule):
         adr        = Signal(23)
         we         = Signal()
         dat_w      = Signal(data_width)
-        block      = Signal(data_width*fetch)   # Read data (xClk, quasi-static at the acknowledge).
-        slot       = Signal(max=max(fetch, 2))  # Bus word of the request in the block.
+        block      = Signal(data_width*fetch)  # Read data (xClk, quasi-static at the acknowledge).
+        slot       = Signal(max=max(fetch, 2)) # Bus word of the request in the block.
         tag        = Signal(len(bus.adr) - fbits)
         if synchronous:
             self.comb += ack_sync.eq(ack_toggle)
         else:
             self.specials += MultiReg(ack_toggle, ack_sync)
-        block_words = [block[data_width*i:data_width*(i + 1)] for i in range(fetch)]
 
-        # Block buffers. Lookup registered (timing): a new bus access is looked up in the first cycle
-        # (hits/data registered), then answered from a buffer (hit) or requested to the PSRAM (miss).
-        req_tag  = bus.adr[fbits:]
-        req_slot = bus.adr[:fbits] if fbits else 0
-        bvalid   = [Signal(name=f"bvalid{i}") for i in range(buffers)]
-        btag     = [Signal(len(tag), name=f"btag{i}") for i in range(buffers)]
-        bdata    = [Signal(data_width*fetch, name=f"bdata{i}") for i in range(buffers)]
-        hits     = [Signal(name=f"hit{i}") for i in range(buffers)]
-        hit      = Signal()
-        looked   = Signal() # Lookup done for the current bus access.
-        hit_ack  = Signal()
-        hit_dat  = Signal(data_width)
-        victim   = Signal(max=max(buffers, 2))
-        access   = Signal()
+        # Block buffers. Lookup registered (timing): a new bus access is looked up in the first
+        # cycle (hits/data registered), then answered from a buffer (hit) or requested to the PSRAM
+        # (miss).
+        req_tag   = bus.adr[fbits:]
+        req_slot  = bus.adr[:fbits] if fbits else 0
+        req_block = Cat(Constant(0, fbits), req_tag) if fbits else bus.adr
+        bvalid    = [Signal(name=f"bvalid{i}") for i in range(buffers)]
+        btag      = [Signal(len(tag), name=f"btag{i}") for i in range(buffers)]
+        bdata     = [Signal(data_width*fetch, name=f"bdata{i}") for i in range(buffers)]
+        hits      = [Signal(name=f"hit{i}") for i in range(buffers)]
+        hit       = Signal()
+        looked    = Signal() # Lookup done for the current bus access.
+        hit_ack   = Signal()
+        hit_dat   = Signal(data_width)
+        victim    = Signal(max=max(buffers, 2))
+        access    = Signal()
         self.comb += access.eq(bus.cyc & bus.stb & ~pending & ~hit_ack & ~miss_ack)
         if buffers:
+            hit_dats = [Mux(bvalid[i] & (btag[i] == req_tag),
+                Array(_slices(bdata[i], data_width, fetch))[req_slot], 0) for i in range(buffers)]
             self.sync += [
                 looked.eq(access & ~looked),
                 *[hits[i].eq(bvalid[i] & (btag[i] == req_tag)) for i in range(buffers)],
-                hit_dat.eq(reduce(or_, [Mux(bvalid[i] & (btag[i] == req_tag),
-                    Array(bdata[i][data_width*j:data_width*(j + 1)] for j in range(fetch))[req_slot], 0)
-                    for i in range(buffers)])),
+                hit_dat.eq(reduce(or_, hit_dats)),
             ]
             self.comb += hit.eq(reduce(or_, hits))
         else:
@@ -683,7 +690,7 @@ class PSRAMWishbone(LiteXModule):
         self.comb += [
             miss_ack.eq(pending & (ack_sync != ack_seen)),
             bus.ack.eq(miss_ack | hit_ack),
-            bus.dat_r.eq(Mux(hit_ack, hit_dat, Array(block_words)[slot])),
+            bus.dat_r.eq(Mux(hit_ack, hit_dat, Array(_slices(block, data_width, fetch))[slot])),
             self.request.eq(access & looked & ~(~bus.we & hit)),
             self.pending.eq(pending),
         ]
@@ -702,7 +709,7 @@ class PSRAMWishbone(LiteXModule):
                 pending.eq(1),
                 req_toggle.eq(~req_toggle),
                 # Reads: whole aligned block, writes: the bus word.
-                adr.eq(base + Mux(bus.we, bus.adr, (Cat(Constant(0, fbits), req_tag) if fbits else bus.adr))*nbytes),
+                adr.eq(base + Mux(bus.we, bus.adr, req_block)*nbytes),
                 we.eq(bus.we),
                 dat_w.eq(bus.dat_w),
                 slot.eq(req_slot),
@@ -711,16 +718,16 @@ class PSRAMWishbone(LiteXModule):
         ]
         # Writes: update the buffered copy.
         for i in range(buffers):
+            bwords = _slices(bdata[i], data_width, fetch)
             self.sync += If(self.request & bus.we & hits[i],
-                Case(req_slot, {j: bdata[i][data_width*j:data_width*(j + 1)].eq(bus.dat_w)
-                    for j in range(fetch)}))
+                Case(req_slot, {j: bwords[j].eq(bus.dat_w) for j in range(fetch)}))
 
         # xClk: burst.
         req_sync = Signal()
         req_seen = Signal()
         busy     = Signal()
         index    = Signal(max=max(nwords*fetch, 2))
-        words    = [block[16*i:16*(i + 1)] for i in range(nwords*fetch)]
+        words    = _slices(block, 16, nwords*fetch)
         if synchronous:
             self.comb += req_sync.eq(req_toggle)
         else:
@@ -729,7 +736,7 @@ class PSRAMWishbone(LiteXModule):
             port.rnw.eq(~we),
             port.addr.eq(adr),
             port.burst_length.eq(Mux(we, nbytes, nbytes*fetch)),
-            port.din.eq(Array(dat_w[16*i:16*(i + 1)] for i in range(nwords))[index[:max(log2_int(nwords), 1)]]),
+            port.din.eq(Array(_slices(dat_w, 16, nwords))[index[:max(log2_int(nwords), 1)]]),
         ]
         self.sync.xclk += [
             port.request.eq(0),
@@ -760,7 +767,9 @@ class MemoryCounters(LiteXModule):
     the last clear (control write).
     """
     def __init__(self, access, request, pending):
-        self.control  = CSRStorage(1, description="Write: clear the counters.")
+        self.control  = CSRStorage(fields=[
+            CSRField("clear", size=1, pulse=True, description="Clear the counters."),
+        ])
         self.cycles   = CSRStatus(32, description="Cycles since clear.")
         self.accesses = CSRStatus(32, description="Main RAM accesses (L2 cache front).")
         self.requests = CSRStatus(32, description="PSRAM requests (L2 misses/write-backs).")
@@ -771,7 +780,7 @@ class MemoryCounters(LiteXModule):
 
         current = Signal(16)
         self.sync += [
-            If(self.control.re,
+            If(self.control.fields.clear,
                 self.cycles.status.eq(0),
                 self.accesses.status.eq(0),
                 self.requests.status.eq(0),
@@ -895,9 +904,11 @@ class MemorySystem(LiteXModule):
             h_hsync_d.eq(self.h_hsync),
             h_valid_d.eq(self.h_valid),
         ]
+        h_syncs   = (self.h_vsync, self.h_hsync, self.h_valid)
+        h_syncs_d = (h_vsync_d, h_hsync_d, h_valid_d)
         for name, n, base, (vsync, hsync, valid), data in [
-            ("fb_reader",  PORT_FBRD,  self.fb_base, (self.h_vsync, self.h_hsync, self.h_valid), self.fb_data),
-            ("osd_reader", PORT_FBOSD, 0x00000, (h_vsync_d,    h_hsync_d,    h_valid_d),    self.osd_data),
+            ("fb_reader",  PORT_FBRD,  self.fb_base, h_syncs,   self.fb_data),
+            ("osd_reader", PORT_FBOSD, 0x00000,      h_syncs_d, self.osd_data),
         ]:
             port = ports[n]
             self.comb += [
@@ -906,7 +917,8 @@ class MemorySystem(LiteXModule):
                 port.din.eq(0),
             ]
             # Framebuffer reads only with frame blending or a CPU framebuffer (PSRAM bandwidth).
-            ram_ready = self.bist_done if (with_frame_blend or with_lcd_framebuffer or n != PORT_FBRD) else 0
+            fb_reads  = with_frame_blend or with_lcd_framebuffer
+            ram_ready = self.bist_done if (fb_reads or n != PORT_FBRD) else 0
             reader = LineReader(port, ctrl.dout, base, ram_ready)
             self.add_module(name=name, module=reader)
             self.comb += [
@@ -916,7 +928,7 @@ class MemorySystem(LiteXModule):
                 data.eq(reader.data),
             ]
 
-        # Game Boy Framebuffer Write (frame blending) / CPU Framebuffer Write Port ----------------
+        # Game Boy Framebuffer Write (frame blending) / CPU Framebuffer Write Port -----------------
         port = ports[PORT_FBWR]
         if with_frame_blend:
             self.gb_burst_write = gb_burst_write = GBBurstWrite(port)

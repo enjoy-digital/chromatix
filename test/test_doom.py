@@ -15,7 +15,8 @@ import pytest
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 def load_script():
-    spec   = importlib.util.spec_from_file_location("chromatic_script", os.path.join(ROOT, "scripts", "chromatic.py"))
+    path   = os.path.join(ROOT, "scripts", "chromatic.py")
+    spec   = importlib.util.spec_from_file_location("chromatic_script", path)
     script = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(script)
     return script
@@ -41,8 +42,12 @@ def read_lumps(wad):
 
 def test_align_wad():
     script = load_script()
-    lumps  = [(b"PLAYPAL\0", bytes(range(7))), (b"E1M1\0\0\0\0", b""), (b"THINGS\0\0", b"\x01\x02\x03"),
-        (b"DEMO1\0\0\0", bytes(range(13)))]
+    lumps  = [
+        (b"PLAYPAL\0",    bytes(range(7))),
+        (b"E1M1\0\0\0\0", b""),
+        (b"THINGS\0\0",   b"\x01\x02\x03"),
+        (b"DEMO1\0\0\0",  bytes(range(13))),
+    ]
     wad     = make_wad(lumps)
     aligned = script.align_wad(wad)
     assert aligned[:4] == b"IWAD"
