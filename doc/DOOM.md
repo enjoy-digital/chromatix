@@ -5,7 +5,7 @@
 Chromatic LCD (and so over UVC), with the console buttons and sound effects.
 
 Status: **runs on the Chromatic** (title, demos, menus, playable with the console buttons), at
-**~27 fps** (timedemo, see Performance); also on the PC (SDL emulation of the Chromatic, same platform
+**~31 fps**, tear-free (timedemo, see Performance); also on the PC (SDL emulation of the Chromatic, same platform
 code) and in `litex_sim` (left: Chromatic over UVC, right: litex_sim LCD dump).
 
 <img src="images/doom_chromatic.png" width="320" alt="Doom on the Chromatic, captured over UVC"> <img src="images/doom_litex_sim.png" width="320" alt="Doom demo frame rendered by the SoC firmware in litex_sim (LCD dump)">
@@ -27,7 +27,9 @@ sampling profile mapped to the firmware functions.
 | VexRiscv 8KB I/D caches (generated variant) | 21.88 | BSRAM 55/56 |
 | LCD downscale with 32-bit words | 22.69 | |
 | GCC 12.3 (xPack) | 24.55 | `LITEX_ENV_CC_TRIPLE=riscv-none-elf` (GCC 10.1: 22.69) |
-| **3D view: displayed rows only** | **27.07** | the LCD shows 120 of the 200 rows: the others aren't drawn (filled for the wipe, fuzz from the displayed neighbors) |
+| 3D view: displayed rows only | 27.07 | the LCD shows 120 of the 200 rows: the others aren't drawn (filled for the wipe, fuzz from the displayed neighbors) |
+| 16KB L2 | 29.84 | 1 BSRAM per byte lane: same data BSRAMs as 8KB |
+| **LCD frame buffers in the PSRAM, 32KB L2** | **30.90** | triple buffered (tear-free), hardware palette; frees the 12 BSRAM of the LCD framebuffer for the L2 |
 
 Tried and kept out: `-O3` (8.80 fps vs 9.26: 4KB I-cache), `-Os` (8.93). Framebuffer stores are ~10%
 only (measured without them: 10.27 vs 9.26). Profile at 15 fps: drawers ~34% (`R_DrawColumnLow`,
@@ -42,16 +44,17 @@ Main RAM (hardware, `firmware/fbtest`, CPU 33.5MHz): 32-bit writes 6.6MB/s, read
 |---|---|
 | CPU | VexRiscv `standard` configuration with 8KB I$/D$ (rv32im, single-cycle mul, generated: `chromatix/verilog/cpu`), 67.1MHz (sys = xClk, as the PSRAM controller) |
 | Boot | no ROM: the CPU starts at the main RAM start, held in reset (ctrl `cpu_rst`) while the host loads the firmware |
-| Main RAM | PSRAM 0x080000-0x7FFFFF (7.5MB) at 0x40000000, behind an 8KB L2 cache (8-byte lines), 32-byte PSRAM reads kept in 4 block buffers |
-| LCD | `LCDFramebuffer`: 160x144 8-bit indexed + 256 colors RGB555 palette (BSRAM, Wishbone at 0x90000000), Game Boy LCD stream into the video pipeline (OSD, color correction, panel, UVC) |
+| Main RAM | PSRAM 0x080000-0x7FFFFF (7.5MB) at 0x40000000, behind a 32KB L2 cache (8-byte lines), 32-byte PSRAM reads kept in 4 block buffers |
+| LCD | `LCDPSRAMFramebuffer`: 3 RGB555 160x144 frame buffers in the PSRAM (0x010000-0x033400), front buffer switched at vsync (tear-free); 8-bit lines + 256 colors palette written through 4 line buffers (Wishbone at 0x90000000), copied to the back buffer by burst writes; displayed through the video pipeline's frame buffer reader (OSD, color correction, panel, UVC) |
 | Audio | `PCMAudio`: stereo 16-bit samples FIFO (512) at 11025Hz, IRQ when less than half full |
 | Buttons | `demo_buttons_status` |
 | Host link | USB CDC: UARTBone (fast loads, ~MB/s) + crossover UART (console, `litex_term crossover`) |
-| Resources | Logic 67%, BSRAM 55/56 |
+| Resources | Logic 68%, BSRAM 56/56, xClk Fmax ~67.4MHz (tight) |
 
-Main RAM layout (`firmware/common/main_ram.ld`): firmware (code/data/bss) from 0x40000000, heap
-(Doom zone: 2MB) and stack (64KB) up to 0x40370000, then the WAD (up to 4.06MB: shareware
-`doom1.wad`).
+Main RAM layout (`firmware/common/main_ram.ld`, `firmware/common/layout.h`): firmware (code/data/
+bss) from 0x40000000, heap (Doom zone: 2MB) up to 0x4034f000, profiler histogram (64KB), host block
+(4KB: arguments, benchmark results), stack (64KB) up to 0x40370000, then the WAD (up to 4.06MB:
+shareware `doom1.wad`).
 
 ## Build and run
 
@@ -133,10 +136,9 @@ gamepad, SDL audio); `chromatix_dg.c` (display/input/WAD) and `sound.c` (mixer) 
 
 ## Known issues / next
 
-- Performance: BSRAM is full (55/56) and the 67MHz timing tight (Fmax 67.2MHz): larger caches would
-  need the LCD framebuffer in the PSRAM.
-- Tearing: the LCD framebuffer is updated while displayed (no double buffering): wait for the vsync
-  (`framebuffer_frame`) or double buffer.
+- Performance: BSRAM is full (56/56) and the 67MHz timing tight; the drawers and the LCD copy are
+  now the main costs (PSRAM busy ~33%). The first benchmark after a flash is ~5% slower (cause not
+  investigated).
 - Host link: reads over the USB CDC (UARTBone) get stuck from time to time (~1 per 100KB: reply
   bytes held until the next request, LUNA bulk IN path, root cause not found). `--serial` (direct
   link, no `litex_server`) resynchronizes and retries; with `litex_server`, restart it when stuck.
