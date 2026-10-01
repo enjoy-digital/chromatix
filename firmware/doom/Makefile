@@ -12,7 +12,7 @@ include sources.mak
 LIBS = libc libcompiler_rt libbase
 
 OBJDIR  = build
-OBJECTS = $(OBJDIR)/crt0.o $(addprefix $(OBJDIR)/, $(addsuffix .o, $(DOOM_SRCS) $(PORT_SRCS) hal_litex syscalls))
+OBJECTS = $(OBJDIR)/crt0.o $(addprefix $(OBJDIR)/, $(addsuffix .o, $(DOOM_SRCS) $(PORT_SRCS) hal_litex syscalls console))
 
 # Doom: -O2 (common.mak: -Os), builtins (memcpy/memset inlining), no warnings for the vendored code.
 DOOM_OPT = -O2 -fbuiltin -w
@@ -32,7 +32,7 @@ doom.elf: $(OBJECTS)
 		-Wl,-Map,$@.map
 	chmod -x $@
 
-vpath %.c doomgeneric .
+vpath %.c doomgeneric . ../common
 
 $(OBJDIR)/crt0.o: $(CPU_DIRECTORY)/crt0.S | $(OBJDIR)
 	$(CC) -c $(CFLAGS) -o $@ $<

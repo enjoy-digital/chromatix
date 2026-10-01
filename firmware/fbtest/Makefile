@@ -9,7 +9,7 @@ include $(SOC_DIRECTORY)/software/common.mak
 # Libraries (compiled by chromatix.py --with-doom --build: no BIOS).
 LIBS = libc libcompiler_rt libbase
 
-OBJECTS = crt0.o main.o
+OBJECTS = crt0.o main.o console.o
 
 COMMA = ,
 REGULAR_LIBS = $(filter-out $(ALWAYS_LINK_LIBS),$(LIBS))
@@ -37,7 +37,7 @@ fbtest.elf: $(OBJECTS)
 
 -include $(OBJECTS:.o=.d)
 
-VPATH = $(BIOS_DIRECTORY):$(BIOS_DIRECTORY)/cmds:$(CPU_DIRECTORY)
+VPATH = $(BIOS_DIRECTORY):$(BIOS_DIRECTORY)/cmds:$(CPU_DIRECTORY):../common
 
 %.o: %.c
 	$(compile)
