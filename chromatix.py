@@ -16,6 +16,7 @@ memory system, Game Boy emulation core, USB UVC+UART, battery ADC and system mon
 
 import os
 import argparse
+import subprocess
 from types import MethodType, SimpleNamespace
 
 from migen import *
@@ -41,13 +42,14 @@ from chromatix.gateware.buttons    import Buttons, BUTTONS
 from chromatix.gateware.debug      import DebugControl
 from chromatix.gateware.memory     import MemorySystem
 from chromatix.gateware.vcart      import VirtualCart, VirtualCartCSR
-from chromatix.gateware.demo       import ButtonsCSR, ToneGenerator
+from chromatix.gateware.demo       import ButtonsCSR, ToneGenerator, PCMAudio
 from chromatix.gateware.video      import VideoPipeline
 from chromatix.gateware.lcd        import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_registers
 from chromatix.gateware.sysmon     import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
 from chromatix.gateware.adc        import BatteryADC
 from chromatix.gateware.terminal   import LCDTerminal
+from chromatix.gateware.framebuffer import LCDFramebuffer
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -83,6 +85,10 @@ USB_SCLK_NET = "usb_hs_clk" # USB2PHY SerDes clock divider output (120MHz).
 
 PSRAM_BASE = 0x40000000 # PSRAM on the SoC bus (debug bridge, Game Boy mode).
 
+# Doom: CPU main RAM in the PSRAM (OSD/framebuffers/BIST below).
+DOOM_RAM_OFFSET = 0x080000
+DOOM_RAM_SIZE   = 8*MB - DOOM_RAM_OFFSET
+
 def add_timing_constraints(platform):
     constraints = [c.replace("{{{usb_sclk}}}", "{" + USB_SCLK_NET + "}") for c in TIMING_CONSTRAINTS]
     original_build_timing_constraints = platform.toolchain.build_timing_constraints
@@ -110,36 +116,55 @@ class BaseSoC(SoCMini):
         debug_bridge_baudrate = 115200,
         uvc_frames            = None,
         with_bios             = False,
+        with_doom             = False,
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
         hclk_freq = int(33.55432e6 / 2)
-        # LiteX "sys" domain: gClk, or pClk for the BIOS demo CPU.
-        sys_clk_freq = pclk_freq if with_bios else gclk_freq
-        assert not (with_bios and with_debug_bridge) # Both use the USB CDC port.
+        # LiteX "sys" domain: gClk, or pClk for the CPU (BIOS demo, Doom).
+        with_cpu     = with_bios or with_doom
+        sys_clk_freq = pclk_freq if with_cpu else gclk_freq
+        assert not (with_bios and with_doom)
+        assert not (with_cpu and with_debug_bridge) # Both use the USB CDC port.
         with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
         # LiteX BIOS demo: VexRiscv + BIOS (integrated ROM/SRAM) in place of the Game Boy core,
         # console on the USB CDC port and on the LCD (so also on the UVC capture).
-        cpu_kwargs = {} if not with_bios else dict(
-            cpu_type             = "vexriscv",
-            cpu_variant          = "lite",
-            integrated_rom_size  = 0x6000,
-            integrated_sram_size = 0x2000,
-            with_timer           = True,
-        )
+        cpu_kwargs = {}
+        if with_bios:
+            cpu_kwargs = dict(
+                cpu_type             = "vexriscv",
+                cpu_variant          = "lite",
+                integrated_rom_size  = 0x6000,
+                integrated_sram_size = 0x2000,
+                with_timer           = True,
+            )
+        # Doom: VexRiscv with I/D caches, no ROM: firmware (and WAD) loaded in the PSRAM main RAM by
+        # the host over UARTBone (CPU held in reset with ctrl cpu_rst), console on a crossover UART.
+        if with_doom:
+            cpu_kwargs = dict(
+                cpu_type             = "vexriscv",
+                cpu_variant          = "standard",
+                cpu_reset_address    = 0x40000000,
+                integrated_rom_size  = 0,
+                integrated_sram_size = 0, # Stack/data in the main RAM (BSRAM for the framebuffer).
+                with_timer           = True,
+            )
         SoCMini.__init__(self, platform,
             clk_freq      = sys_clk_freq,
-            ident         = "ChromatiX SoC" + (" (LiteX BIOS demo)" if with_bios else ""),
+            ident         = "ChromatiX SoC" + {
+                (True,  False): " (LiteX BIOS demo)",
+                (False, True):  " (Doom)",
+            }.get((with_bios, with_doom), ""),
             ident_version = True,
             **cpu_kwargs,
         )
 
         # CRG --------------------------------------------------------------------------------------
 
-        self.crg = crg = CRG(platform, sys_clk="pclk" if with_bios else "gclk")
+        self.crg = crg = CRG(platform, sys_clk="pclk" if with_cpu else "gclk")
 
         # Platform Resources -----------------------------------------------------------------------
 
@@ -431,12 +456,17 @@ class BaseSoC(SoCMini):
 
         # Memory System ----------------------------------------------------------------------------
 
-        # PSRAM Wishbone bus: CPU main RAM (BIOS demo, upper 4MB, 64-bit lines) or host access over
-        # the debug bridge (whole PSRAM, 32-bit: ROM upload, cartridge RAM, framebuffers).
+        # PSRAM Wishbone bus: CPU main RAM (BIOS demo: upper 4MB, Doom: from DOOM_RAM_OFFSET, 64-bit
+        # lines) or host access over the debug bridge (whole PSRAM, 32-bit: ROM upload, cartridge
+        # RAM, framebuffers).
+        main_ram_offset, main_ram_size = {
+            (True,  False): (0x400000,        4*MB),
+            (False, True):  (DOOM_RAM_OFFSET, DOOM_RAM_SIZE),
+        }.get((with_bios, with_doom), (0x000000, 8*MB))
         self.memory = memory = MemorySystem(qspi_pads=qspi, psram_pads=ps,
-            with_bus       = with_bios or with_debug_bridge,
-            bus_base       = 0x400000 if with_bios else 0x000000,
-            bus_data_width = 64       if with_bios else 32,
+            with_bus       = with_cpu or with_debug_bridge,
+            bus_base       = main_ram_offset,
+            bus_data_width = 64 if with_cpu else 32,
             with_vcart     = with_vcart,
         )
 
@@ -461,10 +491,10 @@ class BaseSoC(SoCMini):
             h_wr_burst_q2.eq(memory.osd_data),
         ]
 
-        # CPU Main RAM (LiteX BIOS demo): upper 4MB of the PSRAM (framebuffers/BIST in the lower
-        # ones), behind a L2 cache doing 8-byte line bursts (64-bit lines: the cache data memory is
-        # split per byte lane, 1 BSRAM each).
-        if with_bios:
+        # CPU Main RAM (LiteX BIOS demo, Doom): PSRAM above the framebuffers/BIST, behind a L2 cache
+        # doing 8-byte line bursts (64-bit lines: the cache data memory is split per byte lane, 1
+        # BSRAM each).
+        if with_cpu:
             main_ram = wishbone.Interface(data_width=32, address_width=32, addressing="word")
             self.l2_cache = wishbone.Cache(
                 cachesize = 8192//4,
@@ -475,12 +505,12 @@ class BaseSoC(SoCMini):
             self.add_config("L2_SIZE", 8192)
             self.bus.add_slave(name="main_ram", slave=main_ram, region=SoCRegion(
                 origin = self.mem_map["main_ram"],
-                size   = 4*MB,
+                size   = main_ram_size,
                 mode   = "rwx",
             ))
 
         # PSRAM (debug bridge): whole PSRAM (8MB) at PSRAM_BASE.
-        if with_debug_bridge and not with_bios:
+        if with_debug_bridge and not with_cpu:
             self.bus.add_slave(name="psram", slave=memory.bus, region=SoCRegion(
                 origin = PSRAM_BASE,
                 size   = 8*MB,
@@ -489,26 +519,45 @@ class BaseSoC(SoCMini):
 
         # Emulation System -------------------------------------------------------------------------
 
-        if with_bios:
-            # Firmware peripherals: buttons, tone generator (audio in place of the Game Boy one).
+        if with_cpu:
+            # Firmware peripherals: buttons.
             self.demo_buttons = ButtonsCSR(btns, menu=~btn_menu_ored)
-            self.tone = tone = ToneGenerator(hclk_freq, cd="hclk")
-            self.comb += [
-                left.eq(tone.sample),
-                right.eq(tone.sample),
-            ]
 
-            # LCD terminal in place of the Game Boy LCD; cartridge/IR/link idle (as when the Game
-            # Boy core doesn't access them).
-            self.terminal = terminal = LCDTerminal()
+            # Audio in place of the Game Boy one: tone generator (BIOS demo) or PCM samples (Doom).
+            if with_bios:
+                self.tone = tone = ToneGenerator(hclk_freq, cd="hclk")
+                self.comb += [
+                    left.eq(tone.sample),
+                    right.eq(tone.sample),
+                ]
+            else:
+                self.pcm = pcm = PCMAudio(sys_clk_freq)
+                self.sync.hclk += [ # pClk -> hClk (same PLL, samples quasi-static).
+                    left.eq(pcm.left),
+                    right.eq(pcm.right),
+                ]
+
+            # LCD in place of the Game Boy one: terminal (BIOS demo) or CPU framebuffer (Doom).
+            if with_bios:
+                self.terminal = lcd_source = LCDTerminal()
+            else:
+                self.framebuffer = lcd_source = LCDFramebuffer()
+                self.bus.add_slave(name="framebuffer", slave=lcd_source.bus, region=SoCRegion(
+                    origin = 0x90000000,
+                    size   = 0x10000,
+                    mode   = "rw",
+                    cached = False,
+                ))
+
+            # Cartridge/IR/link idle (as when the Game Boy core doesn't access them).
             for pad in [cart.d, cart.rst, link.clk]:
                 self.specials += TSTriple(len(pad)).get_tristate(pad) # Not driven.
             self.comb += [
-                gb_lcd_clkena.eq(terminal.gb_clkena),
-                gb_lcd_data.eq(terminal.gb_data),
-                gb_lcd_mode.eq(terminal.gb_mode),
-                gb_lcd_on.eq(terminal.gb_on),
-                gb_lcd_vsync.eq(terminal.gb_vsync),
+                gb_lcd_clkena.eq(lcd_source.gb_clkena),
+                gb_lcd_data.eq(lcd_source.gb_data),
+                gb_lcd_mode.eq(lcd_source.gb_mode),
+                gb_lcd_on.eq(lcd_source.gb_on),
+                gb_lcd_vsync.eq(lcd_source.gb_vsync),
                 cart.a.eq(0),
                 cart.clk.eq(0),
                 cart.cs.eq(1),
@@ -597,7 +646,8 @@ class BaseSoC(SoCMini):
         # Link Port: LINK_SD not driven by emu_system_top.
         self.comb += link.sd.eq(0)
 
-        # USB CDC UART: ESP32 passthrough (default), LiteX UARTBone debug bridge or BIOS console.
+        # USB CDC UART: ESP32 passthrough (default), LiteX UARTBone debug bridge (+ crossover UART
+        # console for Doom) or BIOS console.
         usb_uart = Record([("tx", 1), ("rx", 1), ("dtr", 1), ("rts", 1)])
         if with_bios:
             self.comb += [
@@ -608,10 +658,10 @@ class BaseSoC(SoCMini):
             self.add_uart(uart_pads=usb_uart, baudrate=debug_bridge_baudrate)
             # Console also on the LCD terminal (bytes sent by the UART PHY).
             self.comb += [
-                terminal.sink.valid.eq(self.uart_phy.sink.valid & self.uart_phy.sink.ready),
-                terminal.sink.data.eq(self.uart_phy.sink.data),
+                self.terminal.sink.valid.eq(self.uart_phy.sink.valid & self.uart_phy.sink.ready),
+                self.terminal.sink.data.eq(self.uart_phy.sink.data),
             ]
-        elif with_debug_bridge:
+        elif with_debug_bridge or with_doom:
             # Keep the ESP32 running normally (EN high, IO0 high) with an idle UART.
             self.comb += [
                 esp32_ctrl.usb_rxd.eq(1),
@@ -628,10 +678,12 @@ class BaseSoC(SoCMini):
             cdc_phy.sink   = self.cdc_tx.sink
             self.uartbone = UARTBone(
                 phy           = cdc_phy,
-                clk_freq      = gclk_freq,
+                clk_freq      = sys_clk_freq,
                 address_width = self.bus.address_width,
             )
             self.bus.add_master(name="uartbone", master=self.uartbone.wishbone)
+            if with_doom:
+                self.add_uart(uart_name="crossover")
         else:
             self.comb += [
                 esp32_ctrl.usb_rxd.eq(usb_uart.rx),
@@ -644,9 +696,9 @@ class BaseSoC(SoCMini):
 
         self.usb = usb_dev = USBDevice(platform, clk_24, usb,
             with_utmi_monitor = with_debug_bridge and with_utmi_monitor,
-            with_cdc_stream   = with_debug_bridge,
+            with_cdc_stream   = with_debug_bridge or with_doom,
             **({} if uvc_frames is None else {"uvc_frames": uvc_frames}))
-        if with_debug_bridge:
+        if with_debug_bridge or with_doom:
             self.comb += [
                 usb_dev.cdc_source.connect(self.cdc_rx.sink),
                 self.cdc_tx.source.connect(usb_dev.cdc_sink),
@@ -806,6 +858,15 @@ class BaseSoC(SoCMini):
 
 # Build --------------------------------------------------------------------------------------------
 
+def compile_firmware_libraries(builder, names=("libc", "libcompiler_rt", "libbase")):
+    """Firmware libraries for a CPU without BIOS/ROM (Doom: LiteX only compiles them for a BIOS)."""
+    for name, src_dir in builder.software_packages:
+        if name in names:
+            dst_dir = os.path.join(builder.software_dir, name)
+            os.makedirs(dst_dir, exist_ok=True)
+            subprocess.check_call(["make", f"-j{os.cpu_count()}", "-C", dst_dir, "-f",
+                os.path.join(src_dir, "Makefile")])
+
 def main():
     parser = argparse.ArgumentParser(description="ChromatiX: LiteX based FPGA design for the ModRetro Chromatic.")
 
@@ -824,6 +885,7 @@ def main():
     parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,  help="Debug bridge baudrate.")
     parser.add_argument("--uvc-sizes",             default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
     parser.add_argument("--with-bios",             action="store_true",       help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
+    parser.add_argument("--with-doom",             action="store_true",       help="Doom: VexRiscv SoC in place of the Game Boy core, CPU framebuffer/PCM audio, firmware loaded over USB (UARTBone).")
     parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
 
@@ -835,7 +897,7 @@ def main():
         gowin_path = os.path.expanduser(args.gowin_path)
         os.environ["PATH"]            = os.path.join(gowin_path, "bin") + os.pathsep + os.environ["PATH"]
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
-    if not args.with_bios:
+    if not (args.with_bios or args.with_doom):
         add_verilog_sources(platform) # Game Boy core.
     add_timing_constraints(platform)
 
@@ -843,6 +905,7 @@ def main():
     soc = BaseSoC(platform,
         with_debug_bridge     = args.with_debug_bridge,
         with_bios             = args.with_bios,
+        with_doom             = args.with_doom,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
@@ -856,6 +919,8 @@ def main():
     )
     if args.build:
         builder.build(build_name="chromatic", run=not args.no_compile)
+        if args.with_doom:
+            compile_firmware_libraries(builder)
 
     # Load / Flash.
     bitstream = os.path.join(builder.gateware_dir, "chromatic.fs")

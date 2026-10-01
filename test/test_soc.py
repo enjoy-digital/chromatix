@@ -86,6 +86,33 @@ def test_soc_bios_elaboration(tmp_path):
     assert "memory_region,main_ram,0x40000000,4194304,cached" in csrs
     assert platform.sources == [] or all("emu" not in path for path, _, _ in platform.sources)
 
+def test_soc_doom_elaboration(tmp_path):
+    """Doom: VexRiscv (I/D caches, no ROM: reset in the PSRAM main RAM) + framebuffer/PCM audio in place
+    of the Game Boy core, UARTBone + crossover UART on the USB CDC."""
+    target   = load_target()
+    platform = Platform()
+    target.add_timing_constraints(platform)
+    soc      = target.BaseSoC(platform, with_doom=True)
+    csr_csv  = os.path.join(tmp_path, "csr.csv")
+    builder  = Builder(soc, output_dir=str(tmp_path), csr_csv=csr_csv, compile_software=False)
+    builder.build(build_name="chromatic", run=False)
+    with open(os.path.join(builder.gateware_dir, "chromatic.v"), encoding="utf-8") as f:
+        verilog = f.read()
+    with open(csr_csv, encoding="utf-8") as f:
+        csrs = f.read()
+    assert "VexRiscv" in verilog and "VexRiscv_Lite" not in verilog
+    assert "emu_system_top" not in verilog
+    assert "uartbone" in verilog
+    assert "csr_base,uart," in csrs
+    assert "csr_register,ctrl_reset," in csrs
+    assert "csr_register,framebuffer_frame," in csrs
+    assert "csr_register,pcm_data," in csrs
+    assert "csr_register,demo_buttons_status," in csrs
+    assert f"memory_region,main_ram,0x40000000,{target.DOOM_RAM_SIZE},cached" in csrs
+    assert "memory_region,framebuffer,0x90000000,65536,io" in csrs
+    assert "memory_region,rom," not in csrs
+    assert "constant,config_cpu_reset_addr,1073741824" in csrs
+
 # IO Constraints -----------------------------------------------------------------------------------
 
 def test_soc_io_constraints(tmp_path):
