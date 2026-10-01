@@ -916,6 +916,7 @@ def main():
         output_dir = "build",
         csr_csv    = "scripts/csr.csv",
         bios_lto   = True, # BIOS fits the 24KB integrated ROM.
+        libc_mode  = "full" if args.with_doom else "minimal", # Doom: full picolibc (stdio, malloc...).
     )
     if args.build:
         builder.build(build_name="chromatic", run=not args.no_compile)
