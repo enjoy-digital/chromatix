@@ -517,14 +517,15 @@ class BaseSoC(SoCMini):
         # doing 8-byte line bursts (64-bit lines: the cache data memory is split per byte lane, 1
         # BSRAM each).
         if with_cpu:
+            l2_size  = 16*1024 if with_doom else 8*1024
             main_ram = wishbone.Interface(data_width=32, address_width=32, addressing="word")
             self.l2_cache = wishbone.Cache(
-                cachesize = 8192//4,
+                cachesize = l2_size//4,
                 master    = main_ram,
                 slave     = memory.bus,
                 reverse   = False,
             )
-            self.add_config("L2_SIZE", 8192)
+            self.add_config("L2_SIZE", l2_size)
             # Main RAM statistics (Doom: performance analysis).
             if with_doom:
                 self.memory_counters = MemoryCounters(
