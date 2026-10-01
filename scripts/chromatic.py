@@ -7,7 +7,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 """
-ChromatiX control/test utility (requires a --with-debug-bridge build).
+ChromatiX control/test utility (requires a --with-debug-bridge build, or a --with-doom build for run).
 
 Start the LiteX server on the Chromatic USB CDC port first:
     litex_server --uart --uart-port /dev/ttyACM0 --uart-baudrate 115200
@@ -23,6 +23,7 @@ Then:
 import os
 import sys
 import time
+import zlib
 import argparse
 import subprocess
 
@@ -50,6 +51,9 @@ VCART_MBC     = {
     **{t: 5 for t in range(0x19, 0x1f)},              # MBC5.
 }
 VCART_RAM_SIZES = {0: 0, 1: 2048, 2: 8192, 3: 32768, 4: 131072, 5: 65536} # Header code -> bytes.
+
+# Doom build: CPU main RAM (PSRAM_BASE = main RAM start), WAD offset (see firmware/doom).
+DOOM_WAD_OFFSET = 0x370000
 
 STATUS_FIELDS = ["bist_done", "bist_failed", "lcd_init_done", "menu_disabled", "low_battery", "bat_is_li", "headphones"]
 
@@ -132,6 +136,19 @@ class Chromatic:
     def read_save(self, rom):
         size = VCART_RAM_SIZES.get(rom[0x149], 0) or (512 if rom_config(rom)["mbc"] == 2 else 0)
         return self.read_psram(VCART_RAM, size)
+
+    # Firmware (Doom build).
+    def run_firmware(self, firmware, files=(), verify=True):
+        """
+        Load a firmware at the CPU main RAM start (its reset address) and data files at main RAM
+        offsets, with the CPU held in reset (ctrl cpu_rst), then start it.
+        """
+        self.bus.regs.ctrl_reset.write(0b10) # cpu_rst.
+        for offset, data in [(0, firmware), *files]:
+            self.write_psram(offset, data)
+            if verify and zlib.crc32(self.read_psram(offset, len(data))) != zlib.crc32(data):
+                raise IOError(f"Verification failed at main RAM offset 0x{offset:x}.")
+        self.bus.regs.ctrl_reset.write(0)
 
     def unload_rom(self):
         """Back to the physical cartridge."""
@@ -258,6 +275,13 @@ def main():
 
     subparsers.add_parser("unload", help="Back to the physical cartridge.")
 
+    p = subparsers.add_parser("run", help="Load and start a firmware (--with-doom build).")
+    p.add_argument("firmware",                          help="Firmware binary (ex: firmware/doom/doom.bin).")
+    p.add_argument("--wad",       default=None,         help=f"Doom WAD file (loaded at main RAM offset 0x{DOOM_WAD_OFFSET:x}).")
+    p.add_argument("--file",      default=[], nargs=2, action="append", metavar=("FILE", "OFFSET"),
+        help="Data file loaded at a main RAM offset.")
+    p.add_argument("--no-verify", action="store_true", help="Don't read back/check the loaded data.")
+
     p = subparsers.add_parser("sequence", help="Run a sequence (ex: \"press:start wait:2 capture:x.png\").")
     p.add_argument("sequence", help="Space-separated steps (press:a+b[@duration], buttons:a+b, wait:s, capture:file).")
 
@@ -295,6 +319,15 @@ def main():
             print(f"{len(data)} bytes saved to {args.file}.")
         elif args.command == "unload":
             chromatic.unload_rom()
+        elif args.command == "run":
+            firmware = _read_file(args.firmware)
+            files    = [(int(offset, 0), _read_file(name)) for name, offset in args.file]
+            if args.wad:
+                files.append((DOOM_WAD_OFFSET, _read_file(args.wad)))
+            size = len(firmware) + sum(len(data) for _, data in files)
+            t0   = time.time()
+            chromatic.run_firmware(firmware, files, verify=not args.no_verify)
+            print(f"{size//1024}KB loaded in {time.time() - t0:.1f}s, CPU started.")
     finally:
         # Release the virtual buttons (also on errors/Ctrl-C).
         if args.command in ["press", "sequence"]:
