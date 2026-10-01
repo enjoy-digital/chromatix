@@ -11,4 +11,5 @@ DOOM_SRCS = dummy am_map doomdef doomstat dstrings d_event d_items d_iwad d_loop
 PORT_SRCS = chromatix_dg sound
 
 DOOM_CFLAGS = -DDOOMGENERIC_DIRECT -DDOOMGENERIC_MEMWAD -DCMAP256 -DFEATURE_SOUND -DDOOMGENERIC_NO_SDL_MIXER \
+	-DDOOMGENERIC_TIMEDEMO_HOOK -I../common \
 	-DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -Idoomgeneric -I.

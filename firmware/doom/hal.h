@@ -38,4 +38,11 @@ int            hal_audio_free(void);                        /* Samples that can 
 void           hal_audio_write(uint32_t sample);
 const uint8_t *hal_wad(unsigned int *size);                 /* WAD in memory (NULL: none). */
 
+/* Host interface (SoC: host block in the main RAM, see layout.h). */
+const char    *hal_args(void);                              /* Extra arguments (NULL: none). */
+void           hal_frame(void);                             /* Frame rendered (counter). */
+void           hal_bench(int gametics, int realtics);       /* Timedemo results. */
+void           hal_profile(int enable);                     /* PC sampling profiler (1kHz). */
+void           hal_status(uint32_t set);                    /* Status bits (diagnostics). */
+
 #endif

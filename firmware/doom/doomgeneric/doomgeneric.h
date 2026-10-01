@@ -48,6 +48,11 @@ void DG_SetWindowTitle(const char * title);
 void DG_SetPalette(const uint8_t *rgb);
 #endif
 
+#ifdef DOOMGENERIC_TIMEDEMO_HOOK
+// Timedemo results (benchmark), called before the report/exit.
+void DG_TimedemoDone(int gametics, int realtics);
+#endif
+
 #ifdef DOOMGENERIC_MEMWAD
 // Memory WADs: DG_MemWAD returns the WAD data (and its size) for a path, or NULL.
 const uint8_t *DG_MemWAD(const char *path, unsigned int *size);

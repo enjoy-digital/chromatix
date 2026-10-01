@@ -20,11 +20,14 @@
 #include <generated/soc.h>
 
 #include "hal.h"
+#include "layout.h"
 #include "wad_align.h"
 
 #define FB_PALETTE  0x2000   /* Words. */
 #define PCM_DEPTH   512
-#define DATA_OFFSET 0x370000 /* WAD (see firmware/common/main_ram.ld). */
+#define DATA_OFFSET LAYOUT_DATA_OFFSET
+
+static volatile struct host_block *host = (volatile struct host_block *)(MAIN_RAM_BASE + LAYOUT_HOST_OFFSET);
 
 #ifdef FRAMEBUFFER_BASE
 static volatile uint32_t *fb = (volatile uint32_t *)FRAMEBUFFER_BASE;
@@ -33,9 +36,28 @@ static uint32_t fb[FB_PALETTE + 256];
 static uint32_t fb_frames;
 #endif
 
-/* Time: 32-bit timer0 down counter extended to 64-bit (hal_ticks_ms called often enough). */
-static uint32_t timer_last;
-static uint64_t timer_ticks;
+/* Time: timer0 1kHz interrupt (milliseconds counter), also sampling the interrupted PC (profiler). */
+static volatile uint32_t ms;
+static volatile int      prof_enabled;
+static int               prof_requested;
+static volatile uint32_t *prof_hist = (volatile uint32_t *)(MAIN_RAM_BASE + LAYOUT_PROF_OFFSET);
+
+extern char _ftext[];
+
+static void timer_isr(void)
+{
+	timer0_ev_pending_write(1);
+	ms++;
+	if (prof_enabled) {
+		uint32_t pc, bucket;
+		__asm__ volatile ("csrr %0, mepc" : "=r"(pc));
+		bucket = (pc - host->prof_base) >> host->prof_shift;
+		if (bucket < host->prof_buckets) {
+			prof_hist[bucket]++;
+			host->prof_samples++;
+		}
+	}
+}
 
 void hal_init(void)
 {
@@ -45,11 +67,17 @@ void hal_init(void)
 #endif
 	uart_init();
 	timer0_en_write(0);
-	timer0_load_write(0);
-	timer0_reload_write(0xffffffff);
+	timer0_load_write(CONFIG_CLOCK_FREQUENCY/1000);
+	timer0_reload_write(CONFIG_CLOCK_FREQUENCY/1000);
 	timer0_en_write(1);
-	timer0_update_value_write(1);
-	timer_last = timer0_value_read();
+	timer0_ev_pending_write(1);
+	timer0_ev_enable_write(1);
+	irq_attach(TIMER0_INTERRUPT, timer_isr);
+	irq_setmask(irq_getmask() | (1 << TIMER0_INTERRUPT));
+	host->bench_magic = 0;
+	host->frames      = 0;
+	host->prof_magic  = 0;
+	host->status      = 0;
 }
 
 int hal_poll(void)
@@ -59,11 +87,7 @@ int hal_poll(void)
 
 uint32_t hal_ticks_ms(void)
 {
-	timer0_update_value_write(1);
-	uint32_t value = timer0_value_read();
-	timer_ticks += (uint32_t)(timer_last - value);
-	timer_last   = value;
-	return timer_ticks/(CONFIG_CLOCK_FREQUENCY/1000);
+	return ms;
 }
 
 void hal_sleep_ms(uint32_t ms)
@@ -159,4 +183,70 @@ const uint8_t *hal_wad(unsigned int *size)
 		return NULL;
 	*size = wad_le32(wad + 8) + 16*wad_le32(wad + 4); /* Directory at the end (aligned WAD). */
 	return wad;
+}
+
+/* Host interface ------------------------------------------------------------------------------- */
+
+const char *hal_args(void)
+{
+	if (host->magic != HOST_ARGS_MAGIC)
+		return NULL;
+	host->args[sizeof(host->args) - 1] = 0;
+	return (const char *)host->args;
+}
+
+void hal_frame(void)
+{
+	/* Measurements from the first frame (after the initialization). */
+	if (host->frames == 0) {
+		hal_status(1 << 2);
+#ifdef CSR_MEMORY_COUNTERS_BASE
+		memory_counters_control_write(1);
+#endif
+		if (prof_requested)
+			hal_profile(2);
+	}
+	host->frames++;
+	host->ms = ms;
+}
+
+void hal_bench(int gametics, int realtics)
+{
+	prof_enabled      = 0;
+#ifdef CSR_MEMORY_COUNTERS_BASE
+	host->mem_cycles   = memory_counters_cycles_read();
+	host->mem_accesses = memory_counters_accesses_read();
+	host->mem_requests = memory_counters_requests_read();
+	host->mem_busy     = memory_counters_busy_read();
+	host->mem_latency  = memory_counters_latency_read();
+#endif
+	host->gametics    = gametics;
+	host->realtics    = realtics;
+	host->ms          = ms;
+	host->bench_magic = HOST_BENCH_MAGIC;
+}
+
+void hal_profile(int enable)
+{
+	/* 1: started at the first frame, 2: started now. */
+	if (enable == 1) {
+		prof_requested = 1;
+		return;
+	}
+	if (enable) {
+		host->prof_base    = (uint32_t)(uintptr_t)_ftext;
+		host->prof_shift   = 5;
+		host->prof_buckets = LAYOUT_PROF_SIZE/4;
+		host->prof_samples = 0;
+		for (unsigned i = 0; i < LAYOUT_PROF_SIZE/4; i++)
+			prof_hist[i] = 0;
+		host->prof_magic   = HOST_BENCH_MAGIC;
+		hal_status(1 << 3);
+	}
+	prof_enabled = enable;
+}
+
+void hal_status(uint32_t set)
+{
+	host->status |= set;
 }

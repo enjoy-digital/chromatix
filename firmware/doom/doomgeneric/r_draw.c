@@ -242,9 +242,15 @@ void R_DrawColumnLow (void)
     do 
     {
 	// Hack. Does not work corretly.
+#ifdef DOOMGENERIC_LOWDETAIL_HALF
+	// Only the even columns are displayed (1 out of 2): the second pixel is not written.
+	*dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+	dest += SCREENWIDTH;
+#else
 	*dest2 = *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
 	dest += SCREENWIDTH;
 	dest2 += SCREENWIDTH;
+#endif
 	frac += fracstep; 
 
     } while (count--);
@@ -758,8 +764,13 @@ void R_DrawSpanLow (void)
 
 	// Lowres/blocky mode does it twice,
 	//  while scale is adjusted appropriately.
+#ifdef DOOMGENERIC_LOWDETAIL_HALF
+	*dest = ds_colormap[ds_source[spot]];
+	dest += 2;
+#else
 	*dest++ = ds_colormap[ds_source[spot]];
 	*dest++ = ds_colormap[ds_source[spot]];
+#endif
 
 	position += step;
 

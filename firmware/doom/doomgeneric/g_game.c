@@ -71,6 +71,7 @@
 
 
 #include "g_game.h"
+#include "doomgeneric.h"
 
 
 #define SAVEGAMESIZE	0x2c000
@@ -2262,6 +2263,9 @@ boolean G_CheckDemoStatus (void)
         timingdemo = false;
         demoplayback = false;
 
+#ifdef DOOMGENERIC_TIMEDEMO_HOOK
+        DG_TimedemoDone(gametic, realtics);
+#endif
 	I_Error ("timed %i gametics in %i realtics (%f fps)",
                  gametic, realtics, fps);
     } 

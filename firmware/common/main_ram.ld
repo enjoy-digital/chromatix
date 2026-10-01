@@ -95,10 +95,11 @@ SECTIONS
 	} > main_ram
 }
 
-/* Heap: from _end up to the stack (64KB, below DATA_OFFSET). */
+/* Heap: from _end up to the profiler histogram/host block (see layout.h), then the stack (64KB,
+   below DATA_OFFSET). */
 PROVIDE(_fstack     = ORIGIN(main_ram) + DATA_OFFSET - 8);
 PROVIDE(_heap_start = _end);
-PROVIDE(_heap_end   = ORIGIN(main_ram) + DATA_OFFSET - 0x10000);
+PROVIDE(_heap_end   = ORIGIN(main_ram) + 0x34f000);
 
 PROVIDE(_fdata_rom = LOADADDR(.data));
 PROVIDE(_edata_rom = LOADADDR(.data) + SIZEOF(.data));

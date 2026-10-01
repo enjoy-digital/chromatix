@@ -15,7 +15,7 @@ OBJDIR  = build
 OBJECTS = $(OBJDIR)/crt0.o $(addprefix $(OBJDIR)/, $(addsuffix .o, $(DOOM_SRCS) $(PORT_SRCS) hal_litex syscalls console))
 
 # Doom: -O2 (common.mak: -Os), builtins (memcpy/memset inlining), no warnings for the vendored code.
-DOOM_OPT = -O2 -fbuiltin -w
+DOOM_OPT = -O2 -fbuiltin -w -DHAL_NO_ARGV
 
 all: doom.bin
 

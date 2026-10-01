@@ -8,11 +8,13 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <strings.h>
 
 #include "doomgeneric.h"
 #include "doomkeys.h"
 #include "doomtype.h"
+#include "g_game.h"
 #include "i_video.h"
 #include "w_file.h"
 #include "z_zone.h"
@@ -56,10 +58,13 @@ void DG_SetPalette(const uint8_t *rgb)
 	hal_lcd_palette(palette);
 }
 
-/* Frames rate (console) and frames counter (read by the host: scripts/chromatic.py doom-fps). */
+/* Frames rate (console, and frames counter for the host), timedemo length limit (-benchtics N). */
 static uint32_t fps_time;
 static uint32_t fps_frames;
-volatile uint32_t dg_frames;
+static int      bench_tics;
+
+extern int     gametic;
+extern boolean timingdemo;
 
 void DG_DrawFrame(void)
 {
@@ -73,8 +78,10 @@ void DG_DrawFrame(void)
 	}
 	hal_lcd_present();
 
-	dg_frames++;
+	hal_frame();
 	fps_frames++;
+	if (bench_tics && timingdemo && gametic >= bench_tics)
+		G_CheckDemoStatus();
 	if (hal_ticks_ms() - fps_time >= 5000) {
 		uint32_t tenths = fps_frames*10000/(hal_ticks_ms() - fps_time);
 		printf("Doom: %lu.%lu fps\n", (unsigned long)(tenths/10), (unsigned long)(tenths%10));
@@ -276,16 +283,42 @@ void DG_Init(void)
 	fps_time       = hal_ticks_ms();
 }
 
+void DG_TimedemoDone(int gametics, int realtics)
+{
+	hal_bench(gametics, realtics);
+}
+
 int main(int argc, char **argv)
 {
-	/* Default arguments: memory IWAD, 2MB zone; extra arguments (host) appended. */
+	/* Default arguments: memory IWAD, 2MB zone; extra arguments (command line, host) appended.
+	   -profile: PC sampling profiler (host: scripts/chromatic.py doom-bench). */
 	static char *args[32] = {"doom", "-iwad", IWAD_NAME, "-mb", "2"};
-	int nargs = 5;
+	static char  extra[1024];
+	const char  *host_args;
+	int          nargs = 5, profile = 0;
 
+#ifdef HAL_NO_ARGV
+	/* Bare metal: main() called without arguments (argc/argv not set). */
+	argc = 0;
+#endif
 	for (int i = 1; i < argc && nargs < 31; i++)
 		args[nargs++] = argv[i];
 
 	hal_init();
+	host_args = hal_args();
+	if (host_args) {
+		strncpy(extra, host_args, sizeof(extra) - 1);
+		for (char *p = strtok(extra, " "); p && nargs < 31; p = strtok(NULL, " ")) {
+			if (strcmp(p, "-profile") == 0)
+				profile = 1;
+			else if (strcmp(p, "-benchtics") == 0 && (p = strtok(NULL, " ")))
+				bench_tics = atoi(p);
+			else
+				args[nargs++] = p;
+		}
+	}
+	hal_status((host_args != NULL) | (profile << 1) | (bench_tics << 16));
+	hal_profile(profile);
 	printf("ChromatiX Doom\n");
 	doomgeneric_Create(nargs, args);
 	for (;;)

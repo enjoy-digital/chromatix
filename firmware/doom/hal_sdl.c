@@ -209,3 +209,28 @@ const uint8_t *hal_wad(unsigned int *size)
 	*size = wad_size;
 	return wad;
 }
+
+/* Host interface (PC: extra arguments from the command line, results on the console). */
+const char *hal_args(void)
+{
+	return getenv("DOOM_ARGS");
+}
+
+void hal_frame(void)
+{
+}
+
+void hal_bench(int gametics, int realtics)
+{
+	printf("Bench: %d gametics in %d realtics\n", gametics, realtics);
+}
+
+void hal_profile(int enable)
+{
+	(void)enable;
+}
+
+void hal_status(uint32_t set)
+{
+	(void)set;
+}
