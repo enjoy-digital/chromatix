@@ -35,6 +35,31 @@
 static uint16_t display_src[DISPLAY_LINES]; /* Doom line of each displayed line. */
 static int      display_top;
 
+/* Displayed rows only (3D view drawers, see doomgeneric.h DOOMGENERIC_ROW_SKIP). */
+int           dg_row_skip = 1;
+unsigned char dg_row_next[DOOM_HEIGHT + 2];
+unsigned char dg_row_prev[DOOM_HEIGHT + 2];
+
+extern int viewwindowy;
+extern int viewheight;
+
+void DG_FillSkippedRows(void)
+{
+	/* Skipped view rows: copy of the next displayed row (or of the previous one at the bottom). */
+	int last = -1;
+	for (int y = viewwindowy; y < viewwindowy + viewheight; y++) {
+		int src = dg_row_next[y];
+		if (src == y) {
+			last = y;
+			continue;
+		}
+		if (src >= viewwindowy + viewheight)
+			src = last;
+		if (src >= 0)
+			memcpy(I_VideoBuffer + y*DOOM_WIDTH, I_VideoBuffer + src*DOOM_WIDTH, DOOM_WIDTH);
+	}
+}
+
 static void display_init(void)
 {
 	uint8_t black[HAL_LCD_WIDTH];
@@ -42,6 +67,22 @@ static void display_init(void)
 	display_top = (HAL_LCD_HEIGHT - DISPLAY_LINES)/2;
 	for (int i = 0; i < DISPLAY_LINES; i++)
 		display_src[i] = (i*DOOM_HEIGHT + DOOM_HEIGHT/(2*DISPLAY_LINES))/DISPLAY_LINES;
+	/* Previous/next displayed row tables. */
+	for (int y = 0, prev = DOOM_HEIGHT, i = 0; y < DOOM_HEIGHT; y++) {
+		if (i < DISPLAY_LINES && display_src[i] == y) {
+			prev = y;
+			i++;
+		}
+		dg_row_prev[y] = prev;
+	}
+	dg_row_next[DOOM_HEIGHT] = dg_row_next[DOOM_HEIGHT + 1] = DOOM_HEIGHT;
+	for (int y = DOOM_HEIGHT - 1, i = DISPLAY_LINES - 1; y >= 0; y--) {
+		dg_row_next[y] = dg_row_next[y + 1];
+		if (i >= 0 && display_src[i] == y) {
+			dg_row_next[y] = y;
+			i--;
+		}
+	}
 	/* Borders (palette index 0: black in Doom's palettes). */
 	memset(black, 0, sizeof(black));
 	for (int y = 0; y < HAL_LCD_HEIGHT; y++)

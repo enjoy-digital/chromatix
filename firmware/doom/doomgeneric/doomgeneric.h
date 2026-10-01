@@ -48,6 +48,16 @@ void DG_SetWindowTitle(const char * title);
 void DG_SetPalette(const uint8_t *rgb);
 #endif
 
+#ifdef DOOMGENERIC_ROW_SKIP
+// Displayed rows only (the platform shows a subset of the screen rows): dg_row_next[y] is the first
+// displayed screen row >= y (SCREENHEIGHT: none), used by the 3D view low detail drawers when
+// dg_row_skip is set. DG_FillSkippedRows fills the skipped view rows (before screen captures: wipe).
+extern int           dg_row_skip;
+extern unsigned char dg_row_next[];
+extern unsigned char dg_row_prev[]; // Last displayed screen row <= y (SCREENHEIGHT: none).
+void DG_FillSkippedRows(void);
+#endif
+
 #ifdef DOOMGENERIC_TIMEDEMO_HOOK
 // Timedemo results (benchmark), called before the report/exit.
 void DG_TimedemoDone(int gametics, int realtics);

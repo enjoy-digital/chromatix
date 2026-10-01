@@ -29,6 +29,7 @@
 #include "w_wad.h"
 
 #include "r_local.h"
+#include "doomgeneric.h"
 
 // Needs access to LFB (guess what).
 #include "v_video.h"
@@ -238,6 +239,32 @@ void R_DrawColumnLow (void)
     
     fracstep = dc_iscale; 
     frac = dc_texturemid + (dc_yl-centery)*fracstep;
+
+#ifdef DOOMGENERIC_ROW_SKIP
+    if (dg_row_skip)
+    {
+	// Only the displayed rows are drawn.
+	int y = dg_row_next[dc_yl + viewwindowy] - viewwindowy;
+
+	if (y > dc_yh)
+	    return;
+	dest = ylookup[y] + columnofs[x];
+	frac = dc_texturemid + (y-centery)*fracstep;
+	for (;;)
+	{
+	    int ny, d;
+
+	    *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+	    ny = dg_row_next[y + 1 + viewwindowy] - viewwindowy;
+	    if (ny > dc_yh)
+		return;
+	    d     = ny - y;
+	    dest += d*SCREENWIDTH;
+	    frac += d*fracstep;
+	    y     = ny;
+	}
+    }
+#endif
     
     do 
     {
@@ -387,6 +414,33 @@ void R_DrawFuzzColumnLow (void)
     // Looks familiar.
     fracstep = dc_iscale; 
     frac = dc_texturemid + (dc_yl-centery)*fracstep; 
+
+#ifdef DOOMGENERIC_ROW_SKIP
+    if (dg_row_skip)
+    {
+	// Only the displayed rows are drawn, from the nearest displayed row above/below (the other
+	// rows are not rendered). The fuzz position advances on every row (same pattern).
+	int y;
+
+	for (y = dc_yl; y <= dc_yh; y++)
+	{
+	    int sy = y + viewwindowy;
+
+	    if (dg_row_next[sy] == sy)
+	    {
+		int ny = (fuzzoffset[fuzzpos] > 0) ? dg_row_next[sy + 1] : (sy ? dg_row_prev[sy - 1] : SCREENHEIGHT);
+
+		if (ny >= viewwindowy + viewheight || ny < viewwindowy)
+		    ny = sy;
+		dest = ylookup[y] + columnofs[x];
+		*dest = colormaps[6*256+dest[(ny - sy)*SCREENWIDTH]];
+	    }
+	    if (++fuzzpos == FUZZTABLE)
+		fuzzpos = 0;
+	}
+	return;
+    }
+#endif
 
     // Looks like an attempt at dithering,
     //  using the colormap #6 (of 0-31, a bit

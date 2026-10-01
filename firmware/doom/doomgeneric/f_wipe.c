@@ -26,6 +26,7 @@
 #include "doomtype.h"
 
 #include "f_wipe.h"
+#include "doomgeneric.h"
 
 //
 //                       SCREEN WIPE PACKAGE
@@ -235,6 +236,9 @@ wipe_StartScreen
   int	height )
 {
     wipe_scr_start = Z_Malloc(SCREENWIDTH * SCREENHEIGHT, PU_STATIC, NULL);
+#ifdef DOOMGENERIC_ROW_SKIP
+    DG_FillSkippedRows();
+#endif
     I_ReadScreen(wipe_scr_start);
     return 0;
 }
@@ -247,6 +251,9 @@ wipe_EndScreen
   int	height )
 {
     wipe_scr_end = Z_Malloc(SCREENWIDTH * SCREENHEIGHT, PU_STATIC, NULL);
+#ifdef DOOMGENERIC_ROW_SKIP
+    DG_FillSkippedRows();
+#endif
     I_ReadScreen(wipe_scr_end);
     V_DrawBlock(x, y, width, height, wipe_scr_start); // restore start scr.
     return 0;

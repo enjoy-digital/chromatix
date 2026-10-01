@@ -5,7 +5,7 @@
 Chromatic LCD (and so over UVC), with the console buttons and sound effects.
 
 Status: **runs on the Chromatic** (title, demos, menus, playable with the console buttons), at
-**~15 fps** (timedemo, see Performance); also on the PC (SDL emulation of the Chromatic, same platform
+**~27 fps** (timedemo, see Performance); also on the PC (SDL emulation of the Chromatic, same platform
 code) and in `litex_sim` (left: Chromatic over UVC, right: litex_sim LCD dump).
 
 <img src="images/doom_chromatic.png" width="320" alt="Doom on the Chromatic, captured over UVC"> <img src="images/doom_litex_sim.png" width="320" alt="Doom demo frame rendered by the SoC firmware in litex_sim (LCD dump)">
@@ -26,7 +26,8 @@ sampling profile mapped to the firmware functions.
 | 32-byte PSRAM reads + 4 block buffers | 20.13 | PSRAM requests 69.5M -> 30.6M |
 | VexRiscv 8KB I/D caches (generated variant) | 21.88 | BSRAM 55/56 |
 | LCD downscale with 32-bit words | 22.69 | |
-| **GCC 12.3 (xPack)** | **24.55** | `LITEX_ENV_CC_TRIPLE=riscv-none-elf` (GCC 10.1: 22.69) |
+| GCC 12.3 (xPack) | 24.55 | `LITEX_ENV_CC_TRIPLE=riscv-none-elf` (GCC 10.1: 22.69) |
+| **3D view: displayed rows only** | **27.07** | the LCD shows 120 of the 200 rows: the others aren't drawn (filled for the wipe, fuzz from the displayed neighbors) |
 
 Tried and kept out: `-O3` (8.80 fps vs 9.26: 4KB I-cache), `-Os` (8.93). Framebuffer stores are ~10%
 only (measured without them: 10.27 vs 9.26). Profile at 15 fps: drawers ~34% (`R_DrawColumnLow`,

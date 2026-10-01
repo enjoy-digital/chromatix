@@ -30,6 +30,7 @@
 #include "doomstat.h"
 
 #include "r_local.h"
+#include "doomgeneric.h"
 #include "r_sky.h"
 
 
@@ -129,6 +130,12 @@ R_MapPlane
     {
 	I_Error ("R_MapPlane: %i, %i at %i",x1,x2,y);
     }
+#endif
+
+#ifdef DOOMGENERIC_ROW_SKIP
+    // Rows not displayed: not drawn.
+    if (dg_row_skip && dg_row_next[y + viewwindowy] != y + viewwindowy)
+	return;
 #endif
 
     if (planeheight != cachedheight[y])
