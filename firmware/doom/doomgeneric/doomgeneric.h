@@ -42,6 +42,17 @@ uint32_t DG_GetTicksMs();
 int DG_GetKey(int* pressed, unsigned char* key);
 void DG_SetWindowTitle(const char * title);
 
+#ifdef DOOMGENERIC_DIRECT
+// Direct mode: DG_DrawFrame reads I_VideoBuffer (320x200 indexed, no DG_ScreenBuffer copy) and
+// the palette (256 x RGB, gamma applied) is given to DG_SetPalette.
+void DG_SetPalette(const uint8_t *rgb);
+#endif
+
+#ifdef DOOMGENERIC_MEMWAD
+// Memory WADs: DG_MemWAD returns the WAD data (and its size) for a path, or NULL.
+const uint8_t *DG_MemWAD(const char *path, unsigned int *size);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

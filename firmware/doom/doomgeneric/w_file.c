@@ -27,6 +27,10 @@
 
 extern wad_file_class_t stdc_wad_file;
 
+#ifdef DOOMGENERIC_MEMWAD
+extern wad_file_class_t mem_wad_file;
+#endif
+
 /*
 #ifdef _WIN32
 extern wad_file_class_t win32_wad_file;
@@ -54,6 +58,15 @@ wad_file_t *W_OpenFile(char *path)
 {
     wad_file_t *result;
     int i;
+
+#ifdef DOOMGENERIC_MEMWAD
+    // WADs in memory (mapped: lumps used in place).
+    result = mem_wad_file.OpenFile(path);
+    if (result != NULL)
+    {
+        return result;
+    }
+#endif
 
     //!
     // Use the OS's virtual memory subsystem to map WAD files

@@ -320,6 +320,10 @@ void I_UpdateNoBlit (void)
 
 void I_FinishUpdate (void)
 {
+#ifdef DOOMGENERIC_DIRECT
+    DG_DrawFrame();
+}
+#else
     int y;
     int x_offset, y_offset, x_offset_end;
     unsigned char *line_in, *line_out;
@@ -368,6 +372,7 @@ void I_FinishUpdate (void)
 
 	DG_DrawFrame();
 }
+#endif
 
 //
 // I_ReadScreen
@@ -411,6 +416,18 @@ void I_SetPalette (byte* palette)
         colors[i].g = gammatable[usegamma][*palette++];
         colors[i].b = gammatable[usegamma][*palette++];
     }
+
+#ifdef DOOMGENERIC_DIRECT
+    {
+        uint8_t rgb[256*3];
+        for (i=0; i<256; ++i) {
+            rgb[3*i + 0] = colors[i].r;
+            rgb[3*i + 1] = colors[i].g;
+            rgb[3*i + 2] = colors[i].b;
+        }
+        DG_SetPalette(rgb);
+    }
+#endif
 
 #ifdef CMAP256
 

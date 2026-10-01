@@ -37,6 +37,7 @@
 #endif
 
 #include "doomtype.h"
+#include "doomgeneric.h"
 
 #include "deh_str.h"
 
@@ -66,6 +67,15 @@ void M_MakeDirectory(char *path)
 boolean M_FileExists(char *filename)
 {
     FILE *fstream;
+
+#ifdef DOOMGENERIC_MEMWAD
+    unsigned int size;
+
+    if (DG_MemWAD(filename, &size) != NULL)
+    {
+        return true;
+    }
+#endif
 
     fstream = fopen(filename, "r");
 
