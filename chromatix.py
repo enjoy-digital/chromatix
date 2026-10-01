@@ -475,6 +475,9 @@ class BaseSoC(SoCMini):
             with_frame_blend = not with_cpu,
             # CPU (sys = pClk) and PSRAM (xClk) clocks from the same PLL: synchronous bus bridge.
             bus_synchronous  = with_cpu,
+            # Doom: 32-byte block reads + 4 block buffers (sequential L2 misses served from them).
+            bus_fetch        = 4 if with_doom else 1,
+            bus_buffers      = 4 if with_doom else 0,
         )
 
         # Virtual Cartridge (ROM/cartridge RAM in the PSRAM, loaded from the host) -----------------

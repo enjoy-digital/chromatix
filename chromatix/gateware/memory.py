@@ -5,6 +5,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Derived from ModRetro's oss-chromatic-console-fpga (GPL-3.0).
 
+from functools import reduce
+from operator import or_
+
 from migen import *
 from migen.genlib.cdc import MultiReg, PulseSynchronizer
 
@@ -611,11 +614,20 @@ class PSRAMWishbone(LiteXModule):
 
     synchronous: sys and xClk from the same PLL (related clocks, timing analyzed): the toggles are used
     directly (no synchronizers: lower latency).
+
+    fetch/buffers: reads fetch the aligned block of `fetch` bus words in one burst, kept in `buffers`
+    block buffers (round-robin): the next reads in a buffered block are answered without a PSRAM
+    access (sequential misses of the cache in front: code, textures...). Writes go to the PSRAM and
+    update a buffered copy.
     """
-    def __init__(self, port, ram_dout, base=0x000000, data_width=64, synchronous=False):
+    def __init__(self, port, ram_dout, base=0x000000, data_width=64, synchronous=False, fetch=1, buffers=0):
         assert data_width % 16 == 0
-        nwords = data_width // 16
-        self.bus = bus = wishbone.Interface(data_width=data_width, address_width=32, addressing="word")
+        assert fetch & (fetch - 1) == 0
+        assert (fetch == 1) or (buffers >= 1)
+        nwords     = data_width // 16
+        nbytes     = data_width // 8
+        fbits      = log2_int(fetch)
+        self.bus   = bus = wishbone.Interface(data_width=data_width, address_width=32, addressing="word")
         # Statistics (sys): new PSRAM request (pulse), access pending.
         self.request = Signal()
         self.pending = Signal()
@@ -628,39 +640,87 @@ class PSRAMWishbone(LiteXModule):
         ack_sync   = Signal()
         ack_seen   = Signal()
         pending    = Signal()
+        miss_ack   = Signal()
         adr        = Signal(23)
         we         = Signal()
         dat_w      = Signal(data_width)
-        dat_r      = Signal(data_width)
+        block      = Signal(data_width*fetch)   # Read data (xClk, quasi-static at the acknowledge).
+        slot       = Signal(max=max(fetch, 2))  # Bus word of the request in the block.
+        tag        = Signal(len(bus.adr) - fbits)
         if synchronous:
             self.comb += ack_sync.eq(ack_toggle)
         else:
             self.specials += MultiReg(ack_toggle, ack_sync)
+        block_words = [block[data_width*i:data_width*(i + 1)] for i in range(fetch)]
+
+        # Block buffers. Lookup registered (timing): a new bus access is looked up in the first cycle
+        # (hits/data registered), then answered from a buffer (hit) or requested to the PSRAM (miss).
+        req_tag  = bus.adr[fbits:]
+        req_slot = bus.adr[:fbits] if fbits else 0
+        bvalid   = [Signal(name=f"bvalid{i}") for i in range(buffers)]
+        btag     = [Signal(len(tag), name=f"btag{i}") for i in range(buffers)]
+        bdata    = [Signal(data_width*fetch, name=f"bdata{i}") for i in range(buffers)]
+        hits     = [Signal(name=f"hit{i}") for i in range(buffers)]
+        hit      = Signal()
+        looked   = Signal() # Lookup done for the current bus access.
+        hit_ack  = Signal()
+        hit_dat  = Signal(data_width)
+        victim   = Signal(max=max(buffers, 2))
+        access   = Signal()
+        self.comb += access.eq(bus.cyc & bus.stb & ~pending & ~hit_ack & ~miss_ack)
+        if buffers:
+            self.sync += [
+                looked.eq(access & ~looked),
+                *[hits[i].eq(bvalid[i] & (btag[i] == req_tag)) for i in range(buffers)],
+                hit_dat.eq(reduce(or_, [Mux(bvalid[i] & (btag[i] == req_tag),
+                    Array(bdata[i][data_width*j:data_width*(j + 1)] for j in range(fetch))[req_slot], 0)
+                    for i in range(buffers)])),
+            ]
+            self.comb += hit.eq(reduce(or_, hits))
+        else:
+            self.comb += looked.eq(1)
+
         self.comb += [
-            bus.dat_r.eq(dat_r),
-            bus.ack.eq(pending & (ack_sync != ack_seen)),
-            self.request.eq(bus.cyc & bus.stb & ~pending & ~bus.ack),
+            miss_ack.eq(pending & (ack_sync != ack_seen)),
+            bus.ack.eq(miss_ack | hit_ack),
+            bus.dat_r.eq(Mux(hit_ack, hit_dat, Array(block_words)[slot])),
+            self.request.eq(access & looked & ~(~bus.we & hit)),
             self.pending.eq(pending),
         ]
         self.sync += [
-            If(bus.ack,
+            hit_ack.eq(access & looked & ~bus.we & hit),
+            If(miss_ack,
                 pending.eq(0),
                 ack_seen.eq(ack_sync),
-            ).Elif(bus.cyc & bus.stb & ~pending,
+                # Read: keep the block.
+                If(~we & (buffers > 0),
+                    Case(victim, {i: [bvalid[i].eq(1), btag[i].eq(tag), bdata[i].eq(block)]
+                        for i in range(buffers)}),
+                    victim.eq(victim + 1 if buffers > 1 else 0),
+                ),
+            ).Elif(self.request,
                 pending.eq(1),
                 req_toggle.eq(~req_toggle),
-                adr.eq(base + bus.adr*(data_width//8)),
+                # Reads: whole aligned block, writes: the bus word.
+                adr.eq(base + Mux(bus.we, bus.adr, (Cat(Constant(0, fbits), req_tag) if fbits else bus.adr))*nbytes),
                 we.eq(bus.we),
                 dat_w.eq(bus.dat_w),
-            )
+                slot.eq(req_slot),
+                tag.eq(req_tag),
+            ),
         ]
+        # Writes: update the buffered copy.
+        for i in range(buffers):
+            self.sync += If(self.request & bus.we & hits[i],
+                Case(req_slot, {j: bdata[i][data_width*j:data_width*(j + 1)].eq(bus.dat_w)
+                    for j in range(fetch)}))
 
         # xClk: burst.
         req_sync = Signal()
         req_seen = Signal()
         busy     = Signal()
-        index    = Signal(max=max(nwords, 2))
-        words    = [dat_r[16*i:16*(i + 1)] for i in range(nwords)]
+        index    = Signal(max=max(nwords*fetch, 2))
+        words    = [block[16*i:16*(i + 1)] for i in range(nwords*fetch)]
         if synchronous:
             self.comb += req_sync.eq(req_toggle)
         else:
@@ -668,8 +728,8 @@ class PSRAMWishbone(LiteXModule):
         self.comb += [
             port.rnw.eq(~we),
             port.addr.eq(adr),
-            port.burst_length.eq(data_width//8),
-            port.din.eq(Array(dat_w[16*i:16*(i + 1)] for i in range(nwords))[index]),
+            port.burst_length.eq(Mux(we, nbytes, nbytes*fetch)),
+            port.din.eq(Array(dat_w[16*i:16*(i + 1)] for i in range(nwords))[index[:max(log2_int(nwords), 1)]]),
         ]
         self.sync.xclk += [
             port.request.eq(0),
@@ -683,7 +743,7 @@ class PSRAMWishbone(LiteXModule):
                 index.eq(index + 1),
             ),
             If(port.dout_valid,
-                Case(index, {i: words[i].eq(ram_dout) for i in range(nwords)}),
+                Case(index, {i: words[i].eq(ram_dout) for i in range(nwords*fetch)}),
             ),
             If(busy & port.done,
                 busy.eq(0),
@@ -751,7 +811,8 @@ class MemorySystem(LiteXModule):
     (QSPI_CLK rising/falling edges, created here).
     """
     def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64,
-        with_vcart=False, with_frame_blend=True, bus_synchronous=False, psram_factory=None):
+        with_vcart=False, with_frame_blend=True, bus_synchronous=False, bus_fetch=1, bus_buffers=0,
+        psram_factory=None):
         self.reset       = Signal()
         self.menu_init   = Signal()
         self.bist_done   = Signal()
@@ -878,5 +939,7 @@ class MemorySystem(LiteXModule):
                 base        = bus_base,
                 data_width  = bus_data_width,
                 synchronous = bus_synchronous,
+                fetch       = bus_fetch,
+                buffers     = bus_buffers,
             )
             self.bus = bus_bridge.bus
