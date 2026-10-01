@@ -165,6 +165,11 @@ class BaseSoC(SoCMini):
             **cpu_kwargs,
         )
 
+        # Doom: VexRiscv with 8KB I/D caches (generated: chromatix/verilog/cpu).
+        if with_doom:
+            self.cpu.use_external_variant(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                "chromatix", "verilog", "cpu", "VexRiscv_Doom.v"))
+
         # CRG --------------------------------------------------------------------------------------
 
         self.crg = crg = CRG(platform, sys_clk=sys_clk)
