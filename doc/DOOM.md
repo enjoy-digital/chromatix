@@ -6,9 +6,9 @@ Chromatic LCD (and so over UVC), with the console buttons and sound effects.
 
 Status: **runs on the Chromatic** (title, demos, menus, playable with the console buttons), at
 **~3.5-4.5 fps** (demo, firmware frames counter); also on the PC (SDL emulation of the Chromatic, same
-platform code) and in `litex_sim` (frame below).
+platform code) and in `litex_sim` (left: Chromatic over UVC, right: litex_sim LCD dump).
 
-<img src="images/doom_litex_sim.png" width="320" alt="Doom demo frame rendered by the SoC firmware in litex_sim (LCD dump)">
+<img src="images/doom_chromatic.png" width="320" alt="Doom on the Chromatic, captured over UVC"> <img src="images/doom_litex_sim.png" width="320" alt="Doom demo frame rendered by the SoC firmware in litex_sim (LCD dump)">
 
 Performance (hardware, `firmware/fbtest`): main RAM 32-bit writes 6.6MB/s, reads 6.8MB/s, memcpy
 2.2MB/s, random read (cache miss) latency 3.4us (~114 CPU cycles). In `litex_sim` (single-cycle RAM)
