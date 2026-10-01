@@ -143,6 +143,19 @@ Firmware peripherals: buttons (`demo_buttons_status`), square wave tone generato
 
 <img src="doc/images/litex_bios.png" width="320" alt="LiteX BIOS on the Chromatic LCD, captured over UVC">
 
+## Doom
+
+`--with-doom` runs Doom ([doomgeneric](https://github.com/ozkl/doomgeneric)) on a VexRiscv SoC in place
+of the Game Boy core: CPU framebuffer on the LCD (and UVC), PCM sound effects, console buttons, firmware
+and WAD loaded from the PC over USB. See [doc/DOOM.md](doc/DOOM.md) (build, load, controls, status).
+
+```bash
+./chromatix.py --gowin-path ~/tools/gowin_1.9.12.04/IDE --with-doom --build --flash
+make -C firmware/doom
+litex_server --uart --uart-port /dev/ttyACM0 &
+./scripts/chromatic.py run firmware/doom/doom.bin --wad doom1.wad
+```
+
 ## Simulation
 
 `chromatix_sim.py` simulates the Game Boy core with Verilator (VHDL parts converted to Verilog
@@ -196,6 +209,8 @@ sound live (only meaningful near realtime), `--wav` records it in simulation tim
   [Amaranth](https://github.com/amaranth-lang/amaranth): the USB 2.0 device core.
 - [openFPGALoader](https://github.com/trabucayre/openFPGALoader), [Yosys](https://github.com/YosysHQ/yosys),
   [Verilator](https://github.com/verilator/verilator) and [three.js](https://threejs.org/).
+- [doomgeneric](https://github.com/ozkl/doomgeneric) (GPL-2.0, `firmware/doom/doomgeneric`), based on
+  [Chocolate Doom](https://github.com/chocolate-doom/chocolate-doom) and id Software's Doom source release.
 - [germaneguise](https://github.com/germaneguise): the 320x288 USB capture idea
   ([#10](https://github.com/ModRetro/oss-chromatic-console-fpga/pull/10)).
 
