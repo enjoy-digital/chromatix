@@ -12,6 +12,7 @@ from litex.gen import *
 
 from litex.soc.interconnect import stream
 from litex.soc.interconnect import wishbone
+from litex.soc.interconnect.csr import *
 
 from litex.soc.cores.ram.opi_psram import OPIPSRAMPHY, OPIPSRAMCore
 
@@ -612,6 +613,9 @@ class PSRAMWishbone(LiteXModule):
         assert data_width % 16 == 0
         nwords = data_width // 16
         self.bus = bus = wishbone.Interface(data_width=data_width, address_width=32, addressing="word")
+        # Statistics (sys): new PSRAM request (pulse), access pending.
+        self.request = Signal()
+        self.pending = Signal()
 
         # # #
 
@@ -629,6 +633,8 @@ class PSRAMWishbone(LiteXModule):
         self.comb += [
             bus.dat_r.eq(dat_r),
             bus.ack.eq(pending & (ack_sync != ack_seen)),
+            self.request.eq(bus.cyc & bus.stb & ~pending & ~bus.ack),
+            self.pending.eq(pending),
         ]
         self.sync += [
             If(bus.ack,
@@ -673,6 +679,46 @@ class PSRAMWishbone(LiteXModule):
             If(busy & port.done,
                 busy.eq(0),
                 ack_toggle.eq(~ack_toggle),
+            ),
+        ]
+
+# Memory Counters ----------------------------------------------------------------------------------
+
+class MemoryCounters(LiteXModule):
+    """
+    CPU main RAM statistics (sys domain): accesses (L2 cache front), PSRAM requests (L2 misses and
+    write-backs), cycles with a PSRAM request pending and the longest request, over the cycles since
+    the last clear (control write).
+    """
+    def __init__(self, access, request, pending):
+        self.control  = CSRStorage(1, description="Write: clear the counters.")
+        self.cycles   = CSRStatus(32, description="Cycles since clear.")
+        self.accesses = CSRStatus(32, description="Main RAM accesses (L2 cache front).")
+        self.requests = CSRStatus(32, description="PSRAM requests (L2 misses/write-backs).")
+        self.busy     = CSRStatus(32, description="Cycles with a PSRAM request pending.")
+        self.latency  = CSRStatus(16, description="Longest PSRAM request (cycles).")
+
+        # # #
+
+        current = Signal(16)
+        self.sync += [
+            If(self.control.re,
+                self.cycles.status.eq(0),
+                self.accesses.status.eq(0),
+                self.requests.status.eq(0),
+                self.busy.status.eq(0),
+                self.latency.status.eq(0),
+            ).Else(
+                self.cycles.status.eq(self.cycles.status + 1),
+                If(access,  self.accesses.status.eq(self.accesses.status + 1)),
+                If(request, self.requests.status.eq(self.requests.status + 1)),
+                If(pending, self.busy.status.eq(self.busy.status + 1)),
+            ),
+            If(pending,
+                current.eq(current + 1),
+                If(current >= self.latency.status, self.latency.status.eq(current + 1)),
+            ).Else(
+                current.eq(0),
             ),
         ]
 

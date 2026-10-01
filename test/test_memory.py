@@ -530,3 +530,36 @@ def test_memory_system_bist(monkeypatch):
     assert dut.psram.errors == []
     # First access: 512-word write burst at 0, then bursts every 512*512 + 1 words.
     assert dut.psram.accesses[:2] == [(1, 0, 512), (1, 2*(512*512 + 1), 512)]
+
+# Memory Counters ----------------------------------------------------------------------------------
+
+def test_memory_counters():
+    """Accesses/requests/busy cycles counting, longest request, clear."""
+    from chromatix.gateware.memory import MemoryCounters
+    access  = Signal()
+    request = Signal()
+    pending = Signal()
+    dut     = MemoryCounters(access, request, pending)
+
+    def gen():
+        for i in range(3):
+            yield access.eq(1)
+            yield request.eq(1)
+            yield pending.eq(1)
+            yield
+            yield access.eq(0)
+            yield request.eq(0)
+            for _ in range(4 + i):
+                yield
+            yield pending.eq(0)
+            yield
+        yield
+        assert (yield dut.accesses.status) == 3
+        assert (yield dut.requests.status) == 3
+        assert (yield dut.busy.status) == (5 + 6 + 7)
+        assert (yield dut.latency.status) == 7
+        yield from dut.control.write(1)
+        yield
+        assert (yield dut.requests.status) == 0
+
+    run_simulation(dut, gen())

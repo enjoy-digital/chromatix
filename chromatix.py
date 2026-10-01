@@ -40,7 +40,7 @@ from chromatix.gateware.usb_device import USBDevice
 from chromatix.gateware.misc       import TickGenerator, StatusLed, ESP32Control
 from chromatix.gateware.buttons    import Buttons, BUTTONS
 from chromatix.gateware.debug      import DebugControl
-from chromatix.gateware.memory     import MemorySystem
+from chromatix.gateware.memory     import MemorySystem, MemoryCounters
 from chromatix.gateware.vcart      import VirtualCart, VirtualCartCSR
 from chromatix.gateware.demo       import ButtonsCSR, ToneGenerator, PCMAudio
 from chromatix.gateware.video      import VideoPipeline
@@ -510,6 +510,13 @@ class BaseSoC(SoCMini):
                 reverse   = False,
             )
             self.add_config("L2_SIZE", 8192)
+            # Main RAM statistics (Doom: performance analysis).
+            if with_doom:
+                self.memory_counters = MemoryCounters(
+                    access  = main_ram.cyc & main_ram.stb & main_ram.ack,
+                    request = memory.bus_bridge.request,
+                    pending = memory.bus_bridge.pending,
+                )
             self.bus.add_slave(name="main_ram", slave=main_ram, region=SoCRegion(
                 origin = self.mem_map["main_ram"],
                 size   = main_ram_size,
