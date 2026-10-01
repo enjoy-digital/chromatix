@@ -8,7 +8,7 @@ DOOM_SRCS = dummy am_map doomdef doomstat dstrings d_event d_items d_iwad d_loop
 	r_sky r_things sha1 sounds statdump st_lib st_stuff s_sound tables v_video wi_stuff w_checksum \
 	w_file w_main w_wad z_zone w_file_stdc i_input i_video doomgeneric
 
-PORT_SRCS = chromatix_dg
+PORT_SRCS = chromatix_dg sound
 
-DOOM_CFLAGS = -DDOOMGENERIC_DIRECT -DDOOMGENERIC_MEMWAD -DCMAP256 \
+DOOM_CFLAGS = -DDOOMGENERIC_DIRECT -DDOOMGENERIC_MEMWAD -DCMAP256 -DFEATURE_SOUND -DDOOMGENERIC_NO_SDL_MIXER \
 	-DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -Idoomgeneric -I.

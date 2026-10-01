@@ -15,7 +15,7 @@ vpath %.c doomgeneric .
 doom_host: $(OBJS)
 	$(CC) -o $@ $^ $(LDLIBS)
 
-$(OBJDIR)/%.o: %.c | $(OBJDIR)
+$(OBJDIR)/%.o: %.c sources.mak Makefile.host | $(OBJDIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR):

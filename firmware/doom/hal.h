@@ -33,6 +33,7 @@ uint32_t       hal_buttons(void);
 void           hal_lcd_palette(const uint16_t *rgb555);
 void           hal_lcd_line(int y, const uint8_t *pixels); /* HAL_LCD_WIDTH pixels. */
 void           hal_lcd_present(void);
+void           hal_audio_start(void (*fill)(void));         /* Fill called when samples are needed. */
 int            hal_audio_free(void);                        /* Samples that can be queued. */
 void           hal_audio_write(uint32_t sample);
 const uint8_t *hal_wad(unsigned int *size);                 /* WAD in memory (NULL: none). */

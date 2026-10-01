@@ -5,7 +5,11 @@
 //
 // Doom port HAL, ChromatiX SoC (--with-doom): LCDFramebuffer, ButtonsCSR, PCMAudio, timer0, WAD
 // loaded by the host at the main RAM data area (scripts/chromatic.py run --wad).
+//
+// Without these peripherals (ex: litex_sim, to check the firmware): LCD in RAM (LCD_DUMP_FRAME:
+// frame dumped on the console, hex lines), no buttons/audio.
 
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -22,7 +26,12 @@
 #define PCM_DEPTH   512
 #define DATA_OFFSET 0x370000 /* WAD (see firmware/common/main_ram.ld). */
 
+#ifdef FRAMEBUFFER_BASE
 static volatile uint32_t *fb = (volatile uint32_t *)FRAMEBUFFER_BASE;
+#else
+static uint32_t fb[FB_PALETTE + 256];
+static uint32_t fb_frames;
+#endif
 
 /* Time: 32-bit timer0 down counter extended to 64-bit (hal_ticks_ms called often enough). */
 static uint32_t timer_last;
@@ -65,7 +74,11 @@ void hal_sleep_ms(uint32_t ms)
 
 uint32_t hal_buttons(void)
 {
+#ifdef CSR_DEMO_BUTTONS_BASE
 	return demo_buttons_status_read();
+#else
+	return 0;
+#endif
 }
 
 void hal_lcd_palette(const uint16_t *rgb555)
@@ -83,16 +96,59 @@ void hal_lcd_line(int y, const uint8_t *pixels)
 
 void hal_lcd_present(void)
 {
+#if !defined(FRAMEBUFFER_BASE) && defined(LCD_DUMP_FRAME)
+	if (++fb_frames == LCD_DUMP_FRAME) {
+		printf("LCD palette:");
+		for (int i = 0; i < 256; i++)
+			printf(" %04lx", (unsigned long)fb[FB_PALETTE + i]);
+		printf("\n");
+		for (int y = 0; y < HAL_LCD_HEIGHT; y++) {
+			printf("LCD %03d:", y);
+			for (int x = 0; x < HAL_LCD_WIDTH/4; x++)
+				printf(" %08lx", (unsigned long)fb[y*HAL_LCD_WIDTH/4 + x]);
+			printf("\n");
+		}
+	}
+#endif
+}
+
+#ifdef CSR_PCM_BASE
+static void (*audio_fill)(void);
+
+static void pcm_isr(void)
+{
+	audio_fill();
+}
+#endif
+
+void hal_audio_start(void (*fill)(void))
+{
+#if defined(CSR_PCM_BASE) && defined(PCM_INTERRUPT)
+	audio_fill = fill;
+	irq_attach(PCM_INTERRUPT, pcm_isr);
+	pcm_ev_enable_write(1);
+	irq_setmask(irq_getmask() | (1 << PCM_INTERRUPT));
+#else
+	(void)fill;
+#endif
 }
 
 int hal_audio_free(void)
 {
+#ifdef CSR_PCM_BASE
 	return PCM_DEPTH - 1 - pcm_level_read();
+#else
+	return 0;
+#endif
 }
 
 void hal_audio_write(uint32_t sample)
 {
+#ifdef CSR_PCM_BASE
 	pcm_data_write(sample);
+#else
+	(void)sample;
+#endif
 }
 
 const uint8_t *hal_wad(unsigned int *size)

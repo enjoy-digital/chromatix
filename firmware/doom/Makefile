@@ -37,7 +37,7 @@ vpath %.c doomgeneric .
 $(OBJDIR)/crt0.o: $(CPU_DIRECTORY)/crt0.S | $(OBJDIR)
 	$(CC) -c $(CFLAGS) -o $@ $<
 
-$(OBJDIR)/%.o: %.c | $(OBJDIR)
+$(OBJDIR)/%.o: %.c sources.mak Makefile | $(OBJDIR)
 	$(CC) -c $(CFLAGS) $(DOOM_CFLAGS) $(DOOM_OPT) -o $@ $<
 
 $(OBJDIR):

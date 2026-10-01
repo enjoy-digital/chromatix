@@ -32,6 +32,7 @@ static uint32_t           keys;
 static uint8_t           *wad;
 static unsigned int       wad_size;
 static unsigned int       frames;
+static void             (*audio_fill)(void);
 
 void hal_init(void)
 {
@@ -85,6 +86,8 @@ int hal_poll(void)
 	};
 	SDL_Event event;
 
+	if (audio_fill)
+		audio_fill();
 	while (SDL_PollEvent(&event)) {
 		if (event.type == SDL_QUIT)
 			return 0;
@@ -158,6 +161,8 @@ void hal_lcd_present(void)
 	SDL_UnlockTexture(texture);
 	SDL_RenderCopy(renderer, texture, NULL, NULL);
 	SDL_RenderPresent(renderer);
+	if (audio_fill)
+		audio_fill();
 
 	/* Snapshots. */
 	const char *snap = getenv("DOOM_SNAP");
@@ -177,6 +182,11 @@ void hal_lcd_present(void)
 		snap = strchr(snap, ',');
 		snap = snap ? snap + 1 : NULL;
 	}
+}
+
+void hal_audio_start(void (*fill)(void))
+{
+	audio_fill = fill;
 }
 
 int hal_audio_free(void)
