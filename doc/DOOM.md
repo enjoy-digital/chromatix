@@ -22,7 +22,11 @@ sampling profile mapped to the firmware functions.
 | 32-bit `FixedDiv` (bit exact) | 6.51 | no 64-bit software division |
 | Low detail, displayed columns only | 9.26 | the LCD shows 1 column out of 2: drawers write only those |
 | Synchronous PSRAM bridge, no frame blend traffic | 10.65 | 13.9 cycles/request (max 115, was 306) |
-| **CPU at 67.1MHz (sys = xClk)** | **15.32** | timing met (Fmax 72.5MHz), PSRAM busy 60% |
+| CPU at 67.1MHz (sys = xClk) | 15.32 | timing met (Fmax 72.5MHz), PSRAM busy 60% |
+| 32-byte PSRAM reads + 4 block buffers | 20.13 | PSRAM requests 69.5M -> 30.6M |
+| VexRiscv 8KB I/D caches (generated variant) | 21.88 | BSRAM 55/56 |
+| LCD downscale with 32-bit words | 22.69 | |
+| **GCC 12.3 (xPack)** | **24.55** | `LITEX_ENV_CC_TRIPLE=riscv-none-elf` (GCC 10.1: 22.69) |
 
 Tried and kept out: `-O3` (8.80 fps vs 9.26: 4KB I-cache), `-Os` (8.93). Framebuffer stores are ~10%
 only (measured without them: 10.27 vs 9.26). Profile at 15 fps: drawers ~34% (`R_DrawColumnLow`,
@@ -35,14 +39,14 @@ Main RAM (hardware, `firmware/fbtest`, CPU 33.5MHz): 32-bit writes 6.6MB/s, read
 
 | | |
 |---|---|
-| CPU | VexRiscv `standard` (rv32im, 4KB I$/D$, single-cycle mul), 67.1MHz (sys = xClk, as the PSRAM controller) |
+| CPU | VexRiscv `standard` configuration with 8KB I$/D$ (rv32im, single-cycle mul, generated: `chromatix/verilog/cpu`), 67.1MHz (sys = xClk, as the PSRAM controller) |
 | Boot | no ROM: the CPU starts at the main RAM start, held in reset (ctrl `cpu_rst`) while the host loads the firmware |
-| Main RAM | PSRAM 0x080000-0x7FFFFF (7.5MB) at 0x40000000, behind an 8KB L2 cache (8-byte lines) |
+| Main RAM | PSRAM 0x080000-0x7FFFFF (7.5MB) at 0x40000000, behind an 8KB L2 cache (8-byte lines), 32-byte PSRAM reads kept in 4 block buffers |
 | LCD | `LCDFramebuffer`: 160x144 8-bit indexed + 256 colors RGB555 palette (BSRAM, Wishbone at 0x90000000), Game Boy LCD stream into the video pipeline (OSD, color correction, panel, UVC) |
 | Audio | `PCMAudio`: stereo 16-bit samples FIFO (512) at 11025Hz, IRQ when less than half full |
 | Buttons | `demo_buttons_status` |
 | Host link | USB CDC: UARTBone (fast loads, ~MB/s) + crossover UART (console, `litex_term crossover`) |
-| Resources | Logic 58%, BSRAM 53/56 |
+| Resources | Logic 67%, BSRAM 55/56 |
 
 Main RAM layout (`firmware/common/main_ram.ld`): firmware (code/data/bss) from 0x40000000, heap
 (Doom zone: 2MB) and stack (64KB) up to 0x40370000, then the WAD (up to 4.06MB: shareware
@@ -51,7 +55,9 @@ Main RAM layout (`firmware/common/main_ram.ld`): firmware (code/data/bss) from 0
 ## Build and run
 
 ```bash
-# Bitstream (also compiles the firmware libraries: full picolibc, no BIOS).
+# Bitstream (also compiles the firmware libraries: full picolibc, no BIOS). Faster firmware with GCC 12
+# (xPack riscv-none-elf-gcc in the PATH): export LITEX_ENV_CC_TRIPLE=riscv-none-elf (libraries and
+# firmware must use the same compiler: LTO).
 ./chromatix.py --gowin-path ~/tools/gowin_1.9.12.04/IDE --with-doom --build --flash
 
 # Firmware.
@@ -126,9 +132,8 @@ gamepad, SDL audio); `chromatix_dg.c` (display/input/WAD) and `sound.c` (mixer) 
 
 ## Known issues / next
 
-- Performance (memory bound now: PSRAM busy 60%): 32-byte PSRAM bursts/line buffer (L2 8-byte lines:
-  sequential misses as separate requests), larger CPU caches (BSRAM 53/56: the LCD framebuffer could
-  move to the PSRAM), GCC 12 (GCC 10.1 used).
+- Performance: BSRAM is full (55/56) and the 67MHz timing tight (Fmax 67.2MHz): larger caches would
+  need the LCD framebuffer in the PSRAM.
 - Tearing: the LCD framebuffer is updated while displayed (no double buffering): wait for the vsync
   (`framebuffer_frame`) or double buffer.
 - Host link: reads over the USB CDC (UARTBone) get stuck from time to time (~1 per 100KB: reply
