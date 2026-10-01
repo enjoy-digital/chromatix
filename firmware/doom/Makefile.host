@@ -1,0 +1,27 @@
+# ChromatiX Doom port, host build (SDL2 emulation of the Chromatic: 160x144 LCD, buttons).
+#   make -f Makefile.host
+#   DOOM_WAD=path/to/doom1.wad ./doom_host
+
+include sources.mak
+
+CC      ?= gcc
+CFLAGS  += -O2 -g -w $(DOOM_CFLAGS) $(shell sdl2-config --cflags)
+LDLIBS  += $(shell sdl2-config --libs) -lm
+OBJDIR   = build_host
+OBJS     = $(addprefix $(OBJDIR)/, $(addsuffix .o, $(DOOM_SRCS) $(PORT_SRCS) hal_sdl))
+
+vpath %.c doomgeneric .
+
+doom_host: $(OBJS)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(OBJDIR) doom_host
+
+.PHONY: clean
