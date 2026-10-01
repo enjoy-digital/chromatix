@@ -28,6 +28,7 @@ import argparse
 import subprocess
 
 from litex import RemoteClient
+from litex.tools.remote.comm_uart import CommUART, CMD_READ_BURST_INCR
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from chromatix.gateware.debug import BUTTONS
@@ -52,17 +53,63 @@ VCART_MBC     = {
 }
 VCART_RAM_SIZES = {0: 0, 1: 2048, 2: 8192, 3: 32768, 4: 131072, 5: 65536} # Header code -> bytes.
 
-# Doom build: CPU main RAM (PSRAM_BASE = main RAM start), WAD offset (see firmware/doom).
-DOOM_WAD_OFFSET = 0x370000
+# Doom build: CPU main RAM (PSRAM_BASE = main RAM start) layout (see firmware/common/layout.h).
+DOOM_PROF_OFFSET = 0x34f000 # Profiler histogram.
+DOOM_HOST_OFFSET = 0x35f000 # Host block: arguments, results.
+DOOM_WAD_OFFSET  = 0x370000
+HOST_ARGS_MAGIC  = 0x53475241
+HOST_BENCH_MAGIC = 0x48434e42
+HOST_RESULTS     = ["bench_magic", "gametics", "realtics", "frames", "ms", "prof_magic", "prof_base",
+    "prof_shift", "prof_buckets", "prof_samples", "mem_cycles", "mem_accesses", "mem_requests",
+    "mem_busy", "mem_latency", "status"]
 
 STATUS_FIELDS = ["bist_done", "bist_failed", "lcd_init_done", "menu_disabled", "low_battery", "bat_is_li", "headphones"]
+
+# Direct UARTBone Link -----------------------------------------------------------------------------
+
+class RobustCommUART(CommUART):
+    """
+    UARTBone over the USB CDC port without litex_server, with read timeouts and resynchronization:
+    reads can get stuck on the USB IN path (reply bytes held until the next request), the link is
+    then resynchronized (UARTBone timeout, dummy read pushing the stuck bytes, input drained) and the
+    read retried.
+    """
+    def __init__(self, port, csr_csv, timeout=0.5, retries=5):
+        CommUART.__init__(self, port, csr_csv=csr_csv)
+        self.port.timeout = timeout
+        self.retries      = retries
+        self.resyncs      = 0
+
+    def _read(self, length):
+        r = self.port.read(length)
+        if len(r) < length:
+            raise TimeoutError(f"UARTBone read timeout ({len(r)}/{length} bytes).")
+        return r
+
+    def resync(self):
+        self.resyncs += 1
+        time.sleep(0.15) # UARTBone FSM timeout (100ms).
+        self._write([CMD_READ_BURST_INCR, 1, 0, 0, 0, 0])
+        time.sleep(0.15)
+        self.port.reset_input_buffer()
+
+    def read(self, addr, length=None, burst="incr"):
+        for attempt in range(self.retries):
+            try:
+                return CommUART.read(self, addr, length, burst)
+            except TimeoutError:
+                self.resync()
+        raise TimeoutError(f"UARTBone read at 0x{addr:08x} failed after {self.retries} attempts.")
 
 # Chromatic ----------------------------------------------------------------------------------------
 
 class Chromatic:
-    def __init__(self, host="localhost", port=1234, csr_csv=None):
+    def __init__(self, host="localhost", port=1234, csr_csv=None, serial=None):
         csr_csv = csr_csv or os.path.join(os.path.dirname(os.path.abspath(__file__)), "csr.csv")
-        self.bus = RemoteClient(host=host, port=port, csr_csv=csr_csv)
+        if serial is not None:
+            self.bus = RobustCommUART(serial, csr_csv=csr_csv) # Direct (no litex_server).
+        else:
+            self.bus = RemoteClient(host=host, port=port, csr_csv=csr_csv)
         self.bus.open()
 
     def close(self):
@@ -138,17 +185,31 @@ class Chromatic:
         return self.read_psram(VCART_RAM, size)
 
     # Firmware (Doom build).
-    def run_firmware(self, firmware, files=(), verify=True):
+    def run_firmware(self, firmware, files=(), verify=True, args=None):
         """
         Load a firmware at the CPU main RAM start (its reset address) and data files at main RAM
-        offsets, with the CPU held in reset (ctrl cpu_rst), then start it.
+        offsets, with the CPU held in reset (ctrl cpu_rst), then start it (optional arguments in the
+        host block).
         """
         self.bus.regs.ctrl_reset.write(0b10) # cpu_rst.
         for offset, data in [(0, firmware), *files]:
             self.write_psram(offset, data)
             if verify and zlib.crc32(self.read_psram(offset, len(data))) != zlib.crc32(data):
                 raise IOError(f"Verification failed at main RAM offset 0x{offset:x}.")
+        block = (HOST_ARGS_MAGIC if args else 0).to_bytes(4, "little") + (args or "").encode()[:1019] + b"\0"
+        self.write_psram(DOOM_HOST_OFFSET, block)
         self.bus.regs.ctrl_reset.write(0)
+
+    def doom_results(self):
+        words = self.bus.read(PSRAM_BASE + DOOM_HOST_OFFSET + 0x400, len(HOST_RESULTS))
+        return dict(zip(HOST_RESULTS, words))
+
+    def doom_profile(self, results):
+        histogram = []
+        for i in range(results["prof_buckets"]*4//4096):
+            data = self.read_psram(DOOM_PROF_OFFSET + 4096*i, 4096)
+            histogram += [int.from_bytes(data[j:j + 4], "little") for j in range(0, 4096, 4)]
+        return histogram
 
     def unload_rom(self):
         """Back to the physical cartridge."""
@@ -204,6 +265,42 @@ def align_wad(wad):
         entries += (12 + len(lumps)).to_bytes(4, "little") + entry[4:16]
         lumps   += wad[filepos:filepos + length] + bytes(-length % 4)
     return wad[:4] + numlumps.to_bytes(4, "little") + (12 + len(lumps)).to_bytes(4, "little") + lumps + entries
+
+# Doom Benchmark -----------------------------------------------------------------------------------
+
+def doom_bench_report(results, histogram=None, elf=None, nm="riscv64-unknown-elf-nm", top=25):
+    """Timedemo frames rate, main RAM counters and profile (functions, from the ELF symbols)."""
+    r = results
+    print(f"Timedemo: {r['gametics']} gametics in {r['realtics']} realtics: "
+        f"{r['gametics']*35/max(r['realtics'], 1):.2f} fps")
+    if r["mem_cycles"]:
+        cycles = r["mem_cycles"]
+        print(f"Main RAM: {r['mem_accesses']/cycles*100:.1f}% of cycles accessing, "
+            f"{r['mem_requests']} PSRAM requests ({r['mem_requests']/max(r['mem_accesses'], 1)*100:.1f}% of accesses), "
+            f"PSRAM busy {r['mem_busy']/cycles*100:.1f}% of cycles, "
+            f"{r['mem_busy']/max(r['mem_requests'], 1):.1f} cycles/request (max {r['mem_latency']}).")
+    if histogram and elf and r["prof_magic"] == HOST_BENCH_MAGIC and r["prof_samples"]:
+        symbols = []
+        for line in subprocess.run([nm, "-n", "--defined-only", elf], capture_output=True, text=True).stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            address, kind, name = fields[:3]
+            if kind in "tTwW":
+                symbols.append((int(address, 16), name))
+        functions = {}
+        for bucket, count in enumerate(histogram):
+            if count:
+                pc   = r["prof_base"] + (bucket << r["prof_shift"])
+                name = "?"
+                for address, symbol in symbols:
+                    if address > pc:
+                        break
+                    name = symbol
+                functions[name] = functions.get(name, 0) + count
+        print(f"Profile ({r['prof_samples']} samples):")
+        for name, count in sorted(functions.items(), key=lambda kv: -kv[1])[:top]:
+            print(f"  {count/r['prof_samples']*100:5.1f}%  {name}")
 
 # Capture ------------------------------------------------------------------------------------------
 
@@ -274,6 +371,7 @@ def main():
     parser.add_argument("--host",    default="localhost",    help="LiteX server host.")
     parser.add_argument("--port",    default=1234, type=int, help="LiteX server port.")
     parser.add_argument("--csr-csv", default=None,           help="CSR configuration file.")
+    parser.add_argument("--serial",  default=None,           help="Direct UARTBone on this USB CDC port (no litex_server, robust reads), ex: /dev/ttyACM0.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("ident",  help="Print the SoC identifier.")
@@ -306,6 +404,16 @@ def main():
     p.add_argument("--file",      default=[], nargs=2, action="append", metavar=("FILE", "OFFSET"),
         help="Data file loaded at a main RAM offset.")
     p.add_argument("--no-verify", action="store_true", help="Don't read back/check the loaded data.")
+    p.add_argument("--args",      default=None,         help="Firmware arguments (host block).")
+
+    p = subparsers.add_parser("doom-bench", help="Doom timedemo benchmark (--with-doom build): fps, main RAM counters, profile.")
+    p.add_argument("firmware",                         help="Doom firmware (firmware/doom/doom.bin, doom.elf next to it for the profile).")
+    p.add_argument("--wad",       required=True,       help="Doom WAD file.")
+    p.add_argument("--demo",      default="demo1",     help="Demo lump.")
+    p.add_argument("--tics",      default=700, type=int, help="Gametics to run (0: whole demo).")
+    p.add_argument("--profile",   action="store_true", help="PC sampling profile.")
+    p.add_argument("--timeout",   default=1800, type=float, help="Timeout (s).")
+    p.add_argument("--no-run",    action="store_true", help="Only report the results of the last run (still in the main RAM).")
 
     p = subparsers.add_parser("sequence", help="Run a sequence (ex: \"press:start wait:2 capture:x.png\").")
     p.add_argument("sequence", help="Space-separated steps (press:a+b[@duration], buttons:a+b, wait:s, capture:file).")
@@ -316,7 +424,7 @@ def main():
         capture(args.filename, frames=args.frames, fps=args.fps, scale=args.scale, size=args.size)
         return
 
-    chromatic = Chromatic(host=args.host, port=args.port, csr_csv=args.csr_csv)
+    chromatic = Chromatic(host=args.host, port=args.port, csr_csv=args.csr_csv, serial=args.serial)
     try:
         if args.command == "ident":
             print(chromatic.ident())
@@ -351,8 +459,25 @@ def main():
                 files.append((DOOM_WAD_OFFSET, align_wad(_read_file(args.wad))))
             size = len(firmware) + sum(len(data) for _, data in files)
             t0   = time.time()
-            chromatic.run_firmware(firmware, files, verify=not args.no_verify)
+            chromatic.run_firmware(firmware, files, verify=not args.no_verify, args=args.args)
             print(f"{size//1024}KB loaded in {time.time() - t0:.1f}s, CPU started.")
+        elif args.command == "doom-bench":
+            fw_args = f"-timedemo {args.demo}" + (f" -benchtics {args.tics}" if args.tics else "") + \
+                (" -profile" if args.profile else "")
+            if not args.no_run:
+                chromatic.run_firmware(_read_file(args.firmware),
+                    [(DOOM_WAD_OFFSET, align_wad(_read_file(args.wad)))], verify=False, args=fw_args)
+                print(f"Running: {fw_args}")
+            t0 = time.time()
+            while True:
+                time.sleep(2)
+                results = chromatic.doom_results()
+                if results["bench_magic"] == HOST_BENCH_MAGIC:
+                    break
+                if time.time() - t0 > args.timeout:
+                    raise TimeoutError(f"No timedemo result after {args.timeout}s ({results['frames']} frames).")
+            histogram = chromatic.doom_profile(results) if args.profile else None
+            doom_bench_report(results, histogram, os.path.splitext(args.firmware)[0] + ".elf")
     finally:
         # Release the virtual buttons (also on errors/Ctrl-C).
         if args.command in ["press", "sequence"]:
