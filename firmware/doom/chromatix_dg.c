@@ -68,14 +68,8 @@ extern boolean timingdemo;
 
 void DG_DrawFrame(void)
 {
-	uint8_t line[HAL_LCD_WIDTH];
-
-	for (int i = 0; i < DISPLAY_LINES; i++) {
-		const uint8_t *src = I_VideoBuffer + display_src[i]*DOOM_WIDTH;
-		for (int x = 0; x < HAL_LCD_WIDTH; x++)
-			line[x] = src[2*x];
-		hal_lcd_line(display_top + i, line);
-	}
+	for (int i = 0; i < DISPLAY_LINES; i++)
+		hal_lcd_line_half(display_top + i, I_VideoBuffer + display_src[i]*DOOM_WIDTH);
 	hal_lcd_present();
 
 	hal_frame();

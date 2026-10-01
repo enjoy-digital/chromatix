@@ -118,6 +118,15 @@ void hal_lcd_line(int y, const uint8_t *pixels)
 		*dst++ = pixels[x] | pixels[x + 1] << 8 | pixels[x + 2] << 16 | (uint32_t)pixels[x + 3] << 24;
 }
 
+void hal_lcd_line_half(int y, const uint8_t *src)
+{
+	/* Even pixels of 2 source words (4 pixels each) -> 1 LCD word. */
+	const uint32_t     *s   = (const uint32_t *)src;
+	volatile uint32_t  *dst = &fb[y*HAL_LCD_WIDTH/4];
+	for (int x = 0; x < HAL_LCD_WIDTH/4; x++, s += 2)
+		*dst++ = (s[0] & 0xff) | ((s[0] >> 8) & 0xff00) | ((s[1] & 0xff) << 16) | ((s[1] << 8) & 0xff000000);
+}
+
 void hal_lcd_present(void)
 {
 #if !defined(FRAMEBUFFER_BASE) && defined(LCD_DUMP_FRAME)

@@ -149,6 +149,12 @@ void hal_lcd_line(int y, const uint8_t *pixels)
 	memcpy(lcd[y], pixels, HAL_LCD_WIDTH);
 }
 
+void hal_lcd_line_half(int y, const uint8_t *src)
+{
+	for (int x = 0; x < HAL_LCD_WIDTH; x++)
+		lcd[y][x] = src[2*x];
+}
+
 void hal_lcd_present(void)
 {
 	uint32_t *pixels;

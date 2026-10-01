@@ -32,6 +32,7 @@ void           hal_sleep_ms(uint32_t ms);
 uint32_t       hal_buttons(void);
 void           hal_lcd_palette(const uint16_t *rgb555);
 void           hal_lcd_line(int y, const uint8_t *pixels); /* HAL_LCD_WIDTH pixels. */
+void           hal_lcd_line_half(int y, const uint8_t *src); /* 2*HAL_LCD_WIDTH pixels (4-byte aligned), even ones shown. */
 void           hal_lcd_present(void);
 void           hal_audio_start(void (*fill)(void));         /* Fill called when samples are needed. */
 int            hal_audio_free(void);                        /* Samples that can be queued. */
