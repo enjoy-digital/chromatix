@@ -49,7 +49,7 @@ from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_re
 from chromatix.gateware.sysmon     import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
 from chromatix.gateware.adc        import BatteryADC
 from chromatix.gateware.terminal   import LCDTerminal
-from chromatix.gateware.framebuffer import LCDFramebuffer
+from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -478,6 +478,8 @@ class BaseSoC(SoCMini):
             with_vcart     = with_vcart,
             # Frame blending only for the Game Boy (CPU builds: PSRAM bandwidth for the CPU).
             with_frame_blend = not with_cpu,
+            # Doom: LCD frame buffers in the PSRAM (CPU line writes, read by the framebuffer reader).
+            with_lcd_framebuffer = with_doom,
             # CPU (sys = pClk) and PSRAM (xClk) clocks from the same PLL: synchronous bus bridge.
             bus_synchronous  = with_cpu,
             # Doom: 32-byte block reads + 4 block buffers (sequential L2 misses served from them).
@@ -517,7 +519,7 @@ class BaseSoC(SoCMini):
         # doing 8-byte line bursts (64-bit lines: the cache data memory is split per byte lane, 1
         # BSRAM each).
         if with_cpu:
-            l2_size  = 16*1024 if with_doom else 8*1024
+            l2_size  = 32*1024 if with_doom else 8*1024
             main_ram = wishbone.Interface(data_width=32, address_width=32, addressing="word")
             self.l2_cache = wishbone.Cache(
                 cachesize = l2_size//4,
@@ -572,13 +574,17 @@ class BaseSoC(SoCMini):
             if with_bios:
                 self.terminal = lcd_source = LCDTerminal()
             else:
-                self.framebuffer = lcd_source = LCDFramebuffer()
+                self.framebuffer = lcd_source = LCDPSRAMFramebuffer(memory.fb_write_port)
                 self.bus.add_slave(name="framebuffer", slave=lcd_source.bus, region=SoCRegion(
                     origin = 0x90000000,
                     size   = 0x10000,
                     mode   = "rw",
                     cached = False,
                 ))
+                self.comb += [
+                    lcd_source.fb_data.eq(h_wr_burst_q),
+                    memory.fb_base.eq(lcd_source.fb_base),
+                ]
 
             # Cartridge/IR/link idle (as when the Game Boy core doesn't access them).
             for pad in [cart.d, cart.rst, link.clk]:

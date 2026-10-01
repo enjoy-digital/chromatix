@@ -5,6 +5,9 @@
 //
 // ChromatiX --with-doom bring-up firmware: PSRAM main RAM benchmark (console), framebuffer test
 // patterns (color bars, gradient, buttons, animation, frames counter), PCM audio (A/B: tones).
+//
+// Framebuffer: LCDPSRAMFramebuffer (RGB555 frame buffers in the PSRAM, 8-bit lines + palette written
+// through the line buffers), drawn here from an 8-bit indexed screen in RAM.
 
 #include <stdio.h>
 #include <stdint.h>
@@ -20,7 +23,8 @@
 
 #define FB_WIDTH       160
 #define FB_HEIGHT      144
-#define FB_PALETTE     0x2000 /* Words. */
+#define FB_BUFFERS     3
+#define FB_PALETTE     0x400 /* Words. */
 #define PCM_RATE       11025
 #define PCM_DEPTH      512
 
@@ -29,7 +33,9 @@ enum {
 	BTN_COUNT
 };
 
-static volatile uint32_t *fb = (volatile uint32_t *)FRAMEBUFFER_BASE;
+static volatile uint32_t *fb_lines = (volatile uint32_t *)FRAMEBUFFER_BASE;
+static uint8_t            screen[FB_HEIGHT][FB_WIDTH] __attribute__((aligned(4)));
+static int                fb_back = 1;
 
 static void timer_init(void)
 {
@@ -109,21 +115,44 @@ static void palette_init(void)
 {
 	/* RGB332. */
 	for (int i = 0; i < 256; i++)
-		fb[FB_PALETTE + i] = rgb555(((i >> 5) & 7)*255/7, ((i >> 2) & 7)*255/7, (i & 3)*255/3);
+		fb_lines[FB_PALETTE + i] = rgb555(((i >> 5) & 7)*255/7, ((i >> 2) & 7)*255/7, (i & 3)*255/3);
+}
+
+static void fb_present(void)
+{
+	/* Screen -> back buffer (line by line, 2 line buffers), then displayed from the next frame. */
+	int displayed;
+	for (int y = 0; y < FB_HEIGHT; y++) {
+		int slot = y & 3; /* 4 line buffers, used in order. */
+		while ((framebuffer_status_read() >> CSR_FRAMEBUFFER_STATUS_BUSY_OFFSET) & (1 << slot));
+		for (int x = 0; x < FB_WIDTH/4; x++)
+			fb_lines[slot*FB_WIDTH/4 + x] = ((uint32_t *)screen[y])[x];
+		framebuffer_line_write(
+			(y       << CSR_FRAMEBUFFER_LINE_LINE_OFFSET)   |
+			(fb_back << CSR_FRAMEBUFFER_LINE_BUFFER_OFFSET) |
+			(slot    << CSR_FRAMEBUFFER_LINE_SLOT_OFFSET));
+	}
+	while ((framebuffer_status_read() >> CSR_FRAMEBUFFER_STATUS_BUSY_OFFSET) & 0xf);
+	framebuffer_control_write(fb_back << CSR_FRAMEBUFFER_CONTROL_FRONT_OFFSET);
+	displayed = (framebuffer_status_read() >> CSR_FRAMEBUFFER_STATUS_FRONT_OFFSET) & 0x3;
+	for (int b = 0; b < FB_BUFFERS; b++)
+		if (b != fb_back && b != displayed) {
+			fb_back = b;
+			break;
+		}
 }
 
 static void fb_rect(int x0, int y0, int w, int h, uint8_t color)
 {
-	volatile uint8_t *p = (volatile uint8_t *)fb;
 	for (int y = y0; y < y0 + h; y++)
 		for (int x = x0; x < x0 + w; x++)
-			p[y*FB_WIDTH + x] = color;
+			screen[y][x] = color;
 }
 
 static void fb_patterns(void)
 {
 	static const uint8_t bars[8] = {0xff, 0xfc, 0x1f, 0x1c, 0xe3, 0xe0, 0x03, 0x00};
-	volatile uint8_t *p = (volatile uint8_t *)fb;
+	uint8_t *p = &screen[0][0];
 
 	/* Color bars (white, yellow, cyan, green, magenta, red, blue, black). */
 	for (int i = 0; i < 8; i++)
@@ -190,6 +219,7 @@ int main(void)
 		pcm_fill((buttons & (1 << BTN_A)) ? 440 : (buttons & (1 << BTN_B)) ? 880 : 0);
 		if (frame != last_frame) {
 			fb_buttons(buttons, frame);
+			fb_present();
 			last_frame = frame;
 			fps_frames++;
 		}

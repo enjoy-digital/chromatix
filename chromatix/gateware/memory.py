@@ -811,8 +811,8 @@ class MemorySystem(LiteXModule):
     (QSPI_CLK rising/falling edges, created here).
     """
     def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64,
-        with_vcart=False, with_frame_blend=True, bus_synchronous=False, bus_fetch=1, bus_buffers=0,
-        psram_factory=None):
+        with_vcart=False, with_frame_blend=True, with_lcd_framebuffer=False, bus_synchronous=False,
+        bus_fetch=1, bus_buffers=0, psram_factory=None):
         self.reset       = Signal()
         self.menu_init   = Signal()
         self.bist_done   = Signal()
@@ -830,6 +830,7 @@ class MemorySystem(LiteXModule):
         self.h_vsync     = Signal()
         self.fb_data     = Signal(16)
         self.osd_data    = Signal(16)
+        self.fb_base     = Signal(23, reset=0x10000) # Framebuffer read address (latched at vsync).
 
         # # #
 
@@ -895,7 +896,7 @@ class MemorySystem(LiteXModule):
             h_valid_d.eq(self.h_valid),
         ]
         for name, n, base, (vsync, hsync, valid), data in [
-            ("fb_reader",  PORT_FBRD,  0x10000, (self.h_vsync, self.h_hsync, self.h_valid), self.fb_data),
+            ("fb_reader",  PORT_FBRD,  self.fb_base, (self.h_vsync, self.h_hsync, self.h_valid), self.fb_data),
             ("osd_reader", PORT_FBOSD, 0x00000, (h_vsync_d,    h_hsync_d,    h_valid_d),    self.osd_data),
         ]:
             port = ports[n]
@@ -904,8 +905,8 @@ class MemorySystem(LiteXModule):
                 port.burst_length.eq(320),
                 port.din.eq(0),
             ]
-            # Previous frame reads only with frame blending (free PSRAM bandwidth for a CPU otherwise).
-            ram_ready = self.bist_done if (with_frame_blend or n != PORT_FBRD) else 0
+            # Framebuffer reads only with frame blending or a CPU framebuffer (PSRAM bandwidth).
+            ram_ready = self.bist_done if (with_frame_blend or with_lcd_framebuffer or n != PORT_FBRD) else 0
             reader = LineReader(port, ctrl.dout, base, ram_ready)
             self.add_module(name=name, module=reader)
             self.comb += [
@@ -915,19 +916,22 @@ class MemorySystem(LiteXModule):
                 data.eq(reader.data),
             ]
 
-        # Game Boy Framebuffer Write ---------------------------------------------------------------
+        # Game Boy Framebuffer Write (frame blending) / CPU Framebuffer Write Port ----------------
         port = ports[PORT_FBWR]
-        self.gb_burst_write = gb_burst_write = GBBurstWrite(port)
-        self.comb += [
-            gb_burst_write.ram_ready.eq(self.bist_done if with_frame_blend else 0),
-            gb_burst_write.vsync.eq(self.h_vsync),
-            gb_burst_write.new_line.eq(self.gb_new_line),
-            gb_burst_write.address.eq(self.gb_address),
-            gb_burst_write.write.eq(self.gb_write),
-            gb_burst_write.data.eq(self.gb_data),
-            port.rnw.eq(0),
-            port.burst_length.eq(320),
-        ]
+        if with_frame_blend:
+            self.gb_burst_write = gb_burst_write = GBBurstWrite(port)
+            self.comb += [
+                gb_burst_write.ram_ready.eq(self.bist_done),
+                gb_burst_write.vsync.eq(self.h_vsync),
+                gb_burst_write.new_line.eq(self.gb_new_line),
+                gb_burst_write.address.eq(self.gb_address),
+                gb_burst_write.write.eq(self.gb_write),
+                gb_burst_write.data.eq(self.gb_data),
+                port.rnw.eq(0),
+                port.burst_length.eq(320),
+            ]
+        elif with_lcd_framebuffer:
+            self.fb_write_port = port # CPU framebuffer writes (LCDPSRAMFramebuffer).
 
         # Virtual Cartridge (optional): last port, highest priority --------------------------------
         if with_vcart:

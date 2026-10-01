@@ -3,8 +3,8 @@
 // Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 // SPDX-License-Identifier: BSD-2-Clause
 //
-// Doom port HAL, ChromatiX SoC (--with-doom): LCDFramebuffer, ButtonsCSR, PCMAudio, timer0, WAD
-// loaded by the host at the main RAM data area (scripts/chromatic.py run --wad).
+// Doom port HAL, ChromatiX SoC (--with-doom): LCDPSRAMFramebuffer, ButtonsCSR, PCMAudio, timer0,
+// WAD loaded by the host at the main RAM data area (scripts/chromatic.py run --wad).
 //
 // Without these peripherals (ex: litex_sim, to check the firmware): LCD in RAM (LCD_DUMP_FRAME:
 // frame dumped on the console, hex lines), no buttons/audio.
@@ -23,18 +23,13 @@
 #include "layout.h"
 #include "wad_align.h"
 
-#define FB_PALETTE  0x2000   /* Words. */
 #define PCM_DEPTH   512
 #define DATA_OFFSET LAYOUT_DATA_OFFSET
 
 static volatile struct host_block *host = (volatile struct host_block *)(MAIN_RAM_BASE + LAYOUT_HOST_OFFSET);
 
-#ifdef FRAMEBUFFER_BASE
-static volatile uint32_t *fb = (volatile uint32_t *)FRAMEBUFFER_BASE;
-#else
-static uint32_t fb[FB_PALETTE + 256];
-static uint32_t fb_frames;
-#endif
+static void fb_init(void);
+
 
 /* Time: timer0 1kHz interrupt (milliseconds counter), also sampling the interrupted PC (profiler). */
 static volatile uint32_t ms;
@@ -78,6 +73,7 @@ void hal_init(void)
 	host->frames      = 0;
 	host->prof_magic  = 0;
 	host->status      = 0;
+	fb_init();
 }
 
 int hal_poll(void)
@@ -105,35 +101,131 @@ uint32_t hal_buttons(void)
 #endif
 }
 
+/* LCD ------------------------------------------------------------------------------------------ */
+
+#ifdef FRAMEBUFFER_BASE
+
+/* LCDPSRAMFramebuffer: 3 RGB555 frame buffers in the PSRAM, 8-bit lines (+ palette) written
+   through 4 line buffers used in order (copied to the back buffer in the PSRAM), front buffer
+   changed at vsync. */
+#define FB_BUFFERS     3
+#define FB_SLOTS       4
+#define FB_LINE_WORDS  (HAL_LCD_WIDTH/4)
+#define FB_PALETTE     0x400 /* Words. */
+
+static volatile uint32_t *fb_lines = (volatile uint32_t *)FRAMEBUFFER_BASE;
+static int                fb_slot;
+static int                fb_back = 1;
+
+static volatile uint32_t *fb_line_begin(void)
+{
+	/* Wait for the line buffer to be copied. */
+	while ((framebuffer_status_read() >> CSR_FRAMEBUFFER_STATUS_BUSY_OFFSET) & (1 << fb_slot));
+	return &fb_lines[fb_slot*FB_LINE_WORDS];
+}
+
+static void fb_line_end(int y, int buffer)
+{
+	framebuffer_line_write(
+		(y       << CSR_FRAMEBUFFER_LINE_LINE_OFFSET)   |
+		(buffer  << CSR_FRAMEBUFFER_LINE_BUFFER_OFFSET) |
+		(fb_slot << CSR_FRAMEBUFFER_LINE_SLOT_OFFSET));
+	fb_slot = (fb_slot + 1) % FB_SLOTS;
+}
+
+static void fb_init(void)
+{
+	/* All buffers black (the borders are written once): palette entry 0 black. */
+	fb_lines[FB_PALETTE] = 0;
+	for (int b = 0; b < FB_BUFFERS; b++)
+		for (int y = 0; y < HAL_LCD_HEIGHT; y++) {
+			volatile uint32_t *dst = fb_line_begin();
+			for (int x = 0; x < FB_LINE_WORDS; x++)
+				dst[x] = 0;
+			fb_line_end(y, b);
+		}
+}
+
 void hal_lcd_palette(const uint16_t *rgb555)
 {
+	/* Lines copied after this use the new palette. */
 	for (int i = 0; i < 256; i++)
-		fb[FB_PALETTE + i] = rgb555[i];
+		fb_lines[FB_PALETTE + i] = rgb555[i];
 }
 
 void hal_lcd_line(int y, const uint8_t *pixels)
 {
-	volatile uint32_t *dst = &fb[y*HAL_LCD_WIDTH/4];
+	volatile uint32_t *dst = fb_line_begin();
+	for (int x = 0; x < HAL_LCD_WIDTH; x += 4)
+		*dst++ = pixels[x] | pixels[x + 1] << 8 | pixels[x + 2] << 16 | (uint32_t)pixels[x + 3] << 24;
+	fb_line_end(y, fb_back);
+}
+
+void hal_lcd_line_half(int y, const uint8_t *src)
+{
+	/* Even pixels of 2 source words (4 pixels each) -> 1 LCD word. */
+	const uint32_t    *s   = (const uint32_t *)src;
+	volatile uint32_t *dst = fb_line_begin();
+	for (int x = 0; x < FB_LINE_WORDS; x++, s += 2)
+		*dst++ = (s[0] & 0xff) | ((s[0] >> 8) & 0xff00) | ((s[1] & 0xff) << 16) | ((s[1] << 8) & 0xff000000);
+	fb_line_end(y, fb_back);
+}
+
+void hal_lcd_present(void)
+{
+	int displayed;
+
+	/* Back buffer complete: displayed from the next frame. */
+	while ((framebuffer_status_read() >> CSR_FRAMEBUFFER_STATUS_BUSY_OFFSET) & ((1 << FB_SLOTS) - 1));
+	framebuffer_control_write(fb_back << CSR_FRAMEBUFFER_CONTROL_FRONT_OFFSET);
+	/* Next back buffer: neither the displayed one nor the requested one (no wait). */
+	displayed = (framebuffer_status_read() >> CSR_FRAMEBUFFER_STATUS_FRONT_OFFSET) & 0x3;
+	for (int b = 0; b < FB_BUFFERS; b++)
+		if (b != fb_back && b != displayed) {
+			fb_back = b;
+			break;
+		}
+}
+
+#else
+
+/* LCD in RAM (8-bit + palette). */
+static uint32_t fb[HAL_LCD_WIDTH*HAL_LCD_HEIGHT/4];
+static uint16_t fb_palette[256];
+static uint32_t fb_frames;
+
+static void fb_init(void)
+{
+}
+
+void hal_lcd_palette(const uint16_t *rgb555)
+{
+	for (int i = 0; i < 256; i++)
+		fb_palette[i] = rgb555[i];
+}
+
+void hal_lcd_line(int y, const uint8_t *pixels)
+{
+	uint32_t *dst = &fb[y*HAL_LCD_WIDTH/4];
 	for (int x = 0; x < HAL_LCD_WIDTH; x += 4)
 		*dst++ = pixels[x] | pixels[x + 1] << 8 | pixels[x + 2] << 16 | (uint32_t)pixels[x + 3] << 24;
 }
 
 void hal_lcd_line_half(int y, const uint8_t *src)
 {
-	/* Even pixels of 2 source words (4 pixels each) -> 1 LCD word. */
-	const uint32_t     *s   = (const uint32_t *)src;
-	volatile uint32_t  *dst = &fb[y*HAL_LCD_WIDTH/4];
+	const uint32_t *s   = (const uint32_t *)src;
+	uint32_t       *dst = &fb[y*HAL_LCD_WIDTH/4];
 	for (int x = 0; x < HAL_LCD_WIDTH/4; x++, s += 2)
 		*dst++ = (s[0] & 0xff) | ((s[0] >> 8) & 0xff00) | ((s[1] & 0xff) << 16) | ((s[1] << 8) & 0xff000000);
 }
 
 void hal_lcd_present(void)
 {
-#if !defined(FRAMEBUFFER_BASE) && defined(LCD_DUMP_FRAME)
+#ifdef LCD_DUMP_FRAME
 	if (++fb_frames == LCD_DUMP_FRAME) {
 		printf("LCD palette:");
 		for (int i = 0; i < 256; i++)
-			printf(" %04lx", (unsigned long)fb[FB_PALETTE + i]);
+			printf(" %04x", fb_palette[i]);
 		printf("\n");
 		for (int y = 0; y < HAL_LCD_HEIGHT; y++) {
 			printf("LCD %03d:", y);
@@ -144,6 +236,8 @@ void hal_lcd_present(void)
 	}
 #endif
 }
+
+#endif
 
 #ifdef CSR_PCM_BASE
 static void (*audio_fill)(void);
