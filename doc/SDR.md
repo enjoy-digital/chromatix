@@ -27,9 +27,10 @@ a wideband SDR (no broadcast FM/AM). Captures are bursts (low duty cycle), not c
 
 - **Protocol** (2 Mbaud through the bridge, DTR/RTS released: they drive the ESP32 EN/IO0):
   `CAPS SPEC SPECN SPECCAPS SPECSTAT DCT UARTBAUD RXLIMITS SERIALLEASE TUNEEXT RX40 RX16 LPFANA GAIN
-  HWAGC IQ8`, gain 0-72, rates 80/40/16 MS/s, 8/10-bit I/Q, tuning 100-6000 MHz (RF front end
-  for 2.4 GHz), snapshot spectra 256-2048 bins (`SPECINFO?`). `CAP16 4096 1` (40 MS/s): `DATA 4096
-  <crc> 104` (104us of capture), 8KB payload.
+  HWAGC IQ8`, gain 0-72, rates 80/40/16 MS/s, 8/10-bit I/Q, tuning 100-6000 MHz accepted (but
+  only the Wi-Fi channel frequencies really tune, see the verification section), snapshot spectra
+  256-2048 bins (`SPECINFO?`). `CAP16 4096 1` (40 MS/s): `DATA 4096 <crc> 104` (104us of
+  capture), 8KB payload.
 - **Reception** through the console's ESP32 antenna: the nearby access points are all on Wi-Fi
   channel 1 (2412 MHz). Over 60 captures, channel 1 shows ~10 dB more max-hold/average energy across
   its 20 MHz than channel 11 (no access point), and Bluetooth-like bursts around 2398 MHz.
@@ -78,10 +79,11 @@ ESP-SDR UART is limited to 2 Mbaud (`BAUD 1000000|2000000`), faster needs the ES
   peak frequency/level, update rate), spectrum (60dB, 10dB/10MHz grid, peak hold), Wi-Fi channel
   numbers (20MHz bands of channels 1/6/11/14), BLE advertising channels 37/38/39, waterfall (heat map
   scaled from the noise floor: median of the center half, ESP32 RX filter passband).
-- **Controls**: Left/Right: tune (5MHz), Up/Down: reference level (5dB), A: span (16/40MHz), B: gain
-  (AGC, manual 20-70), Start: peak hold, Select: auto reference level, Menu: RSSI tone (PCM audio,
-  pitch following the peak level above the noise floor in the center quarter of the span: tune to
-  an emitter and hunt it down; measured over the USB audio: 520-1120Hz following Wi-Fi bursts).
+- **Controls**: Left/Right: tune (Wi-Fi channels), Up/Down: reference level (5dB), A: span
+  (16/40MHz), B: gain (AGC, manual 20-70), Start: peak hold, Select: auto reference level, Menu:
+  RSSI tone (PCM audio, pitch following the peak level above the noise floor in the center
+  quarter of the span: tune to an emitter and hunt it down; measured over the USB audio:
+  520-1120Hz following Wi-Fi bursts).
 - **Measured**: 9.5 updates/s (capture 67ms, DSP 30ms, draw 6ms, present 2ms), no capture errors
   after the startup resync. 80MS/s gives no wider view (the ESP32 RX filter is ~40MHz wide, its CAPS
   only list RX40/RX16), so the spans are 16 and 40MHz.
@@ -131,11 +133,44 @@ The console relays the ESP-SDR protocol to the PC at the USB rate:
 Host spectrum (400 relayed captures, `chromatic_sdr.py spectrum --freq 2412`): Wi-Fi channel 1
 (20MHz, max hold) and the console showing the same captures (`USB`).
 
+## Verification: tuning, spectrum orientation, console vs host
+
+Reference signals: the console 24MHz crystal harmonics (2400/2424/2448/2472/2496MHz, narrow lines
+seen at every tuning) and the Wi-Fi access point on channel 1.
+
+- **Inverted spectrum**: with ESP-SDR's I/Q order, the crystal harmonics showed at 2*LO - f (ex:
+  2424MHz at 2420/2430/2440MHz for LO = 2422/2427/2432MHz). The ESP32 spectrum is inverted: the
+  samples are conjugated by the console DSP, SoapyChromatic and `chromatic_sdr.py` (the ESP-SDR
+  protocol/payload is unchanged).
+- **Tuning range**: ESP-SDR accepts 100-6000MHz, but on the original ESP32 only the Wi-Fi channel
+  frequencies (2412-2472MHz in 5MHz steps, 2484MHz) move the LO: out of channel requests
+  (calibration on 2412MHz then direct PLL offset) leave it in place, except a few MHz around
+  2412MHz (comb positions unchanged from 2405MHz down to 2300MHz, from 2490MHz up to 2600MHz, and
+  for most frequencies between channels). ESP-SDR documents its extended range as not RF-validated.
+  The console steps through the channels; SoapyChromatic tunes the ESP32 to the nearest channel and
+  applies the remaining offset with a digital mixer (range reported: 2410-2486MHz).
+- **Checks after the fixes**:
+  - Host (SoapyChromatic) at 2410/2412/2414.7/2425.3/2437/2439.9/2451/2463.6/2478/2484/2486MHz:
+    every crystal harmonic in the span at its true frequency (2400.02, 2424.00, 2448.00, 2472.00,
+    2496.00MHz).
+  - Console standalone display (UVC frames, spectrum trace read per column) at 2412/2437/2462MHz:
+    harmonics at 2400.1/2424.1, 2424.1/2448.1, 2448.1/2472.1MHz (0.25MHz columns).
+  - Console display of relayed captures vs host computation of the console DSP on the same
+    captures: same lines within one column, trace correlation 0.82.
+  - Access point bursts (waterfall/burst spectra) at LO 2422MHz: 2414.8MHz center on the console,
+    2415.1MHz on the host, 2414.5MHz through the host NCO (LO 2419.5MHz, ESP32 on 2417MHz): same
+    absolute frequency, on the AP side (an inverted spectrum would show them at ~2429MHz).
+  - gqrx 2.15.8 (Xvfb, remote control) at 2436MHz (hardware frequency 2433.12MHz): lines at
+    2424.0/2424.3, 2441.1 and 2448.0MHz on its axis.
+
 ## Next steps
 
-1. **Throughput**: per capture, the ESP32 fills/checks its 64KB capture memory and packs it before
+1. **USB link**: one 512-byte USB packet was lost once in a capture payload in ~13000 relayed
+   captures (5000-capture stress test with a slow consumer: no error); the clients resynchronize
+   and drop the capture. Root cause (USB IN handshake/host side) still to be found.
+2. **Throughput**: per capture, the ESP32 fills/checks its 64KB capture memory and packs it before
    the QSPI writes; continuous ring captures (ESP-SDR ring mode on other chips) would raise the
    duty cycle.
-2. **ESP32 duties**: the SDR ESP32 firmware has no menu/OSD/power management: merging the
+3. **ESP32 duties**: the SDR ESP32 firmware has no menu/OSD/power management: merging the
    transport into the ModRetro MCU firmware (GPL) would keep them (SDR as a mode).
-3. **App extras**: channel occupancy view, recording to the PC from the console buttons.
+4. **App extras**: channel occupancy view, recording to the PC from the console buttons.
