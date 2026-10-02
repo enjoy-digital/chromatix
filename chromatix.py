@@ -734,7 +734,8 @@ class BaseSoC(SoCMini):
             else:
                 # Applications: CDC stream switched to an application UART + DMA (USB link, ex: I/Q
                 # streaming), back to the UARTBone with a host 1200 baud touch.
-                self.usb_link = usb_link = CDCLink(bus_address_width=self.bus.address_width)
+                self.usb_link = usb_link = CDCLink(bus_address_width=self.bus.address_width,
+                    release_cycles=int(sys_clk_freq))
                 self.bus.add_master(name="usb_link_dma", master=usb_link.bus)
                 self.comb += [
                     self.cdc_rx.source.connect(usb_link.source),
@@ -770,10 +771,13 @@ class BaseSoC(SoCMini):
                 self.cdc_tx.source.connect(usb_dev.cdc_sink),
             ]
         if with_app:
-            # Host 1200 baud touch (CDC line coding).
+            # Host 1200 baud touch (CDC line coding), DTR (debug session end).
             usb_touch = Signal()
             self.sync.phy += usb_touch.eq(usb_dev.ctrl_uart.dte_rate == 1200)
-            self.specials += MultiReg(usb_touch, self.usb_link.touch)
+            self.specials += [
+                MultiReg(usb_touch,        self.usb_link.touch),
+                MultiReg(usb_dev.uart_dtr, self.usb_link.dtr),
+            ]
         self.comb += [
             usb_dev.reset.eq(usb_rst),
             esp32_ctrl.usb_locked.eq(usb_dev.locked),

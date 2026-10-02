@@ -110,7 +110,9 @@ The console relays the ESP-SDR protocol to the PC at the USB rate:
 - **Gateware** (`chromatix/gateware/cdc_link.py`, `--with-app`): the USB CDC byte stream is
   switched by the application from the UARTBone debug bridge to an application UART (commands,
   replies) + a DMA reader (bulk data from the main RAM). A host "1200 baud touch" switches it back
-  to the debug bridge (`scripts/chromatic.py` does it). Build: logic 75%, BSRAM 50/56, timing met.
+  to the debug bridge (`scripts/chromatic.py` does it) for the debug session: back to the
+  application 1s after the port is closed (DTR released). Build: logic 74%, BSRAM 50/56, timing
+  met.
 - **Firmware** (`firmware/sdr`): host command lines forwarded to the ESP32 (`BAUD`/`QSPI` answered
   locally), replies relayed; after a capture `DATA` header, the payload (already in the main RAM
   through QSPI) is sent by DMA. The relayed captures are displayed (header: `USB`), local captures

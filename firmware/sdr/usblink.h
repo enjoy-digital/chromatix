@@ -5,7 +5,8 @@
 //
 // USB link (--with-app CDCLink): the USB CDC byte stream switched from the debug bridge to the
 // application, bytes through a UART, bulk data from the main RAM by DMA. The host switches back to
-// the debug bridge with a 1200 baud touch (open/close the port at 1200 baud).
+// the debug bridge with a 1200 baud touch (open/close the port at 1200 baud) for a debug session
+// (until the port is closed: DTR released for 1s).
 
 #ifndef USBLINK_H
 #define USBLINK_H
@@ -14,7 +15,7 @@
 
 /* Select the USB link (returns -1 if the gateware has no USB link). */
 int  usblink_init(void);
-/* Host 1200 baud touch since usblink_init (link back to the debug bridge). */
+/* Host debug session (link to the debug bridge). */
 int  usblink_touched(void);
 /* Received byte or -1. */
 int  usblink_getc(void);

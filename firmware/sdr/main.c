@@ -555,9 +555,8 @@ int main(void)
 	uint32_t frames = 0, fps_frames = 0, fps_t0 = esp32sdr_ms();
 	for (;;) {
 		/* USB host relay. */
-		if (usb && usblink_touched())
-			usb = 0; /* Host back to the debug bridge. */
-		if (usb) {
+		/* Relay paused during host debug sessions (1200 baud touch, until the port is closed). */
+		if (usb && !usblink_touched()) {
 			relay_poll();
 			int active = host_len || relay_captures ||
 				(esp32sdr_ms() - host_last_ms < HOST_TIMEOUT_MS && host_last_ms);

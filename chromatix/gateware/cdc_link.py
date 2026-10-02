@@ -33,18 +33,21 @@ class CDCLink(LiteXModule):
     writing new UART bytes).
 
     The host switches back to the debug bridge with a "1200 baud touch" (`touch`: CDC line coding
-    set to 1200 baud, rising edge), so a stuck application can always be replaced.
+    set to 1200 baud, rising edge), so a stuck application can always be replaced. The debug session
+    lasts while the host keeps the port open (`dtr`: the host asserts DTR while the port is open);
+    the stream goes back to the application `release_cycles` after DTR is released.
     """
     def __init__(self, uart_fifo_depth=64, dma_fifo_depth=64, bus_data_width=32,
-        bus_address_width=32):
+        bus_address_width=32, release_cycles=int(67e6)):
         # CDC byte stream (sys).
         self.source       = stream.Endpoint([("data", 8)]) # Host -> device.
         self.sink         = stream.Endpoint([("data", 8)]) # Device -> host.
         # Debug bridge PHY (UARTBone).
         self.debug_source = stream.Endpoint([("data", 8)])
         self.debug_sink   = stream.Endpoint([("data", 8)])
-        # Host "1200 baud touch" (level, sys).
+        # Host "1200 baud touch" (level, sys), DTR (sys).
         self.touch        = Signal()
+        self.dtr          = Signal()
         # DMA bus (master).
         self.bus          = wishbone.Interface(data_width=bus_data_width,
             address_width=bus_address_width, addressing="word")
@@ -57,7 +60,7 @@ class CDCLink(LiteXModule):
             CSRField("dma_idle", size=1, offset=0,
                 description="DMA done (or disabled) and its data sent."),
             CSRField("touch",    size=1, offset=1,
-                description="Host 1200 baud touch since the last control write."),
+                description="Debug session (host 1200 baud touch, until DTR released)."),
         ])
 
         # # #
@@ -79,9 +82,15 @@ class CDCLink(LiteXModule):
         app       = Signal()
         touch_d   = Signal()
         touched   = Signal()
+        release   = Signal(max=release_cycles + 1)
         self.sync += [
             touch_d.eq(self.touch),
-            If(self.control.re,
+            If(self.dtr | ~touched,
+                release.eq(0),
+            ).Elif(release != release_cycles,
+                release.eq(release + 1),
+            ),
+            If(self.control.re | (release == release_cycles),
                 touched.eq(0),
             ).Elif(self.touch & ~touch_d,
                 touched.eq(1),

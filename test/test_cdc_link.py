@@ -18,7 +18,7 @@ MEM = [0x03020100 + 0x04040404*i for i in range(16)] # Bytes 0, 1, 2... in littl
 
 class DUT(Module):
     def __init__(self):
-        self.submodules.link = CDCLink()
+        self.submodules.link = CDCLink(release_cycles=16)
         self.submodules.mem  = wishbone.SRAM(4*len(MEM), init=MEM)
         self.comb += self.link.bus.connect(self.mem.bus)
 
@@ -83,7 +83,8 @@ def test_cdc_link():
         assert (yield link.status.fields.dma_idle) == 1
         yield from link.dma._enable.write(0)
 
-        # Host 1200 baud touch: back to the debug bridge.
+        # Host 1200 baud touch: back to the debug bridge (debug session: DTR asserted).
+        yield link.dtr.eq(1)
         yield link.touch.eq(1)
         yield
         yield
@@ -92,7 +93,23 @@ def test_cdc_link():
         for _ in range(4):
             yield
         assert debug == [0x11, 0x22, 0x66]
-        # Touch level held: the application can select the link again.
+        # Debug session ends (DTR released): back to the application.
+        yield link.dtr.eq(0)
+        for _ in range(20):
+            yield
+        assert (yield link.status.fields.touch) == 0
+        yield from send(link.source, [0x88])
+        for _ in range(4):
+            yield
+        assert debug == [0x11, 0x22, 0x66]
+        # New touch, then the application selects the link again.
+        yield link.touch.eq(0)
+        yield
+        yield link.dtr.eq(1)
+        yield link.touch.eq(1)
+        yield
+        yield
+        assert (yield link.status.fields.touch) == 1
         yield from link.control.write(1)
         yield
         assert (yield link.status.fields.touch) == 0

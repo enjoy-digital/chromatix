@@ -68,7 +68,8 @@ STATUS_FIELDS = ["bist_done", "bist_failed", "lcd_init_done", "menu_disabled", "
 def usb_touch(port):
     """
     1200 baud touch: USB CDC stream back to the debug bridge (UARTBone) when an application uses it
-    (--with-app USB link, ex: firmware/sdr ESP-SDR relay). Two line codings to get a change.
+    (--with-app USB link, ex: firmware/sdr ESP-SDR relay), until the port is closed (DTR released).
+    Two line codings to get a change.
     """
     for baudrate in [9600, 1200]:
         s = serial.Serial()
