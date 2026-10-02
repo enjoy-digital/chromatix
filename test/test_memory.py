@@ -457,15 +457,16 @@ def test_psram_port_adapter():
 # PSRAM Wishbone -----------------------------------------------------------------------------------
 
 class PSRAMWishboneDUT(Module):
-    def __init__(self, base, data_width):
+    def __init__(self, base, data_width, synchronous=False, fetch=1, buffers=0):
         self.submodules.ctrl    = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=2))
         self.submodules.psram   = psram = ClockDomainsRenamer("xclk")(NativePSRAM())
         self.submodules.adapter = ClockDomainsRenamer("xclk")(PSRAMPortAdapter(ctrl, psram))
-        self.submodules.bridge  = bridge = PSRAMWishbone(ctrl.ports[1], ctrl.dout, base=base, data_width=data_width)
+        self.submodules.bridge  = bridge = PSRAMWishbone(ctrl.ports[1], ctrl.dout, base=base,
+            data_width=data_width, synchronous=synchronous, fetch=fetch, buffers=buffers)
 
 
-def run_psram_wishbone(data_width, lines, base=0x400000):
-    dut = PSRAMWishboneDUT(base, data_width=data_width)
+def run_psram_wishbone(data_width, lines, base=0x400000, synchronous=False):
+    dut = PSRAMWishboneDUT(base, data_width=data_width, synchronous=synchronous)
     res = {}
 
     def main():
@@ -476,8 +477,9 @@ def run_psram_wishbone(data_width, lines, base=0x400000):
         for adr in reversed(list(lines)):
             res["read"][adr] = (yield from bus.read(adr))
 
+    # Synchronous: sys = xClk/2 from the same PLL (as pClk/xClk), else unrelated clocks.
     run_simulation(dut, {"sys": main(), "xclk": dut.psram.generator(gap=1)},
-        clocks={"sys": 80, "xclk": 10})
+        clocks={"sys": 20 if synchronous else 80, "xclk": 10})
     assert res["read"] == lines
     assert dut.psram.errors == []
     return dut
@@ -498,6 +500,11 @@ def test_psram_wishbone():
 def test_psram_wishbone_64():
     """64-bit Wishbone lines (as used behind the SoC L2 cache)."""
     run_psram_wishbone(64, {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d})
+
+def test_psram_wishbone_64_synchronous():
+    """64-bit Wishbone lines, synchronous bridge (sys = xClk/2, CPU builds)."""
+    lines = {0x000: 0x0011223344556677, 0x001: 0x8899aabbccddeeff, 0x7ff: 0xdeadbeefcafef00d}
+    run_psram_wishbone(64, lines, synchronous=True)
 
 # Memory System ------------------------------------------------------------------------------------
 
@@ -530,3 +537,81 @@ def test_memory_system_bist(monkeypatch):
     assert dut.psram.errors == []
     # First access: 512-word write burst at 0, then bursts every 512*512 + 1 words.
     assert dut.psram.accesses[:2] == [(1, 0, 512), (1, 2*(512*512 + 1), 512)]
+
+# Memory Counters ----------------------------------------------------------------------------------
+
+def test_memory_counters():
+    """Accesses/requests/busy cycles counting, longest request, clear."""
+    from chromatix.gateware.memory import MemoryCounters
+    access  = Signal()
+    request = Signal()
+    pending = Signal()
+    dut     = MemoryCounters(access, request, pending)
+
+    def gen():
+        for i in range(3):
+            yield access.eq(1)
+            yield request.eq(1)
+            yield pending.eq(1)
+            yield
+            yield access.eq(0)
+            yield request.eq(0)
+            for _ in range(4 + i):
+                yield
+            yield pending.eq(0)
+            yield
+        yield
+        assert (yield dut.accesses.status) == 3
+        assert (yield dut.requests.status) == 3
+        assert (yield dut.busy.status) == (5 + 6 + 7)
+        assert (yield dut.latency.status) == 7
+        yield from dut.control.write(1)
+        yield
+        assert (yield dut.requests.status) == 0
+
+    run_simulation(dut, gen())
+
+def test_psram_wishbone_fetch_buffers():
+    """Block fetch (4 x 64-bit) + 2 buffers: random reads/writes checked against a reference, buffer
+    hits (fewer PSRAM requests than reads), writes updating the buffered copy."""
+    import random
+    random.seed(2)
+    base = 0x080000
+    dut  = PSRAMWishboneDUT(base, data_width=64, synchronous=True, fetch=4, buffers=2)
+    ref  = {}
+    res  = {"errors": [], "requests": 0, "reads": 0}
+
+    @passive
+    def count():
+        while True:
+            res["requests"] += (yield dut.bridge.request)
+            yield
+
+    def main():
+        bus = dut.bridge.bus
+        # Initial content.
+        for adr in range(64):
+            ref[adr] = random.getrandbits(64)
+            yield from bus.write(adr, ref[adr])
+        res["requests"] = 0
+        # Sequential reads (hits after each block fetch).
+        for adr in range(64):
+            v = yield from bus.read(adr)
+            res["reads"] += 1
+            if v != ref[adr]: res["errors"].append(("seq", adr, v, ref[adr]))
+        res["seq_requests"] = res["requests"]
+        # Random reads/writes (buffered copies updated by the writes).
+        for _ in range(300):
+            adr = random.randrange(64)
+            if random.random() < 0.3:
+                ref[adr] = random.getrandbits(64)
+                yield from bus.write(adr, ref[adr])
+            else:
+                v = yield from bus.read(adr)
+                if v != ref[adr]: res["errors"].append(("rnd", adr, v, ref[adr]))
+
+    run_simulation(dut, {"sys": [main(), count()], "xclk": dut.psram.generator(gap=1)},
+        clocks={"sys": 10, "xclk": 10})
+    assert res["errors"] == []
+    assert res["seq_requests"] == 64//4 # One PSRAM read per 4-word block.
+

@@ -24,10 +24,10 @@ class CRG(LiteXModule):
 
     Parameters:
     - platform : GowinPlatform instance providing devicename, device, and clk_fpga pad.
-    - sys_clk  : Clock domain aliased by "sys" ("gclk" or "pclk").
+    - sys_clk  : Clock domain aliased by "sys" ("gclk", "pclk" or "xclk").
     """
     def __init__(self, platform, sys_clk="gclk"):
-        assert sys_clk in ["gclk", "pclk"]
+        assert sys_clk in ["gclk", "pclk", "xclk"]
         self.cd_fclk = ClockDomain("fclk", reset_less=True)
         self.cd_pclk = ClockDomain("pclk", reset_less=True)
         self.cd_hclk = ClockDomain("hclk", reset_less=True)
@@ -52,7 +52,7 @@ class CRG(LiteXModule):
         pll.create_clkout(self.cd_gclk, 33.55432e6 / 4, with_reset=False)  # ~8.39 MHz   (CLKOUT3).
         pll.create_clkout(self.cd_xclk, 33.55432e6 * 2, with_reset=False)  # ~67.11 MHz  (CLKOUT4).
 
-        # Sys: alias of gClk/pClk.
+        # Sys: alias of gClk/pClk/xClk.
         self.comb += [
             self.cd_sys.clk.eq(getattr(self, f"cd_{sys_clk}").clk),
             self.cd_sys.rst.eq(~pll.locked),
