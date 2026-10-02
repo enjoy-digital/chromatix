@@ -193,6 +193,44 @@ disassembling `libphy.a`. `firmware/esp32-sdr` (`chromatic_tune.c`) uses it:
   2446.5MHz (the app warns: outside its verified ranges). An external front-end (cartridge slot)
   would be needed.
 
+## Tuning beyond the frequency table: 2150-2880MHz (VCO range) and 80MS/s wide view
+
+All the ways tried to move the radio further (ESP32 fork debug commands: analog registers
+`I2CR/I2CW/I2CD`, registers `REGR/REGW`, PLL table `FTAB`, raw calibration `TUNESW`; references:
+console crystal harmonics, verified with 2-4 lines at 80MS/s against wrong-LO hypotheses):
+
+- **PLL frequency table** (85 entries, 2400-2484MHz: the table address is `index*3` on 8 bits):
+  word 0 = VCO capacitor bank code (analog block 0x62 reg 1), word 1 = divider (LO = 480MHz *
+  (2 + word/2^20): any frequency from 960MHz up can be encoded), word 2 = front-end tuning. A
+  borrowed entry loaded with the target divider and a capacitor code close to the result (fit of
+  the calibration results: +-1.6) makes the PHY calibration lock **from 2150 to 2880MHz**
+  (repeatable; the capacitor code reaches 1 at 2880MHz). This is now the fork's default tuning
+  (`TUNEMODE 1`, `RANGEK 2150000 2880000`): LO within -0.8..-2.0kHz (the crystals difference)
+  over 2150.5-2851.4MHz. The 2640MHz line, like 2400MHz (both 40MHz harmonics too), is not a clean
+  reference (-20kHz vs -1.4kHz on 2616MHz at the same LO).
+- **Below 2150MHz / above 2880MHz**: the calibration fails from every starting code (it ends 11
+  codes above its start: no lock found); forcing the capacitor register doesn't lock either (the
+  calibration sequence is needed). Register sweeps (block 0x62 regs 2/3/4/7/9/10, bit flips):
+  only reg 7 bit 7 (0xc0 -> 0x40, a VCO band bit?) locked 2100MHz once, not reproducible.
+- **Wider view without moving the LO**: the ESP32 RX filter opens (`LPF 0`/`BANDWIDTH 67`): at
+  80MS/s, comb lines are seen at -34/+38MHz (22dB): **+-38MHz around the LO, ~2112-2918MHz
+  observable**.
+  New 80MHz span on the console (A), 80MS/s in SoapyChromatic/`chromatic_sdr.py` (filter opened).
+- **Front-end**: the noise floor is flat and the comb lines 20-38dB above it over the whole range
+  (the console's own harmonics: absolute sensitivity off 2.4GHz is lower, antenna/LNA matched for
+  2.4GHz). **Real off-band signals received**: mobile band 1 downlink carriers (sharp blocks up
+  to 2170MHz, at 2150MHz) and an LTE band 7 20MHz downlink carrier at 2680MHz (18MHz occupied,
+  2671.0-2689.2MHz at LO 2655/2680/2700MHz and 40/80MS/s: an external signal, not an image).
+- **Not possible**: 1090MHz (or GPS 1575MHz) directly; a 2nd order response (2*f_RF = f_LO) would
+  put 1090MHz at LO 2180MHz, now in range, but the LNA product of an ADS-B signal is far below the
+  noise; LO harmonics (3*f_LO = 6.45-8.64GHz) are not usable either.
+
+<img src="images/sdr_host_2150_80msps.png" width="800" alt="Mobile band 1 downlink carriers at 2150MHz">
+
+<img src="images/sdr_host_2655_80msps.png" width="800" alt="LTE band 7 20MHz downlink carrier at 2680MHz">
+
+<img src="images/sdr_console_lte2680.png" width="320" alt="Console: LTE carrier at 2680MHz"> <img src="images/sdr_console_umts2150.png" width="320" alt="Console: band 1 carriers at 2152.5MHz">
+
 ## Next steps
 
 1. **USB link**: one 512-byte USB packet was lost once in a capture payload in ~13000 relayed
