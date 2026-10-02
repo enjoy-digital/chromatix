@@ -31,7 +31,7 @@ if [ ! -d "$SRC" ]; then
     git -C "$SRC" apply "$HERE/esp-sdr-chromatic.patch"
 fi
 mkdir -p "$SRC/main/chromatic"
-cp "$HERE"/chromatic_qspi.[ch] "$SRC/main/chromatic/"
+cp "$HERE"/chromatic_*.[ch] "$SRC/main/chromatic/"
 
 # Build.
 cd "$SRC"

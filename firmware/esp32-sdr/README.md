@@ -12,7 +12,19 @@ standard bitstream).
   - `QSPI <address>`: captures (`CAP16`/`CAP20`/`CAP`) payloads written to the PSRAM at `address`
     (1KB aligned, the last transfer padded to 1KB), only the `DATA` header on the UART; `0`: UART.
   - `QSPI?`: current address.
-- `esp-sdr-chromatic.patch` (GPL-3.0, ESP-SDR): hooks in the ESP32 receiver (`QSPI` capability).
+- `chromatic_tune.c/h` (BSD-2-Clause): tuning. ESP-SDR tunes out of channel frequencies by
+  calibrating the RF PLL on 2412MHz then writing the PLL divider: the VCO stays calibrated for
+  2412MHz and the LO doesn't move (measured on the Chromatic). The PHY software channel calibration
+  (`set_chan_freq_sw_start`, also used by the Bluetooth PHY) is used instead on the requested MHz
+  (2400-2484MHz), with a sub-MHz offset, and from the 2400/2484MHz calibrations with a measured
+  offset correction beyond: **2386-2504MHz in 1kHz steps, LO within +-2.6kHz** (console crystal
+  harmonics as references). Commands:
+  - `FREQK <kHz>` (and `FREQ <MHz>`), `RANGEK?` (`RANGEK 2386000 2504000`).
+  - `TUNEMODE <0|1>`/`TUNEMODE?`: 0: ESP-SDR tuning, 1: Chromatic tuning (default).
+  - `TUNESW <index> <offset>`: experiments (raw calibration: index = MHz - 2400, offset in 1/1024
+    MHz).
+- `esp-sdr-chromatic.patch` (GPL-3.0, ESP-SDR): hooks in the ESP32 receiver (`QSPI CTUNE FREQK`
+  capabilities).
 - `build.sh`: fetches ESP-SDR (pinned), applies the patch, builds for the ESP32 (needs the ESP-IDF
   pinned by ESP-SDR in `firmware-targets.json`, sourced: `. export.sh`).
 
