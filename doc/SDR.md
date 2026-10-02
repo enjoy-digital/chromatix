@@ -79,9 +79,9 @@ ESP-SDR UART is limited to 2 Mbaud (`BAUD 1000000|2000000`), faster needs the ES
   peak frequency/level, update rate), spectrum (60dB, 10dB/10MHz grid, peak hold), Wi-Fi channel
   numbers (20MHz bands of channels 1/6/11/14), BLE advertising channels 37/38/39, waterfall (heat map
   scaled from the noise floor: median of the center half, ESP32 RX filter passband).
-- **Controls**: Left/Right: tune (Wi-Fi channels), Up/Down: reference level (5dB), A: span
-  (16/40MHz), B: gain (AGC, manual 20-70), Start: peak hold, Select: auto reference level, Menu:
-  RSSI tone (PCM audio, pitch following the peak level above the noise floor in the center
+- **Controls** (first version, see the handheld UI section for the current one): Left/Right: tune
+  (Wi-Fi channels), Up/Down: reference level (5dB), A: span (16/40MHz), B: gain (AGC, manual
+  20-70), Start: peak hold, Select: auto reference level, Menu: RSSI tone (PCM audio, pitch following the peak level above the noise floor in the center
   quarter of the span: tune to an emitter and hunt it down; measured over the USB audio:
   520-1120Hz following Wi-Fi bursts).
 - **Measured**: 9.5 updates/s (capture 67ms, DSP 30ms, draw 6ms, present 2ms), no capture errors
@@ -230,6 +230,30 @@ console crystal harmonics, verified with 2-4 lines at 80MS/s against wrong-LO hy
 <img src="images/sdr_host_2655_80msps.png" width="800" alt="LTE band 7 20MHz downlink carrier at 2680MHz">
 
 <img src="images/sdr_console_lte2680.png" width="320" alt="Console: LTE carrier at 2680MHz"> <img src="images/sdr_console_umts2150.png" width="320" alt="Console: band 1 carriers at 2152.5MHz">
+
+## Handheld UI
+
+`firmware/sdr` user interface (160x144 LCD, console buttons):
+
+- **Header**: frequency (large), span, tuning step, peak (or cursor) frequency/level; status
+  (USB host, peak hold, RSSI tone, update rate) in the spectrum corner.
+- **Spectrum**: frequency axis labels (adapted to the span), known bands (B1 DL, B40, ISM, B7
+  UL/B38/B7 DL), Wi-Fi channel numbers, BLE advertising channels, peak hold, cursor.
+- **Views** (Select): spectrum + waterfall, waterfall, **band scan** (sweep of a range in 64MHz
+  steps with the 80MS/s wide captures: full 2150-2880MHz in 12 steps, 2.4G ISM, LTE B40/B7,
+  low/high; Up/Down: range, cursor + A: open in the spectrum view).
+- **Controls**: Left/Right: tune (held: x5 after ~1s), Up/Down: tuning step (10kHz-20MHz), A:
+  span 16/40/80MHz, B: cursor (Left/Right: move, A: tune to), Start: peak hold, Menu: menu.
+- **Menu**: band presets (Wi-Fi 2.4GHz/channels 1/6/11, Bluetooth/BLE, LTE B1 DL, B40, B7 UL,
+  B38, B7 DL), gain, reference level (auto/manual), waterfall speed/range, RSSI tone (follows the
+  cursor), scan range, help and info pages. Short notifications confirm the changes.
+- **FFT**: on the CPU (VexRiscv, 67MHz): 512-point int16 radix-2 FFT, Hann window, 8 segments
+  averaged per 4096-sample capture (~21ms of the ~37ms update, ~26 updates/s); scan: 4 segments
+  per 2048-sample capture and step.
+
+<img src="images/sdr_ui_spectrum.png" width="320" alt="Spectrum + waterfall view"> <img src="images/sdr_ui_menu.png" width="320" alt="Menu">
+
+<img src="images/sdr_ui_scan_ism.png" width="320" alt="Band scan, 2.4GHz ISM"> <img src="images/sdr_ui_lte_b7.png" width="320" alt="LTE B7 DL preset (80MHz span)">
 
 ## Next steps
 
