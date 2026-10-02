@@ -16,6 +16,7 @@ memory system, Game Boy emulation core, USB UVC+UART, battery ADC and system mon
 
 import os
 import argparse
+import subprocess
 from types import MethodType, SimpleNamespace
 
 from migen import *
@@ -39,15 +40,16 @@ from chromatix.gateware.usb_device import USBDevice
 from chromatix.gateware.misc       import TickGenerator, StatusLed, ESP32Control
 from chromatix.gateware.buttons    import Buttons, BUTTONS
 from chromatix.gateware.debug      import DebugControl
-from chromatix.gateware.memory     import MemorySystem
+from chromatix.gateware.memory     import MemorySystem, MemoryCounters
 from chromatix.gateware.vcart      import VirtualCart, VirtualCartCSR
-from chromatix.gateware.demo       import ButtonsCSR, ToneGenerator
+from chromatix.gateware.demo       import ButtonsCSR, ToneGenerator, PCMAudio
 from chromatix.gateware.video      import VideoPipeline
 from chromatix.gateware.lcd        import ST7785Init, load_st7785_sequence
 from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_registers
 from chromatix.gateware.sysmon     import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
 from chromatix.gateware.adc        import BatteryADC
 from chromatix.gateware.terminal   import LCDTerminal
+from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -83,6 +85,10 @@ USB_SCLK_NET = "usb_hs_clk" # USB2PHY SerDes clock divider output (120MHz).
 
 PSRAM_BASE = 0x40000000 # PSRAM on the SoC bus (debug bridge, Game Boy mode).
 
+# CPU application: main RAM in the PSRAM (OSD/framebuffers/BIST below).
+APP_RAM_OFFSET = 0x080000
+APP_RAM_SIZE   = 8*MB - APP_RAM_OFFSET
+
 def add_timing_constraints(platform):
     constraints = [c.replace("{{{usb_sclk}}}", "{" + USB_SCLK_NET + "}") for c in TIMING_CONSTRAINTS]
     original_build_timing_constraints = platform.toolchain.build_timing_constraints
@@ -110,36 +116,68 @@ class BaseSoC(SoCMini):
         debug_bridge_baudrate = 115200,
         uvc_frames            = None,
         with_bios             = False,
+        with_app              = False,
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
         hclk_freq = int(33.55432e6 / 2)
-        # LiteX "sys" domain: gClk, or pClk for the BIOS demo CPU.
-        sys_clk_freq = pclk_freq if with_bios else gclk_freq
-        assert not (with_bios and with_debug_bridge) # Both use the USB CDC port.
+        xclk_freq = int(33.55432e6 * 2)
+        # LiteX "sys" domain: gClk, pClk for the BIOS demo CPU, xClk for CPU applications (CPU and
+        # PSRAM controller in the same domain).
+        with_cpu     = with_bios or with_app
+        sys_clk      = "pclk" if with_bios else "xclk" if with_app else "gclk"
+        sys_clk_freq = {
+            "gclk" : gclk_freq,
+            "pclk" : pclk_freq,
+            "xclk" : xclk_freq,
+        }[sys_clk]
+        assert not (with_bios and with_app)
+        assert not (with_cpu and with_debug_bridge) # Both use the USB CDC port.
         with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
         # LiteX BIOS demo: VexRiscv + BIOS (integrated ROM/SRAM) in place of the Game Boy core,
         # console on the USB CDC port and on the LCD (so also on the UVC capture).
-        cpu_kwargs = {} if not with_bios else dict(
-            cpu_type             = "vexriscv",
-            cpu_variant          = "lite",
-            integrated_rom_size  = 0x6000,
-            integrated_sram_size = 0x2000,
-            with_timer           = True,
-        )
+        cpu_kwargs = {}
+        if with_bios:
+            cpu_kwargs = dict(
+                cpu_type             = "vexriscv",
+                cpu_variant          = "lite",
+                integrated_rom_size  = 0x6000,
+                integrated_sram_size = 0x2000,
+                with_timer           = True,
+            )
+        # CPU application: VexRiscv with I/D caches, no ROM: firmware (and data) loaded in the PSRAM
+        # main RAM by the host over UARTBone (CPU held in reset with ctrl cpu_rst), console on a
+        # crossover UART.
+        if with_app:
+            cpu_kwargs = dict(
+                cpu_type             = "vexriscv",
+                cpu_variant          = "standard",
+                cpu_reset_address    = 0x40000000,
+                integrated_rom_size  = 0,
+                integrated_sram_size = 0, # Stack/data in the main RAM (BSRAM for the framebuffer).
+                with_timer           = True,
+            )
         SoCMini.__init__(self, platform,
             clk_freq      = sys_clk_freq,
-            ident         = "ChromatiX SoC" + (" (LiteX BIOS demo)" if with_bios else ""),
+            ident         = "ChromatiX SoC" + {
+                (True,  False): " (LiteX BIOS demo)",
+                (False, True):  " (CPU application)",
+            }.get((with_bios, with_app), ""),
             ident_version = True,
             **cpu_kwargs,
         )
 
+        # CPU application: VexRiscv with 8KB I/D caches (generated: chromatix/verilog/cpu).
+        if with_app:
+            self.cpu.use_external_variant(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                "chromatix", "verilog", "cpu", "VexRiscv_App.v"))
+
         # CRG --------------------------------------------------------------------------------------
 
-        self.crg = crg = CRG(platform, sys_clk="pclk" if with_bios else "gclk")
+        self.crg = crg = CRG(platform, sys_clk=sys_clk)
 
         # Platform Resources -----------------------------------------------------------------------
 
@@ -381,7 +419,7 @@ class BaseSoC(SoCMini):
             video.menu_disabled.eq(menu_disabled),
             video.lcd_init_done.eq(lcd_init_done),
             video.lcd_en.eq(lcd_en),
-            video.frame_blend.eq(system_control[1]),
+            video.frame_blend.eq(system_control[1] & (not with_cpu)),
             video.correct_lcd.eq(system_control[2]),
             video.correct_uvc.eq(system_control[3]),
             video.voltage_low.eq(low_battery),
@@ -431,13 +469,27 @@ class BaseSoC(SoCMini):
 
         # Memory System ----------------------------------------------------------------------------
 
-        # PSRAM Wishbone bus: CPU main RAM (BIOS demo, upper 4MB, 64-bit lines) or host access over
-        # the debug bridge (whole PSRAM, 32-bit: ROM upload, cartridge RAM, framebuffers).
+        # PSRAM Wishbone bus: CPU main RAM (BIOS demo: upper 4MB, application: from APP_RAM_OFFSET,
+        # 64-bit lines) or host access over the debug bridge (whole PSRAM, 32-bit: ROM upload,
+        # cartridge RAM, framebuffers).
+        main_ram_offset, main_ram_size = {
+            (True,  False): (0x400000,        4*MB),
+            (False, True):  (APP_RAM_OFFSET, APP_RAM_SIZE),
+        }.get((with_bios, with_app), (0x000000, 8*MB))
         self.memory = memory = MemorySystem(qspi_pads=qspi, psram_pads=ps,
-            with_bus       = with_bios or with_debug_bridge,
-            bus_base       = 0x400000 if with_bios else 0x000000,
-            bus_data_width = 64       if with_bios else 32,
+            with_bus       = with_cpu or with_debug_bridge,
+            bus_base       = main_ram_offset,
+            bus_data_width = 64 if with_cpu else 32,
             with_vcart     = with_vcart,
+            # Frame blending only for the Game Boy (CPU builds: PSRAM bandwidth for the CPU).
+            with_frame_blend = not with_cpu,
+            # Application: LCD frame buffers in the PSRAM (CPU line writes, framebuffer reads).
+            with_lcd_framebuffer = with_app,
+            # CPU (sys = pClk) and PSRAM (xClk) clocks from the same PLL: synchronous bus bridge.
+            bus_synchronous  = with_cpu,
+            # Application: 32-byte block reads + 4 block buffers (sequential L2 misses).
+            bus_fetch        = 4 if with_app else 1,
+            bus_buffers      = 4 if with_app else 0,
         )
 
         # Virtual Cartridge (ROM/cartridge RAM in the PSRAM, loaded from the host) -----------------
@@ -445,8 +497,15 @@ class BaseSoC(SoCMini):
         if with_vcart:
             self.vcart     = vcart = VirtualCart(memory.vcart_port, memory.ctrl.dout)
             self.vcart_csr = VirtualCartCSR(vcart)
+        # Memory reset: memrst (PLL lock, cartridge insertion/removal) or, without the Game Boy
+        # core, PLL lock only (the cartridge isn't used, a reset during a CPU access would lose it).
+        if with_cpu:
+            mem_reset = Signal(reset=1)
+            self.sync.xclk += mem_reset.eq(~crg.pll.locked)
+        else:
+            mem_reset = memrst
         self.comb += [
-            memory.reset.eq(memrst),
+            memory.reset.eq(mem_reset),
             q_menu_init.eq(memory.menu_init),
             # Game Boy framebuffer write.
             memory.gb_new_line.eq(h_gb_newline),
@@ -461,26 +520,34 @@ class BaseSoC(SoCMini):
             h_wr_burst_q2.eq(memory.osd_data),
         ]
 
-        # CPU Main RAM (LiteX BIOS demo): upper 4MB of the PSRAM (framebuffers/BIST in the lower
-        # ones), behind a L2 cache doing 8-byte line bursts (64-bit lines: the cache data memory is
-        # split per byte lane, 1 BSRAM each).
-        if with_bios:
+        # CPU Main RAM (LiteX BIOS demo, application): PSRAM above the framebuffers/BIST, behind a L2
+        # cache doing 8-byte line bursts (64-bit lines: the cache data memory is split per byte
+        # lane, 1 BSRAM each).
+        if with_cpu:
+            l2_size  = 16*1024 if with_app else 8*1024
             main_ram = wishbone.Interface(data_width=32, address_width=32, addressing="word")
             self.l2_cache = wishbone.Cache(
-                cachesize = 8192//4,
+                cachesize = l2_size//4,
                 master    = main_ram,
                 slave     = memory.bus,
                 reverse   = False,
             )
-            self.add_config("L2_SIZE", 8192)
+            self.add_config("L2_SIZE", l2_size)
+            # Main RAM statistics (application performance analysis).
+            if with_app:
+                self.memory_counters = MemoryCounters(
+                    access  = main_ram.cyc & main_ram.stb & main_ram.ack,
+                    request = memory.bus_bridge.request,
+                    pending = memory.bus_bridge.pending,
+                )
             self.bus.add_slave(name="main_ram", slave=main_ram, region=SoCRegion(
                 origin = self.mem_map["main_ram"],
-                size   = 4*MB,
+                size   = main_ram_size,
                 mode   = "rwx",
             ))
 
         # PSRAM (debug bridge): whole PSRAM (8MB) at PSRAM_BASE.
-        if with_debug_bridge and not with_bios:
+        if with_debug_bridge and not with_cpu:
             self.bus.add_slave(name="psram", slave=memory.bus, region=SoCRegion(
                 origin = PSRAM_BASE,
                 size   = 8*MB,
@@ -489,26 +556,50 @@ class BaseSoC(SoCMini):
 
         # Emulation System -------------------------------------------------------------------------
 
-        if with_bios:
-            # Firmware peripherals: buttons, tone generator (audio in place of the Game Boy one).
+        if with_cpu:
+            # Firmware peripherals: buttons.
             self.demo_buttons = ButtonsCSR(btns, menu=~btn_menu_ored)
-            self.tone = tone = ToneGenerator(hclk_freq, cd="hclk")
-            self.comb += [
-                left.eq(tone.sample),
-                right.eq(tone.sample),
-            ]
 
-            # LCD terminal in place of the Game Boy LCD; cartridge/IR/link idle (as when the Game
-            # Boy core doesn't access them).
-            self.terminal = terminal = LCDTerminal()
+            # Audio in place of the Game Boy one: tone generator (BIOS demo) or PCM (application).
+            if with_bios:
+                self.tone = tone = ToneGenerator(hclk_freq, cd="hclk")
+                self.comb += [
+                    left.eq(tone.sample),
+                    right.eq(tone.sample),
+                ]
+            else:
+                self.pcm = pcm = PCMAudio(sys_clk_freq)
+                self.irq.add("pcm", use_loc_if_exists=True)
+                self.sync.hclk += [ # pClk -> hClk (same PLL, samples quasi-static).
+                    left.eq(pcm.left),
+                    right.eq(pcm.right),
+                ]
+
+            # LCD in place of the Game Boy one: terminal (BIOS demo) or framebuffer (application).
+            if with_bios:
+                self.terminal = lcd_source = LCDTerminal()
+            else:
+                self.framebuffer = lcd_source = LCDPSRAMFramebuffer(memory.fb_write_port)
+                self.bus.add_slave(name="framebuffer", slave=lcd_source.bus, region=SoCRegion(
+                    origin = 0x90000000,
+                    size   = 0x10000,
+                    mode   = "rw",
+                    cached = False,
+                ))
+                self.comb += [
+                    lcd_source.fb_data.eq(h_wr_burst_q),
+                    memory.fb_base.eq(lcd_source.fb_base),
+                ]
+
+            # Cartridge/IR/link idle (as when the Game Boy core doesn't access them).
             for pad in [cart.d, cart.rst, link.clk]:
                 self.specials += TSTriple(len(pad)).get_tristate(pad) # Not driven.
             self.comb += [
-                gb_lcd_clkena.eq(terminal.gb_clkena),
-                gb_lcd_data.eq(terminal.gb_data),
-                gb_lcd_mode.eq(terminal.gb_mode),
-                gb_lcd_on.eq(terminal.gb_on),
-                gb_lcd_vsync.eq(terminal.gb_vsync),
+                gb_lcd_clkena.eq(lcd_source.gb_clkena),
+                gb_lcd_data.eq(lcd_source.gb_data),
+                gb_lcd_mode.eq(lcd_source.gb_mode),
+                gb_lcd_on.eq(lcd_source.gb_on),
+                gb_lcd_vsync.eq(lcd_source.gb_vsync),
                 cart.a.eq(0),
                 cart.clk.eq(0),
                 cart.cs.eq(1),
@@ -597,7 +688,8 @@ class BaseSoC(SoCMini):
         # Link Port: LINK_SD not driven by emu_system_top.
         self.comb += link.sd.eq(0)
 
-        # USB CDC UART: ESP32 passthrough (default), LiteX UARTBone debug bridge or BIOS console.
+        # USB CDC UART: ESP32 passthrough (default), LiteX UARTBone debug bridge (+ crossover UART
+        # console for applications) or BIOS console.
         usb_uart = Record([("tx", 1), ("rx", 1), ("dtr", 1), ("rts", 1)])
         if with_bios:
             self.comb += [
@@ -608,16 +700,26 @@ class BaseSoC(SoCMini):
             self.add_uart(uart_pads=usb_uart, baudrate=debug_bridge_baudrate)
             # Console also on the LCD terminal (bytes sent by the UART PHY).
             self.comb += [
-                terminal.sink.valid.eq(self.uart_phy.sink.valid & self.uart_phy.sink.ready),
-                terminal.sink.data.eq(self.uart_phy.sink.data),
+                self.terminal.sink.valid.eq(self.uart_phy.sink.valid & self.uart_phy.sink.ready),
+                self.terminal.sink.data.eq(self.uart_phy.sink.data),
             ]
-        elif with_debug_bridge:
-            # Keep the ESP32 running normally (EN high, IO0 high) with an idle UART.
+        elif with_debug_bridge or with_app:
+            # Keep the ESP32 running normally (EN high, IO0 high), UART idle or, for applications,
+            # connected to a CPU UART (ex: ESP-SDR commands/captures, 2Mbaud).
             self.comb += [
-                esp32_ctrl.usb_rxd.eq(1),
                 esp32_ctrl.usb_dtr.eq(0),
                 esp32_ctrl.usb_rts.eq(0),
             ]
+            if not with_app:
+                self.comb += esp32_ctrl.usb_rxd.eq(1)
+            else:
+                esp32_uart_pads = Record([("tx", 1), ("rx", 1)])
+                self.comb += [
+                    esp32_ctrl.usb_rxd.eq(esp32_uart_pads.tx),
+                    esp32_uart_pads.rx.eq(esp32_ctrl.usb_txd),
+                ]
+                self.add_uart(name="esp32_uart", uart_pads=esp32_uart_pads, baudrate=int(2e6),
+                    fifo_depth=512)
             # UARTBone on the CDC byte stream (USB rate, no UART: the host baudrate is ignored).
             class CDCStreamPHY:
                 pass
@@ -628,10 +730,12 @@ class BaseSoC(SoCMini):
             cdc_phy.sink   = self.cdc_tx.sink
             self.uartbone = UARTBone(
                 phy           = cdc_phy,
-                clk_freq      = gclk_freq,
+                clk_freq      = sys_clk_freq,
                 address_width = self.bus.address_width,
             )
             self.bus.add_master(name="uartbone", master=self.uartbone.wishbone)
+            if with_app:
+                self.add_uart(uart_name="crossover")
         else:
             self.comb += [
                 esp32_ctrl.usb_rxd.eq(usb_uart.rx),
@@ -644,9 +748,9 @@ class BaseSoC(SoCMini):
 
         self.usb = usb_dev = USBDevice(platform, clk_24, usb,
             with_utmi_monitor = with_debug_bridge and with_utmi_monitor,
-            with_cdc_stream   = with_debug_bridge,
+            with_cdc_stream   = with_debug_bridge or with_app,
             **({} if uvc_frames is None else {"uvc_frames": uvc_frames}))
-        if with_debug_bridge:
+        if with_debug_bridge or with_app:
             self.comb += [
                 usb_dev.cdc_source.connect(self.cdc_rx.sink),
                 self.cdc_tx.source.connect(usb_dev.cdc_sink),
@@ -806,6 +910,15 @@ class BaseSoC(SoCMini):
 
 # Build --------------------------------------------------------------------------------------------
 
+def compile_firmware_libraries(builder, names=("libc", "libcompiler_rt", "libbase")):
+    """Firmware libraries for a CPU without BIOS/ROM (LiteX only compiles them for a BIOS)."""
+    for name, src_dir in builder.software_packages:
+        if name in names:
+            dst_dir = os.path.join(builder.software_dir, name)
+            os.makedirs(dst_dir, exist_ok=True)
+            subprocess.check_call(["make", f"-j{os.cpu_count()}", "-C", dst_dir, "-f",
+                os.path.join(src_dir, "Makefile")])
+
 def main():
     parser = argparse.ArgumentParser(description="ChromatiX: LiteX based FPGA design for the ModRetro Chromatic.")
 
@@ -824,6 +937,7 @@ def main():
     parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,  help="Debug bridge baudrate.")
     parser.add_argument("--uvc-sizes",             default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
     parser.add_argument("--with-bios",             action="store_true",       help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
+    parser.add_argument("--with-app",              action="store_true",       help="CPU application SoC (VexRiscv) in place of the Game Boy core: PSRAM framebuffer, PCM audio, ESP32 UART, firmware loaded over USB.")
     parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
 
@@ -835,7 +949,7 @@ def main():
         gowin_path = os.path.expanduser(args.gowin_path)
         os.environ["PATH"]            = os.path.join(gowin_path, "bin") + os.pathsep + os.environ["PATH"]
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
-    if not args.with_bios:
+    if not (args.with_bios or args.with_app):
         add_verilog_sources(platform) # Game Boy core.
     add_timing_constraints(platform)
 
@@ -843,6 +957,7 @@ def main():
     soc = BaseSoC(platform,
         with_debug_bridge     = args.with_debug_bridge,
         with_bios             = args.with_bios,
+        with_app              = args.with_app,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
@@ -853,9 +968,12 @@ def main():
         output_dir = "build",
         csr_csv    = "scripts/csr.csv",
         bios_lto   = True, # BIOS fits the 24KB integrated ROM.
+        libc_mode  = "full" if args.with_app else "minimal", # Applications: full picolibc.
     )
     if args.build:
         builder.build(build_name="chromatic", run=not args.no_compile)
+        if args.with_app:
+            compile_firmware_libraries(builder)
 
     # Load / Flash.
     bitstream = os.path.join(builder.gateware_dir, "chromatic.fs")
