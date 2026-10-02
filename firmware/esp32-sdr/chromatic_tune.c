@@ -11,17 +11,26 @@
 // channel calibration (set_chan_freq_sw_start, used by set_channel_rfpll_freq for the Wi-Fi
 // channels and by the Bluetooth PHY for its 1MHz channels) programs and calibrates the PLL (VCO
 // capacitor bank, offset) for a frequency index relative to 2400MHz (0-84 here: no lock above) and
-// an offset (1/1024 MHz).
+// an offset (1/1024 MHz) (the calibration itself stops at index 84: 85-entry table).
 //
-// Measured on the Chromatic (console 24MHz crystal harmonics as references, interpolated peaks,
-// ~1kHz, the 2400MHz line excluded: another source ~16kHz above it): the LO moves by 1.0546*c MHz
-// for an offset of c MHz (1024*c units), with a -0.243MHz step past a 15MHz move above the 2484MHz
-// calibration. PLL lock from 2400 - 14.7MHz to 2484 + 22MHz: 2386-2504MHz used, corrected below.
-// Residual: the crystals difference (console/ESP32: ~-1.2kHz at 2.4GHz).
+// Table tuning (mode 1, default): the 85-entry frequency table read by the calibration holds the
+// PLL divider and the VCO capacitor code: loading a borrowed entry with the requested divider and
+// a capacitor code close to the result makes the calibration lock from 2150 to 2880MHz (2-4 comb
+// lines verified at 80MS/s; below, the calibration fails from any starting code; above, the
+// capacitor bank ends).
+//
+// Offset tuning (mode 2), measured on the Chromatic (console 24MHz crystal harmonics as
+// references, interpolated peaks, ~1kHz, the 2400MHz line excluded: another source ~16kHz above
+// it): the LO moves by 1.0546*c MHz for an offset of c MHz (1024*c units), with a -0.243MHz step
+// past a 15MHz move above the 2484MHz calibration. PLL lock from 2400 - 14.7MHz to 2484 + 22MHz:
+// 2386-2504MHz used, corrected below. Residual: the crystals difference (console/ESP32: ~-1.2kHz
+// at 2.4GHz).
 
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "soc/dport_access.h"
 
 #include "burst_serial.h"
 #include "chromatic_tune.h"
@@ -31,8 +40,19 @@ extern void    set_chan_freq_sw_start(uint8_t index, int16_t offset, uint8_t ctr
 extern void    set_chanfreq(unsigned mhz, unsigned mode);
 extern uint8_t chip7_phy_init_ctrl[];
 extern int16_t phy_freq_offset;
+/* ROM: analog (regi2c) registers. */
+extern unsigned rom_chip_i2c_readReg(unsigned block, unsigned host, unsigned reg);
+extern void     rom_chip_i2c_writeReg(unsigned block, unsigned host, unsigned reg, unsigned data);
+
+/* RF PLL frequency table (per frequency index, 3 words, see write_wifi_chan_data). */
+#define FTAB_SEL  0x3ff4e0c4
+#define FTAB_DATA 0x3ff4e0c0
 
 int chromatic_tune_mode = 1;
+
+/* Table tuning (mode 1): 2150-2880MHz. */
+#define TABLE_MIN_KHZ 2150000
+#define TABLE_MAX_KHZ 2880000
 
 #define TUNE_MIN_KHZ 2386000
 #define TUNE_MAX_KHZ 2504000
@@ -58,6 +78,56 @@ static void tune_sw(unsigned index, int offset)
     set_chan_freq_sw_start(index, offset, chip7_phy_init_ctrl[1]);
 }
 
+/* RF PLL frequency table: 85 entries (2400-2484MHz) of 3 words (write_wifi_chan_data,
+   bt_opt_write_mem): word 0: VCO capacitor bank code (bits 7:0, analog block 0x62 reg 1), word 1:
+   divider (LO = 480MHz*(2 + word/2^20)), word 2: front-end tuning. */
+#define FTAB_DATA_W 0x3ff4e148
+#define FTAB_WRITE  (1 << 9)
+
+static uint32_t ftab_read(unsigned addr)
+{
+    DPORT_REG_WRITE(FTAB_SEL, (DPORT_REG_READ(FTAB_SEL) & ~0x2ffu) | addr);
+    return DPORT_REG_READ(FTAB_DATA);
+}
+
+static void ftab_write(unsigned addr, uint32_t value)
+{
+    uint32_t sel = (DPORT_REG_READ(FTAB_SEL) & ~0x2ffu) | addr;
+    DPORT_REG_WRITE(FTAB_SEL, sel);
+    DPORT_REG_WRITE(FTAB_DATA_W, value);
+    DPORT_REG_WRITE(FTAB_SEL, sel | FTAB_WRITE);
+    DPORT_REG_WRITE(FTAB_SEL, sel);
+}
+
+/* VCO capacitor code (calibration starting point) measured from the calibrations results over
+   2150-2880MHz (quadratic fit, +-1.6). */
+static unsigned vco_dcap(double mhz)
+{
+    double x = mhz - 2500;
+    double d = 76.93 - 0.25398*x + 1.4673e-4*x*x;
+    return (d < 0) ? 0 : (d > 255) ? 255 : (unsigned)(d + 0.5);
+}
+
+static bool tune_table(unsigned khz)
+{
+    /* Borrowed entry (nearest MHz), loaded with the divider of the requested frequency (and the
+       capacitor code: calibrated one around its MHz, else from the fit), calibrated, restored. */
+    double   mhz   = khz/1000.0;
+    int      index = (int)(mhz + 0.5) - 2400;
+    index = (index < 0) ? 0 : (index > 84) ? 84 : index;
+    uint32_t w0 = ftab_read(3*index + 0);
+    uint32_t w1 = ftab_read(3*index + 1);
+    uint32_t dcap = (mhz - (2400 + index) < 1.0 && (2400 + index) - mhz < 1.0) ? (w0 & 0xff) :
+        vco_dcap(mhz);
+    ftab_write(3*index + 0, (w0 & ~0xffu) | dcap);
+    ftab_write(3*index + 1, (uint32_t)((mhz/480.0 - 2.0)*1048576.0 + 0.5));
+    set_chanfreq(nearest_channel(khz/1000), 0);
+    tune_sw(index, phy_freq_offset);
+    ftab_write(3*index + 0, w0);
+    ftab_write(3*index + 1, w1);
+    return true;
+}
+
 static int offset_units(double mhz)
 {
     return (int)(mhz*1024 + ((mhz >= 0) ? 0.5 : -0.5));
@@ -65,7 +135,9 @@ static int offset_units(double mhz)
 
 bool chromatic_tune_khz(unsigned khz)
 {
-    if (chromatic_tune_mode != 1 || khz < TUNE_MIN_KHZ || khz > TUNE_MAX_KHZ)
+    if (chromatic_tune_mode == 1)
+        return (khz >= TABLE_MIN_KHZ && khz <= TABLE_MAX_KHZ) ? tune_table(khz) : false;
+    if (chromatic_tune_mode != 2 || khz < TUNE_MIN_KHZ || khz > TUNE_MAX_KHZ)
         return false;
     unsigned index;
     double   c; /* Offset (MHz). */
@@ -117,12 +189,58 @@ bool chromatic_tune_command(const char *line, void (*prepare)(void))
         return true;
     }
     if (!strcmp(line, "RANGEK?")) {
-        snprintf(text, sizeof(text), "RANGEK %u %u\n", TUNE_MIN_KHZ, TUNE_MAX_KHZ);
+        if (chromatic_tune_mode == 1)
+            snprintf(text, sizeof(text), "RANGEK %u %u\n", TABLE_MIN_KHZ, TABLE_MAX_KHZ);
+        else
+            snprintf(text, sizeof(text), "RANGEK %u %u\n", TUNE_MIN_KHZ, TUNE_MAX_KHZ);
+        reply(text);
+        return true;
+    }
+    /* Experiments: analog registers (regi2c) and memory mapped registers. */
+    unsigned block, host, reg, value, n, addr;
+    char     dump[400];
+    if (sscanf(line, "I2CR %u %u %u %c", &block, &host, &reg, &extra) == 3) {
+        snprintf(text, sizeof(text), "I2C %u\n", rom_chip_i2c_readReg(block, host, reg));
+        reply(text);
+        return true;
+    }
+    if (sscanf(line, "I2CW %u %u %u %u %c", &block, &host, &reg, &value, &extra) == 4) {
+        rom_chip_i2c_writeReg(block, host, reg, value);
+        reply("OK\n");
+        return true;
+    }
+    if (sscanf(line, "I2CD %u %u %u %c", &block, &host, &n, &extra) == 3 && n <= 64) {
+        int len = snprintf(dump, sizeof(dump), "I2CD");
+        for (unsigned r = 0; r < n; r++)
+            len += snprintf(dump + len, sizeof(dump) - len, " %02x",
+                rom_chip_i2c_readReg(block, host, r));
+        snprintf(dump + len, sizeof(dump) - len, "\n");
+        reply(dump);
+        return true;
+    }
+    if (sscanf(line, "REGR %x %c", &addr, &extra) == 1 && addr >= 0x3ff00000 && addr < 0x60040000) {
+        snprintf(text, sizeof(text), "REG %08x\n", (unsigned)DPORT_REG_READ(addr));
+        reply(text);
+        return true;
+    }
+    if (sscanf(line, "REGW %x %x %c", &addr, &value, &extra) == 2 && addr >= 0x3ff00000 &&
+        addr < 0x60040000) {
+        DPORT_REG_WRITE(addr, value);
+        reply("OK\n");
+        return true;
+    }
+    if (sscanf(line, "FTAB %u %c", &index, &extra) == 1 && index < 85) { /* 85*3 words. */
+        unsigned w[3];
+        for (int k = 0; k < 3; k++) {
+            DPORT_REG_WRITE(FTAB_SEL, (DPORT_REG_READ(FTAB_SEL) & ~0xffu) | (index*3 + k));
+            w[k] = DPORT_REG_READ(FTAB_DATA);
+        }
+        snprintf(text, sizeof(text), "FTAB %08x %08x %08x\n", w[0], w[1], w[2]);
         reply(text);
         return true;
     }
     if (sscanf(line, "TUNEMODE %u %c", &mode, &extra) == 1) {
-        if (mode > 1) {
+        if (mode > 2) {
             reply("ERR tunemode_args\n");
             return true;
         }

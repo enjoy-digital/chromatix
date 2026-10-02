@@ -14,15 +14,18 @@ standard bitstream).
   - `QSPI?`: current address.
 - `chromatic_tune.c/h` (BSD-2-Clause): tuning. ESP-SDR tunes out of channel frequencies by
   calibrating the RF PLL on 2412MHz then writing the PLL divider: the VCO stays calibrated for
-  2412MHz and the LO doesn't move (measured on the Chromatic). The PHY software channel calibration
-  (`set_chan_freq_sw_start`, also used by the Bluetooth PHY) is used instead on the requested MHz
-  (2400-2484MHz), with a sub-MHz offset, and from the 2400/2484MHz calibrations with a measured
-  offset correction beyond: **2386-2504MHz in 1kHz steps, LO within +-2.6kHz** (console crystal
-  harmonics as references). Commands:
-  - `FREQK <kHz>` (and `FREQ <MHz>`), `RANGEK?` (`RANGEK 2386000 2504000`).
-  - `TUNEMODE <0|1>`/`TUNEMODE?`: 0: ESP-SDR tuning, 1: Chromatic tuning (default).
-  - `TUNESW <index> <offset>`: experiments (raw calibration: index = MHz - 2400, offset in 1/1024
-    MHz).
+  2412MHz and the LO doesn't move (measured on the Chromatic). The fork loads an entry of the PHY
+  PLL frequency table (85 entries: 2400-2484MHz) with the requested divider and a VCO capacitor
+  code close to the result, then runs the PHY software calibration (`set_chan_freq_sw_start`):
+  **2150-2880MHz in 1kHz steps, LO within ~2kHz** (console crystal harmonics as references, see
+  doc/SDR.md). Commands:
+  - `FREQK <kHz>` (and `FREQ <MHz>`), `RANGEK?` (`RANGEK 2150000 2880000`).
+  - `TUNEMODE <0|1|2>`/`TUNEMODE?`: 0: ESP-SDR tuning, 1: table tuning (default), 2: calibration
+    + offset (2386-2504MHz).
+  - Experiments: `TUNESW <index> <offset>` (raw calibration, index = MHz - 2400, offset in 1/1024
+    MHz), `I2CR/I2CW/I2CD` (analog registers, RF PLL: block 98 host 1), `REGR/REGW` (registers),
+    `FTAB <index>` (PLL table entry).
+  - With `LPF 0` (ESP-SDR), 80MS/s captures show +-38MHz around the LO.
 - `esp-sdr-chromatic.patch` (GPL-3.0, ESP-SDR): hooks in the ESP32 receiver (`QSPI CTUNE FREQK`
   capabilities).
 - `build.sh`: fetches ESP-SDR (pinned), applies the patch, builds for the ESP32 (needs the ESP-IDF
