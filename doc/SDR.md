@@ -81,7 +81,8 @@ ESP-SDR UART is limited to 2 Mbaud (`BAUD 1000000|2000000`), faster needs the ES
   scaled from the noise floor: median of the center half, ESP32 RX filter passband).
 - **Controls** (first version, see the handheld UI section for the current one): Left/Right: tune
   (Wi-Fi channels), Up/Down: reference level (5dB), A: span (16/40MHz), B: gain (AGC, manual
-  20-70), Start: peak hold, Select: auto reference level, Menu: RSSI tone (PCM audio, pitch following the peak level above the noise floor in the center
+  20-70), Start: peak hold, Select: auto reference level, Menu: RSSI tone (PCM audio, pitch
+  following the peak level above the noise floor in the center
   quarter of the span: tune to an emitter and hunt it down; measured over the USB audio:
   520-1120Hz following Wi-Fi bursts).
 - **Measured**: 9.5 updates/s (capture 67ms, DSP 30ms, draw 6ms, present 2ms), no capture errors
