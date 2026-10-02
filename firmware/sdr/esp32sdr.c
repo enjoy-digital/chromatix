@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <system.h>
 #include <generated/csr.h>
+#include <generated/mem.h>
 #include <generated/soc.h>
 
 #include "esp32sdr.h"
@@ -118,6 +120,21 @@ uint32_t esp32sdr_crc32(const uint8_t *data, int len)
 	return crc ^ 0xffffffff;
 }
 
+/* QSPI transport (Chromatic ESP-SDR fork): captures written by the ESP32 to a main RAM buffer. */
+static const int8_t *qspi_buf;
+
+int esp32sdr_qspi(void *buf, uint32_t psram_address)
+{
+	char cmd[32], reply[32];
+	snprintf(cmd, sizeof(cmd), "QSPI %lu", (unsigned long)psram_address);
+	if (esp32sdr_cmd(cmd, reply, sizeof(reply), 200) < 0 || strcmp(reply, "OK") != 0) {
+		qspi_buf = NULL;
+		return -1;
+	}
+	qspi_buf = psram_address ? buf : NULL;
+	return 0;
+}
+
 int esp32sdr_capture(int samples, int rate, int8_t *iq, uint32_t *capture_us)
 {
 	char line[64];
@@ -134,12 +151,19 @@ int esp32sdr_capture(int samples, int rate, int8_t *iq, uint32_t *capture_us)
 	uint32_t us    = strtoul(p, &p, 10);
 	if (count != samples)
 		return -3;
-	uint32_t deadline = esp32sdr_ms() + 100 + 2*samples/100; /* 2Mbaud: ~200 bytes/ms. */
-	for (int i = 0; i < 2*samples; i++) {
-		int c = uart_getc(deadline);
-		if (c < 0)
-			return -4;
-		iq[i] = (int8_t)c;
+	if (qspi_buf) {
+		/* Payload already in the main RAM (written before the header): drop the cached copies. */
+		flush_cpu_dcache();
+		flush_l2_cache();
+		memcpy(iq, qspi_buf, 2*samples);
+	} else {
+		uint32_t deadline = esp32sdr_ms() + 100 + 2*samples/100; /* 2Mbaud: ~200 bytes/ms. */
+		for (int i = 0; i < 2*samples; i++) {
+			int c = uart_getc(deadline);
+			if (c < 0)
+				return -4;
+			iq[i] = (int8_t)c;
+		}
 	}
 	if (esp32sdr_crc32((const uint8_t *)iq, 2*samples) != crc)
 		return -5;

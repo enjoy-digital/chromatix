@@ -10,6 +10,9 @@
 #ifndef LAYOUT_H
 #define LAYOUT_H
 
+/* Main RAM start in the PSRAM (chromatix.py APP_RAM_OFFSET, ESP32 QSPI writes addresses). */
+#define LAYOUT_PSRAM_OFFSET 0x080000
+
 #define LAYOUT_PROF_OFFSET  0x34f000 /* Profiler histogram (64KB). */
 #define LAYOUT_PROF_SIZE    0x10000
 #define LAYOUT_HOST_OFFSET  0x35f000 /* Host block (4KB). */

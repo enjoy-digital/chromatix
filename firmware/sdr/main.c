@@ -119,6 +119,7 @@ static int span      = 1;
 static int gain      = 0;
 static int ref_db4   = -1; /* < 0: auto. */
 static int peak_hold = 0;
+static int qspi      = 0; /* Captures over QSPI (else UART). */
 
 static void set_freq(void)
 {
@@ -129,12 +130,12 @@ static void set_freq(void)
 
 static void set_gain(void)
 {
-	char cmd[32];
+	char cmd[32], reply[32];
 	if (gains[gain] < 0)
 		snprintf(cmd, sizeof(cmd), "GAIN HARDWARE");
 	else
 		snprintf(cmd, sizeof(cmd), "GAIN MANUAL %d", gains[gain]);
-	esp32sdr_send(cmd);
+	esp32sdr_cmd(cmd, reply, sizeof(reply), 200);
 }
 
 /* Display -------------------------------------------------------------------------------------- */
@@ -175,9 +176,11 @@ static void draw_header(int fps10, int peak_x)
 	char line[48];
 	lcd_rect(0, HEADER_Y, LCD_WIDTH, SPEC_Y, COLOR_BLACK);
 	if (gains[gain] < 0)
-		snprintf(line, sizeof(line), "%4d MHZ SPAN %d GAIN AGC", freq_mhz, spans[span].mhz);
+		snprintf(line, sizeof(line), "%4d MHZ SPAN %d GAIN AGC %s", freq_mhz, spans[span].mhz,
+			qspi ? "QSPI" : "UART");
 	else
-		snprintf(line, sizeof(line), "%4d MHZ SPAN %d GAIN %d", freq_mhz, spans[span].mhz, gains[gain]);
+		snprintf(line, sizeof(line), "%4d MHZ SPAN %d GAIN %d %s", freq_mhz, spans[span].mhz,
+			gains[gain], qspi ? "QSPI" : "UART");
 	lcd_text(1, HEADER_Y + 1, COLOR_WHITE, line);
 	int peak_khz = 1000*freq_mhz - 500*spans[span].mhz + (2*peak_x + 1)*500*spans[span].mhz/LCD_WIDTH;
 	snprintf(line, sizeof(line), "REF %d PK %d.%d %d %s%d.%dFPS", ref_db4/4, peak_khz/1000,
@@ -192,7 +195,9 @@ static void draw_spectrum(void)
 	for (int db = 1; db < 6; db++)
 		for (int x = 0; x < LCD_WIDTH; x += 2)
 			lcd_screen[SPEC_Y + db*SPEC_H/6][x] = COLOR_GRID;
-	for (int f = (freq_mhz - spans[span].mhz/2 + 9)/10*10; f <= freq_mhz + spans[span].mhz/2; f += 10) {
+	int f_lo = freq_mhz - spans[span].mhz/2;
+	int f_hi = freq_mhz + spans[span].mhz/2;
+	for (int f = (f_lo + 9)/10*10; f <= f_hi; f += 10) {
 		int x = freq_to_x(10*f);
 		if (x >= 0)
 			for (int y = SPEC_Y; y < SPEC_Y + SPEC_H; y += 2)
@@ -304,6 +309,9 @@ int main(void)
 	lcd_present();
 
 	esp32sdr_cmd("SYNC 1", reply, sizeof(reply), 200);
+	/* Captures over QSPI (Chromatic ESP-SDR fork) if supported, else over the UART. */
+	qspi = (esp32sdr_qspi((void *)(MAIN_RAM_BASE + LAYOUT_DATA_OFFSET),
+		LAYOUT_PSRAM_OFFSET + LAYOUT_DATA_OFFSET) == 0);
 	set_freq();
 	set_gain();
 
@@ -390,10 +398,12 @@ int main(void)
 			fps10      = fps_frames*10000/(t - fps_t0);
 			fps_frames = 0;
 			fps_t0     = t;
-			log_status("frames %lu errors %lu fps %d.%d freq %d span %d gain %d ref %d peak %d@%d\n"
+			log_status("%s frames %lu errors %lu fps %d.%d freq %d span %d gain %d ref %d peak %d@%d\n"
 				"ms: capture %lu dsp %lu draw %lu present %lu\n",
-				(unsigned long)frames, (unsigned long)(errors[1] + errors[2] + errors[3] + errors[4] + errors[5]), fps10/10, fps10 % 10, freq_mhz,
-				spans[span].mhz, gains[gain], ref_db4/4, col_db4[peak_x]/4, peak_x,
+				qspi ? "qspi" : "uart", (unsigned long)frames,
+				(unsigned long)(errors[1] + errors[2] + errors[3] + errors[4] + errors[5]),
+				fps10/10, fps10 % 10, freq_mhz, spans[span].mhz, gains[gain], ref_db4/4,
+				col_db4[peak_x]/4, peak_x,
 				(unsigned long)(t_dsp - t_capture), (unsigned long)(t_draw - t_dsp),
 				(unsigned long)(t_present - t_draw), (unsigned long)(t_end - t_present));
 		}

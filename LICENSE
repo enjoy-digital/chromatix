@@ -24,6 +24,9 @@ Third-party components (under their own licenses):
   see file headers) and the SameBoy CGB boot ROM (MIT, Lior Halphon).
 - chromatix/verilog/Gameboy_MiSTer/ (git submodule): MiSTer Game Boy core (GPL, see its
   sources).
+- firmware/esp32-sdr/: builds ESP-SDR (GPL-3.0, fetched at build time, not included) with a
+  Chromatic transport; esp-sdr-chromatic.patch is a patch of ESP-SDR (GPL-3.0), the resulting ESP32
+  firmware is GPL-3.0.
 - Python dependencies (not included): LiteX (BSD-2-Clause), Migen (BSD-2-Clause),
   Amaranth (BSD-2-Clause), LUNA (BSD-3-Clause).
 
