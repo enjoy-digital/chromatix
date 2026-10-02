@@ -24,7 +24,9 @@ void     esp32sdr_init(void);
 uint32_t esp32sdr_ms(void);
 /* Drop pending RX bytes (resync). */
 void     esp32sdr_flush(void);
-/* Command without reply (GAIN). */
+/* Received byte or -1 (relays). */
+int      esp32sdr_rx(void);
+/* Command without reply wait (relays). */
 void     esp32sdr_send(const char *cmd);
 /* Command: reply line (without newline) in reply, returns its length or -1 (timeout). */
 int      esp32sdr_cmd(const char *cmd, char *reply, int len, uint32_t timeout_ms);
@@ -32,6 +34,8 @@ int      esp32sdr_cmd(const char *cmd, char *reply, int len, uint32_t timeout_ms
    PSRAM, 1KB aligned, readable/writable up to the next 1KB after the payload), 0: UART. Returns -1
    if not supported (stock ESP-SDR: UART). */
 int      esp32sdr_qspi(void *buf, uint32_t psram_address);
+/* QSPI payloads buffer (NULL: UART). */
+const int8_t *esp32sdr_qspi_buf(void);
 /* 8-bit I/Q capture (I, Q interleaved): returns 0 if complete and CRC valid. */
 int      esp32sdr_capture(int samples, int rate, int8_t *iq, uint32_t *capture_us);
 uint32_t esp32sdr_crc32(const uint8_t *data, int len);

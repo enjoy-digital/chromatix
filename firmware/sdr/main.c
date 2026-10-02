@@ -9,6 +9,10 @@
 // Controls: Left/Right: tune (5MHz), Up/Down: reference level (5dB), A: span (16/40MHz),
 // B: gain (AGC/manual), Start: peak hold, Select: auto reference level. Waterfall scaled from the
 // noise floor.
+//
+// USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
+// (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
+// rate); the relayed captures are displayed. Local captures resume 2s after the last host command.
 
 #include <stdio.h>
 #include <stdint.h>
@@ -26,6 +30,7 @@
 #include "esp32sdr.h"
 #include "lcd.h"
 #include "dsp.h"
+#include "usblink.h"
 
 /* Log (host readable) -------------------------------------------------------------------------- */
 
@@ -107,9 +112,9 @@ static const struct {
 } spans[] = {
 	{ESP32SDR_RATE_16MSPS, 16},
 	{ESP32SDR_RATE_40MSPS, 40},
-	/* 80MS/s: no wider view (ESP32 RX filter: ~40MHz). */
+	{ESP32SDR_RATE_80MSPS, 80}, /* Host captures only: no wider view (ESP32 RX filter: ~40MHz). */
 };
-#define SPANS (int)(sizeof(spans)/sizeof(spans[0]))
+#define SPANS 2 /* Local spans. */
 
 static const int gains[] = {-1, 20, 30, 40, 50, 60, 70}; /* -1: AGC (hardware gain). */
 #define GAINS (int)(sizeof(gains)/sizeof(gains[0]))
@@ -120,6 +125,8 @@ static int gain      = 0;
 static int ref_db4   = -1; /* < 0: auto. */
 static int peak_hold = 0;
 static int qspi      = 0; /* Captures over QSPI (else UART). */
+static int host      = 0; /* USB host relay active. */
+static int gain_db   = -1; /* Displayed gain (-1: AGC). */
 
 static void set_freq(void)
 {
@@ -131,10 +138,11 @@ static void set_freq(void)
 static void set_gain(void)
 {
 	char cmd[32], reply[32];
-	if (gains[gain] < 0)
+	gain_db = gains[gain];
+	if (gain_db < 0)
 		snprintf(cmd, sizeof(cmd), "GAIN HARDWARE");
 	else
-		snprintf(cmd, sizeof(cmd), "GAIN MANUAL %d", gains[gain]);
+		snprintf(cmd, sizeof(cmd), "GAIN MANUAL %d", gain_db);
 	esp32sdr_cmd(cmd, reply, sizeof(reply), 200);
 }
 
@@ -175,12 +183,13 @@ static void draw_header(int fps10, int peak_x)
 {
 	char line[48];
 	lcd_rect(0, HEADER_Y, LCD_WIDTH, SPEC_Y, COLOR_BLACK);
-	if (gains[gain] < 0)
+	const char *link = host ? "USB" : qspi ? "QSPI" : "UART";
+	if (gain_db < 0)
 		snprintf(line, sizeof(line), "%4d MHZ SPAN %d GAIN AGC %s", freq_mhz, spans[span].mhz,
-			qspi ? "QSPI" : "UART");
+			link);
 	else
 		snprintf(line, sizeof(line), "%4d MHZ SPAN %d GAIN %d %s", freq_mhz, spans[span].mhz,
-			gains[gain], qspi ? "QSPI" : "UART");
+			gain_db, link);
 	lcd_text(1, HEADER_Y + 1, COLOR_WHITE, line);
 	int peak_khz = 1000*freq_mhz - 500*spans[span].mhz + (2*peak_x + 1)*500*spans[span].mhz/LCD_WIDTH;
 	snprintf(line, sizeof(line), "REF %d PK %d.%d %d %s%d.%dFPS", ref_db4/4, peak_khz/1000,
@@ -293,6 +302,178 @@ static uint32_t buttons_pressed(void)
 static int8_t   iq[2*SAMPLES];
 static uint64_t power[FFT_SIZE];
 
+static int fps10;
+
+static int show_spectrum(const int8_t *data, int samples)
+{
+	/* Spectrum: FFT bins -> columns (max). */
+	dsp_power_spectrum(data, samples, power);
+	int peak_x = 0;
+	for (int x = 0; x < LCD_WIDTH; x++) {
+		uint64_t p = 0;
+		for (int k = x*FFT_SIZE/LCD_WIDTH; k < (x + 1)*FFT_SIZE/LCD_WIDTH; k++)
+			p = (power[k] > p) ? power[k] : p;
+		col_db4[x] = dsp_db4(p);
+		if (col_db4[x] > peak_db4[x])
+			peak_db4[x] = col_db4[x];
+		if (col_db4[x] > col_db4[peak_x])
+			peak_x = x;
+	}
+	update_floor();
+	if (ref_db4 < 0)
+		ref_db4 = (col_db4[peak_x] + 5*4 + 19)/20*20; /* Auto: 5dB above the peak, 5dB steps. */
+
+	/* Display. */
+	draw_spectrum();
+	draw_markers();
+	draw_waterfall();
+	draw_header(fps10, peak_x);
+	lcd_present();
+	return peak_x;
+}
+
+/* USB Host Relay ------------------------------------------------------------------------------- */
+
+#define HOST_TIMEOUT_MS 2000
+
+static char     host_line[160];
+static int      host_len;
+static uint32_t host_last_ms;
+static int      relay_bits;     /* Pending capture(s) payload format (8/10/32 bits), 0: none. */
+static int      relay_captures; /* Pending captures. */
+static char     esp_line[128];
+static int      esp_len;
+static uint32_t relay_frames;
+static uint32_t relay_bytes;
+static uint32_t relay_display_ms;
+
+static void host_reply(const char *text)
+{
+	usblink_write(text, strlen(text));
+}
+
+static void host_command(char *line)
+{
+	unsigned n, rate, repeats, format;
+
+	/* Transport commands: the ESP32 UART stays at 2Mbaud, the QSPI transport is the relay's. */
+	if (!strcmp(line, "BAUD?")) {
+		host_reply("BAUD 2000000\n");
+		return;
+	}
+	if (!strncmp(line, "BAUD ", 5)) {
+		char text[32];
+		snprintf(text, sizeof(text), "OK BAUD %s\n", line + 5);
+		host_reply(text);
+		return;
+	}
+	if (!strncmp(line, "QSPI", 4)) {
+		host_reply("ERR command\n");
+		return;
+	}
+	/* Displayed settings. */
+	if (sscanf(line, "FREQ %u", &n) == 1) {
+		freq_mhz = n;
+		memset(peak_db4, 0, sizeof(peak_db4));
+	} else if (!strcmp(line, "GAIN HARDWARE")) {
+		gain_db = -1;
+	} else if (sscanf(line, "GAIN MANUAL %u", &n) == 1) {
+		gain_db = n;
+	}
+	/* Captures: payloads over QSPI, sent by DMA after their DATA header. */
+	relay_bits     = 0;
+	relay_captures = 0;
+	rate           = 0xff;
+	if (sscanf(line, "CAP16 %u %u", &n, &rate) == 2) {
+		relay_bits     = 8;
+		relay_captures = 1;
+	} else if (sscanf(line, "CAP20 %u %u", &n, &rate) == 2) {
+		relay_bits     = 10;
+		relay_captures = 1;
+	} else if (sscanf(line, "CAP %u %u", &n, &rate) == 2) {
+		relay_bits     = 32;
+		relay_captures = 1;
+	} else if (sscanf(line, "RXRUN %u %u %u %u", &n, &rate, &repeats, &format) == 4) {
+		relay_bits     = (format == 20) ? 10 : 8;
+		relay_captures = repeats;
+	}
+	for (int i = 0; i < 3; i++)
+		if (spans[i].index == (int)rate && span != i) {
+			span      = i;
+			ref_db4   = -1;
+			floor_db4 = -1;
+		}
+	if (!qspi)
+		relay_captures = 0; /* Stock ESP-SDR: payloads relayed from the UART. */
+	esp32sdr_send(line);
+}
+
+static void relay_esp_line(void)
+{
+	/* Line of the ESP32 while capture payloads are expected (QSPI). */
+	usblink_write(esp_line, esp_len);
+	unsigned n;
+	if (esp_len > 5 && !strncmp(esp_line, "DATA ", 5) && sscanf(esp_line + 5, "%u", &n) == 1) {
+		int bits  = relay_bits;
+		int bytes = (bits == 8) ? 2*n : (bits == 10) ? (20*n + 7)/8 : 4*n;
+		const int8_t *buf = esp32sdr_qspi_buf();
+		usblink_write_dma(buf, bytes);
+		relay_frames++;
+		relay_bytes += bytes;
+		if (--relay_captures == 0)
+			relay_bits = 0;
+		/* Display (8-bit captures, ~10 updates/s). */
+		if (bits == 8 && n >= FFT_SIZE &&
+			esp32sdr_ms() - relay_display_ms >= 100) {
+			relay_display_ms = esp32sdr_ms();
+			flush_cpu_dcache();
+			show_spectrum(buf, (n < SAMPLES) ? n : SAMPLES);
+		}
+	} else if (!strncmp(esp_line, "ERR", 3)) {
+		relay_captures = 0;
+		relay_bits     = 0;
+	}
+	esp_len = 0;
+}
+
+static void relay_poll(void)
+{
+	int c;
+	/* Host -> ESP32 (lines). */
+	while ((c = usblink_getc()) >= 0) {
+		host_last_ms = esp32sdr_ms();
+		if (c == '\r')
+			continue;
+		if (c == '\n') {
+			host_line[host_len] = 0;
+			if (host_len)
+				host_command(host_line);
+			host_len = 0;
+		} else if (host_len < (int)sizeof(host_line) - 1)
+			host_line[host_len++] = c;
+	}
+	/* ESP32 -> host: raw bytes, lines when capture payloads are expected. */
+	uint8_t buf[64];
+	int     len = 0;
+	while (len < (int)sizeof(buf) && (c = esp32sdr_rx()) >= 0) {
+		if (relay_captures) {
+			if (len) {
+				usblink_write(buf, len);
+				len = 0;
+			}
+			if (esp_len < (int)sizeof(esp_line))
+				esp_line[esp_len++] = c;
+			if (c == '\n' || esp_len == (int)sizeof(esp_line))
+				relay_esp_line();
+		} else
+			buf[len++] = c;
+	}
+	if (len)
+		usblink_write(buf, len);
+}
+
+/* Main ----------------------------------------------------------------------------------------- */
+
 int main(void)
 {
 	char reply[64];
@@ -314,11 +495,37 @@ int main(void)
 		LAYOUT_PSRAM_OFFSET + LAYOUT_DATA_OFFSET) == 0);
 	set_freq();
 	set_gain();
+	/* USB link: ESP-SDR protocol relay for the host. */
+	int usb = (usblink_init() == 0);
 
 	uint32_t errors[6] = {0};
 	uint32_t frames = 0, fps_frames = 0, fps_t0 = esp32sdr_ms();
-	int      fps10 = 0;
 	for (;;) {
+		/* USB host relay. */
+		if (usb && usblink_touched())
+			usb = 0; /* Host back to the debug bridge. */
+		if (usb) {
+			relay_poll();
+			int active = host_len || relay_captures ||
+				(esp32sdr_ms() - host_last_ms < HOST_TIMEOUT_MS && host_last_ms);
+			if (active && !host) {
+				host = 1;
+				memset(peak_db4, 0, sizeof(peak_db4));
+			}
+			if (active)
+				continue;
+			if (host) {
+				/* Host gone: local settings back. */
+				host = 0;
+				esp32sdr_flush();
+				span      = (span < SPANS) ? span : 1;
+				ref_db4   = -1;
+				floor_db4 = -1;
+				set_freq();
+				set_gain();
+			}
+		}
+
 		/* Controls. */
 		uint32_t pressed = buttons_pressed();
 		if (pressed & ((1 << BTN_LEFT) | (1 << BTN_RIGHT))) {
@@ -362,32 +569,9 @@ int main(void)
 			continue;
 		}
 
-		/* Spectrum: FFT bins -> columns (max). */
-		uint32_t t_dsp = esp32sdr_ms();
-		dsp_power_spectrum(iq, SAMPLES, power);
-		int peak_x = 0;
-		for (int x = 0; x < LCD_WIDTH; x++) {
-			uint64_t p = 0;
-			for (int k = x*FFT_SIZE/LCD_WIDTH; k < (x + 1)*FFT_SIZE/LCD_WIDTH; k++)
-				p = (power[k] > p) ? power[k] : p;
-			col_db4[x] = dsp_db4(p);
-			if (col_db4[x] > peak_db4[x])
-				peak_db4[x] = col_db4[x];
-			if (col_db4[x] > col_db4[peak_x])
-				peak_x = x;
-		}
-		update_floor();
-		if (ref_db4 < 0)
-			ref_db4 = (col_db4[peak_x] + 5*4 + 19)/20*20; /* Auto: 5dB above the peak, 5dB steps. */
-
-		/* Display. */
-		uint32_t t_draw = esp32sdr_ms();
-		draw_spectrum();
-		draw_markers();
-		draw_waterfall();
-		draw_header(fps10, peak_x);
-		uint32_t t_present = esp32sdr_ms();
-		lcd_present();
+		/* Spectrum/display. */
+		uint32_t t_display = esp32sdr_ms();
+		int peak_x = show_spectrum(iq, SAMPLES);
 		uint32_t t_end = esp32sdr_ms();
 
 		/* Statistics. */
@@ -399,13 +583,13 @@ int main(void)
 			fps_frames = 0;
 			fps_t0     = t;
 			log_status("%s frames %lu errors %lu fps %d.%d freq %d span %d gain %d ref %d peak %d@%d\n"
-				"ms: capture %lu dsp %lu draw %lu present %lu\n",
+				"ms: capture %lu display %lu, relay: %lu frames %lu bytes\n",
 				qspi ? "qspi" : "uart", (unsigned long)frames,
 				(unsigned long)(errors[1] + errors[2] + errors[3] + errors[4] + errors[5]),
-				fps10/10, fps10 % 10, freq_mhz, spans[span].mhz, gains[gain], ref_db4/4,
+				fps10/10, fps10 % 10, freq_mhz, spans[span].mhz, gain_db, ref_db4/4,
 				col_db4[peak_x]/4, peak_x,
-				(unsigned long)(t_dsp - t_capture), (unsigned long)(t_draw - t_dsp),
-				(unsigned long)(t_present - t_draw), (unsigned long)(t_end - t_present));
+				(unsigned long)(t_display - t_capture), (unsigned long)(t_end - t_display),
+				(unsigned long)relay_frames, (unsigned long)relay_bytes);
 		}
 	}
 	return 0;

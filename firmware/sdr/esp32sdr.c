@@ -68,6 +68,17 @@ static int uart_getc(uint32_t deadline)
 	return c;
 }
 
+int esp32sdr_rx(void)
+{
+	if (esp32_uart_rxempty_read())
+		return -1;
+	int c = esp32_uart_rxtx_read();
+#ifndef CONFIG_ESP32_UART_RX_FIFO_RX_WE
+	esp32_uart_ev_pending_write(2);
+#endif
+	return c;
+}
+
 static int read_line(char *line, int len, uint32_t deadline)
 {
 	int n = 0;
@@ -133,6 +144,11 @@ int esp32sdr_qspi(void *buf, uint32_t psram_address)
 	}
 	qspi_buf = psram_address ? buf : NULL;
 	return 0;
+}
+
+const int8_t *esp32sdr_qspi_buf(void)
+{
+	return qspi_buf;
 }
 
 int esp32sdr_capture(int samples, int rate, int8_t *iq, uint32_t *capture_us)
