@@ -12,10 +12,11 @@
 // with SOAPY_SDR_END_BURST; there are gaps between bursts. Bursts captured before a settings change
 // (frequency, gain, rate) are dropped.
 //
-// The ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz, 2484MHz;
-// ESP-SDR out of channel frequencies don't move its LO, measured on the console crystal
-// harmonics): it is tuned to the nearest channel, the remaining offset is applied by a digital
-// mixer (NCO). The ESP32 I/Q spectrum is inverted: the samples are conjugated.
+// Tuning: with the Chromatic ESP-SDR fork (firmware/esp32-sdr: FREQK), the ESP32 tunes 2386-2504MHz
+// in kHz steps; with stock ESP-SDR, only the Wi-Fi channel frequencies (2412-2472MHz/5MHz, 2484MHz)
+// move its LO (measured on the console crystal harmonics): the nearest channel is used. The
+// remaining offset is applied by a digital mixer (NCO). The ESP32 I/Q spectrum is inverted: the
+// samples are conjugated.
 //
 // Device arguments: driver=chromatic, serial=<port> (default: the Chromatic CDC port),
 // samples=<burst samples> (default 16380).
@@ -207,6 +208,13 @@ public:
         auto g = limits.find("\"gain\":[0,");
         if (g != std::string::npos && sscanf(limits.c_str() + g, "\"gain\":[0,%u", &gmax) == 1)
             gain_max = gmax;
+        // kHz tuning (Chromatic ESP-SDR fork: 2386-2504MHz), else Wi-Fi channels + NCO.
+        unsigned kmin, kmax;
+        if (sscanf(command("RANGEK?").c_str(), "RANGEK %u %u", &kmin, &kmax) == 2) {
+            freqk    = true;
+            freq_min = kmin*1e3;
+            freq_max = kmax*1e3;
+        }
         setFrequency(SOAPY_SDR_RX, 0, freq);
         setGainMode(SOAPY_SDR_RX, 0, true);
     }
@@ -244,8 +252,22 @@ public:
     void setFrequency(const int, const size_t, const double frequency,
         const SoapySDR::Kwargs & = SoapySDR::Kwargs()) override
     {
-        // ESP32 at the nearest Wi-Fi channel, offset by the NCO.
         TRACE("setFrequency(%.0f)", frequency);
+        if (freqk) {
+            // ESP32 at the nearest kHz, offset by the NCO.
+            double   f   = std::max(freq_min, std::min(freq_max, frequency));
+            unsigned khz = (unsigned)(f/1e3 + 0.5);
+            if (khz*1e3 != hw_freq) {
+                std::string r = command("FREQK " + std::to_string(khz));
+                if (r != "OK")
+                    SoapySDR::logf(SOAPY_SDR_ERROR, "Chromatic: FREQK %u: %s", khz, r.c_str());
+                hw_freq = khz*1e3;
+            }
+            freq = f;
+            generation++;
+            return;
+        }
+        // Stock ESP-SDR: ESP32 at the nearest Wi-Fi channel, offset by the NCO.
         static const unsigned channels[] = {
             2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462, 2467, 2472, 2484,
         };
@@ -525,6 +547,7 @@ private:
     std::string info;
     double freq = 2437e6, hw_freq = 0, freq_min = 2410e6, freq_max = 2486e6;
     std::atomic<unsigned> generation{0};
+    bool freqk = false;
     double rate = 40e6;
     double gain = 40;
     unsigned gain_max = 72;

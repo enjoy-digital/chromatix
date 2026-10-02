@@ -26,8 +26,9 @@ import serial
 
 RATES = {16: 6, 40: 1, 80: 0} # MS/s -> ESP-SDR rate index.
 
-# The ESP32 only tunes reliably on the Wi-Fi channel frequencies (ESP-SDR out of channel frequencies
-# don't move its LO, measured on the console crystal harmonics).
+# Stock ESP-SDR: the ESP32 only tunes reliably on the Wi-Fi channel frequencies (its out of channel
+# frequencies don't move the LO, measured on the console crystal harmonics). The Chromatic ESP-SDR
+# fork (firmware/esp32-sdr) tunes 2386-2504MHz in kHz steps (FREQK).
 CHANNELS = list(range(2412, 2473, 5)) + [2484]
 
 def conjugate(data):
@@ -53,6 +54,16 @@ class ESPSDR:
         self.port.rts      = False
         self.port.open()
         self.sync()
+        r = self.cmd("RANGEK?").split()
+        self.rangek = (int(r[1]), int(r[2])) if len(r) == 3 and r[0] == "RANGEK" else None
+
+    def tune(self, mhz):
+        """Tune (MHz, kHz resolution with the Chromatic fork, else integer MHz)."""
+        if self.rangek:
+            return self.cmd(f"FREQK {round(mhz*1000)}")
+        if round(mhz) not in CHANNELS:
+            print(f"Warning: {mhz} MHz is not a Wi-Fi channel frequency: the LO may not move.")
+        return self.cmd(f"FREQ {round(mhz)}")
 
     def close(self):
         self.port.close()
@@ -114,7 +125,7 @@ def spectrum(data, nfft=1024):
 def main():
     parser = argparse.ArgumentParser(description="Chromatic SDR host client (ESP-SDR protocol).")
     parser.add_argument("--port",   default=None, help="Serial port (default: Chromatic CDC).")
-    parser.add_argument("--freq",   default=2437, type=int, help="Center frequency (MHz).")
+    parser.add_argument("--freq",   default=2437, type=float, help="Center frequency (MHz).")
     parser.add_argument("--rate",   default=40,   type=int, choices=sorted(RATES),
         help="Sample rate (MS/s).")
     parser.add_argument("--gain",   default=None, type=int, help="Manual gain (default: AGC).")
@@ -123,15 +134,13 @@ def main():
     parser.add_argument("filename", nargs="?", help="Output file (spectrum: .png, record: .cs8).")
     args = parser.parse_args()
 
-    if args.command != "info" and args.freq not in CHANNELS:
-        print(f"Warning: {args.freq} MHz is not a Wi-Fi channel frequency: the LO may not move.")
     sdr = ESPSDR(args.port)
     if args.command == "info":
-        for c in ["INFO", "CAPS", "LIMITS?", "RANGE?", "TRANSPORT?", "GAIN?"]:
+        for c in ["INFO", "CAPS", "LIMITS?", "RANGE?", "RANGEK?", "TRANSPORT?", "GAIN?"]:
             print(f"{c:12s} {sdr.cmd(c)}")
         return
 
-    print(f"FREQ {args.freq}: {sdr.cmd(f'FREQ {args.freq}')}")
+    print(f"Tune {args.freq} MHz: {sdr.tune(args.freq)}")
     print("GAIN: " + sdr.cmd("GAIN HARDWARE" if args.gain is None else f"GAIN MANUAL {args.gain}"))
 
     captures, errors, nbytes = [], 0, 0
