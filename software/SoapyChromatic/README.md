@@ -19,6 +19,11 @@ SoapySDRUtil --probe="driver=chromatic"
 gqrx                                  # Device string: soapy=0,driver=chromatic
 ```
 
+In gqrx, tune around 2.4 GHz (the ESP32 front-end): the hump centered on the display is the ESP32
+RX filter (it moves with the tuning), the Wi-Fi/BLE bursts are short and captured ~3% of the time:
+use the FFT peak hold ("Peak" detect/hold) to see them. The console LCD also shows the relayed
+captures and the hardware frequency. `CHROMATIC_SOAPY_DEBUG=1` traces the module calls.
+
 The console must run `firmware/sdr` (`scripts/chromatic.py --serial /dev/ttyACM0 run
 firmware/sdr/sdr.bin`): it relays the protocol on the USB CDC port. Debug tools
 (`scripts/chromatic.py --serial`) take the port back with a 1200 baud touch; the relay resumes 1s

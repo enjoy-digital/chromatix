@@ -37,12 +37,24 @@
 #include <thread>
 #include <vector>
 
+#include <cstdlib>
 #include <fcntl.h>
 #include <glob.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
+
+// Debug trace (CHROMATIC_SOAPY_DEBUG=1) -----------------------------------------------------------
+
+static bool debug_enabled()
+{
+    static bool enabled = getenv("CHROMATIC_SOAPY_DEBUG") != nullptr;
+    return enabled;
+}
+
+#define TRACE(...) do { if (debug_enabled()) { fprintf(stderr, "[chromatic] " __VA_ARGS__); \
+    fprintf(stderr, "\n"); } } while (0)
 
 // CRC32 ------------------------------------------------------------------------------------------
 
@@ -235,6 +247,7 @@ public:
         const SoapySDR::Kwargs & = SoapySDR::Kwargs()) override
     {
         // ESP32 at the nearest MHz, offset by the NCO.
+        TRACE("setFrequency(%.0f)", frequency);
         double   f   = std::max(freq_min, std::min(freq_max, frequency));
         unsigned mhz = (unsigned)(f/1e6 + 0.5);
         if (mhz*1e6 != hw_freq) {
@@ -263,6 +276,7 @@ public:
     void setSampleRate(const int, const size_t, const double r) override
     {
         rate = (r < 28e6) ? 16e6 : 40e6;
+        TRACE("setSampleRate(%.0f) -> %.0f", r, rate);
         generation++;
     }
 
@@ -343,6 +357,7 @@ public:
 
     int activateStream(SoapySDR::Stream *, const int, const long long, const size_t) override
     {
+        TRACE("activateStream (%s, %.0f Hz, %.0f S/s)", stream_format.c_str(), freq, rate);
         stop();
         {
             std::lock_guard<std::mutex> lock(queue_mutex);
@@ -432,6 +447,7 @@ private:
     // Protocol (serialized with the capture thread).
     std::string command(const std::string &cmd)
     {
+        TRACE("command: %s", cmd.c_str());
         std::lock_guard<std::mutex> lock(link_mutex);
         link.write(cmd + "\n");
         std::string reply;
