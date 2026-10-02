@@ -28,6 +28,8 @@ import zlib
 import argparse
 import subprocess
 
+import serial
+
 from litex import RemoteClient
 from litex.tools.remote.comm_uart import CommUART, CMD_READ_BURST_INCR
 
@@ -63,6 +65,18 @@ STATUS_FIELDS = ["bist_done", "bist_failed", "lcd_init_done", "menu_disabled", "
 
 # Direct UARTBone Link -----------------------------------------------------------------------------
 
+def usb_touch(port):
+    """
+    1200 baud touch: USB CDC stream back to the debug bridge (UARTBone) when an application uses it
+    (--with-app USB link, ex: firmware/sdr ESP-SDR relay). Two line codings to get a change.
+    """
+    for baudrate in [9600, 1200]:
+        s = serial.Serial()
+        s.port, s.baudrate, s.dtr, s.rts = port, baudrate, False, False
+        s.open()
+        s.close()
+    time.sleep(0.05)
+
 class RobustCommUART(CommUART):
     """
     UARTBone over the USB CDC port without litex_server, with read timeouts and resynchronization:
@@ -71,6 +85,7 @@ class RobustCommUART(CommUART):
     the read retried.
     """
     def __init__(self, port, csr_csv, timeout=0.5, retries=5):
+        usb_touch(port)
         CommUART.__init__(self, port, csr_csv=csr_csv)
         self.port.timeout = timeout
         self.retries      = retries
