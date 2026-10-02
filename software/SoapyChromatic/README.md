@@ -27,8 +27,11 @@ after they close it.
 Device arguments: `serial=<port>` (default: the Chromatic CDC port,
 `/dev/serial/by-id/*Chromatic*if02`), `samples=<burst samples>` (256-16380, default 16380).
 
-- Sample rates: 16/40 MS/s (ESP32 hardware rates), frequency: 100-6000 MHz (1 MHz steps, the
-  ESP32 RF front-end is for 2.4 GHz), gain: AGC or 0-72 (manual, `LNA` element).
+- Sample rates: 16/40 MS/s (ESP32 hardware rates), frequency: 100-6000 MHz (the ESP32 RF front-end
+  is for 2.4 GHz; the ESP32 tunes in 1 MHz steps, the remaining offset is applied by a digital
+  mixer: any frequency), gain: AGC or 0-72 (manual, `LNA` element).
+- Bursts captured before a settings change (frequency, gain, rate) are dropped: changes are seen
+  from the next burst.
 - Formats: CS8 (native), CS16, CF32.
 
 ## Bursts

@@ -9,7 +9,10 @@
 //
 // The ESP32 captures bursts (up to 16380 samples, 8-bit I/Q, 16/40MS/s): the stream is a sequence
 // of bursts, each one starting with a time (SOAPY_SDR_HAS_TIME: host time at reception) and ending
-// with SOAPY_SDR_END_BURST; there are gaps between bursts.
+// with SOAPY_SDR_END_BURST; there are gaps between bursts. Bursts captured before a settings change
+// (frequency, gain, rate) are dropped.
+//
+// The ESP32 tunes in 1MHz steps: the remaining offset is applied by a digital mixer (NCO).
 //
 // Device arguments: driver=chromatic, serial=<port> (default: the Chromatic CDC port),
 // samples=<burst samples> (default 16380).
@@ -22,6 +25,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <complex>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -168,6 +173,9 @@ struct Burst
 {
     std::vector<int8_t> iq;
     long long           timeNs;
+    unsigned            generation; // Settings generation at the capture.
+    double              offset;     // NCO frequency offset (Hz).
+    double              rate;
 };
 
 class ChromaticSDR : public SoapySDR::Device
@@ -226,11 +234,17 @@ public:
     void setFrequency(const int, const size_t, const double frequency,
         const SoapySDR::Kwargs & = SoapySDR::Kwargs()) override
     {
-        unsigned mhz = (unsigned)(std::max(freq_min, std::min(freq_max, frequency))/1e6 + 0.5);
-        std::string r = command("FREQ " + std::to_string(mhz));
-        if (r != "OK")
-            SoapySDR::logf(SOAPY_SDR_ERROR, "Chromatic: FREQ %u: %s", mhz, r.c_str());
-        freq = mhz*1e6;
+        // ESP32 at the nearest MHz, offset by the NCO.
+        double   f   = std::max(freq_min, std::min(freq_max, frequency));
+        unsigned mhz = (unsigned)(f/1e6 + 0.5);
+        if (mhz*1e6 != hw_freq) {
+            std::string r = command("FREQ " + std::to_string(mhz));
+            if (r != "OK")
+                SoapySDR::logf(SOAPY_SDR_ERROR, "Chromatic: FREQ %u: %s", mhz, r.c_str());
+            hw_freq = mhz*1e6;
+        }
+        freq = f;
+        generation++;
     }
 
     double getFrequency(const int, const size_t) const override { return freq; }
@@ -249,6 +263,7 @@ public:
     void setSampleRate(const int, const size_t, const double r) override
     {
         rate = (r < 28e6) ? 16e6 : 40e6;
+        generation++;
     }
 
     double getSampleRate(const int, const size_t) const override { return rate; }
@@ -266,6 +281,7 @@ public:
     void setGainMode(const int, const size_t, const bool automatic) override
     {
         agc = automatic;
+        generation++;
         if (agc)
             command("GAIN HARDWARE");
         else
@@ -278,6 +294,7 @@ public:
     {
         gain = std::max(0.0, std::min((double)gain_max, value));
         agc  = false;
+        generation++;
         command("GAIN MANUAL " + std::to_string((unsigned)gain));
     }
 
@@ -356,9 +373,19 @@ public:
                 overflow = false;
                 return SOAPY_SDR_OVERFLOW;
             }
+            // Bursts captured before a settings change dropped.
+            auto fresh = [this] {
+                while (!queue.empty() && queue.front().generation != generation)
+                    queue.pop_front();
+                return !queue.empty();
+            };
+            if (!fresh() && !queue_cv.wait_for(lock, std::chrono::microseconds(timeoutUs), fresh))
+                return SOAPY_SDR_TIMEOUT;
             current.reset(new Burst(std::move(queue.front())));
             queue.pop_front();
             offset = 0;
+            nco    = 1.0;
+            nco_step = std::polar(1.0, -2*M_PI*current->offset/current->rate);
             flags |= SOAPY_SDR_HAS_TIME;
             timeNs = current->timeNs;
         }
@@ -367,16 +394,31 @@ public:
         size_t total = current->iq.size()/2;
         size_t n     = std::min(numElems, total - offset);
         const int8_t *src = current->iq.data() + 2*offset;
-        if (stream_format == SOAPY_SDR_CS8)
+        bool mix = (current->offset != 0);
+        if (stream_format == SOAPY_SDR_CS8 && !mix)
             memcpy(buffs[0], src, 2*n);
-        else if (stream_format == SOAPY_SDR_CS16) {
-            int16_t *dst = (int16_t *)buffs[0];
-            for (size_t i = 0; i < 2*n; i++)
-                dst[i] = (int16_t)(src[i]*256);
-        } else {
-            float *dst = (float *)buffs[0];
-            for (size_t i = 0; i < 2*n; i++)
-                dst[i] = src[i]/128.0f;
+        else {
+            for (size_t i = 0; i < n; i++) {
+                std::complex<double> x(src[2*i + 0], src[2*i + 1]);
+                if (mix) {
+                    x   *= nco;
+                    nco *= nco_step;
+                }
+                if (stream_format == SOAPY_SDR_CF32) {
+                    ((float *)buffs[0])[2*i + 0] = (float)(x.real()/128);
+                    ((float *)buffs[0])[2*i + 1] = (float)(x.imag()/128);
+                } else if (stream_format == SOAPY_SDR_CS16) {
+                    ((int16_t *)buffs[0])[2*i + 0] = (int16_t)std::lround(x.real()*256);
+                    ((int16_t *)buffs[0])[2*i + 1] = (int16_t)std::lround(x.imag()*256);
+                } else {
+                    auto clip = [](double v) {
+                        return (int8_t)std::max(-128L, std::min(127L, std::lround(v)));
+                    };
+                    ((int8_t *)buffs[0])[2*i + 0] = clip(x.real());
+                    ((int8_t *)buffs[0])[2*i + 1] = clip(x.imag());
+                }
+            }
+            nco /= std::abs(nco); // Renormalized (rounding errors).
         }
         offset += n;
         if (offset == total) {
@@ -419,6 +461,9 @@ private:
             bool  ok = false;
             {
                 std::lock_guard<std::mutex> lock(link_mutex);
+                burst.generation = generation;
+                burst.offset     = freq - hw_freq;
+                burst.rate       = rate;
                 link.write("CAP16 " + std::to_string(burst_samples) + " " +
                     ((rate == 16e6) ? "6" : "1") + "\n");
                 std::string header;
@@ -460,7 +505,8 @@ private:
     SerialLink link;
     std::mutex link_mutex;
     std::string info;
-    double freq = 2437e6, freq_min = 2300e6, freq_max = 2600e6;
+    double freq = 2437e6, hw_freq = 0, freq_min = 2300e6, freq_max = 2600e6;
+    std::atomic<unsigned> generation{0};
     double rate = 40e6;
     double gain = 40;
     unsigned gain_max = 72;
@@ -475,6 +521,7 @@ private:
     std::deque<Burst> queue;
     std::unique_ptr<Burst> current;
     size_t offset = 0;
+    std::complex<double> nco{1.0}, nco_step{1.0};
     bool overflow = false;
 };
 
