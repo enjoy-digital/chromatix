@@ -20,6 +20,7 @@ void lcd_init(void);
 void lcd_palette(int index, uint8_t r, uint8_t g, uint8_t b);
 void lcd_rect(int x, int y, int w, int h, uint8_t color);
 void lcd_text(int x, int y, uint8_t color, const char *text);
+void lcd_text_scaled(int x, int y, uint8_t color, const char *text, int scale);
 void lcd_present(void);
 
 #endif

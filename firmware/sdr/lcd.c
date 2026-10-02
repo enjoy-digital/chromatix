@@ -56,6 +56,20 @@ void lcd_text(int x, int y, uint8_t color, const char *text)
 	}
 }
 
+void lcd_text_scaled(int x, int y, uint8_t color, const char *text, int scale)
+{
+	/* lcd_text with each font pixel drawn as a scale x scale square. */
+	for (; *text; text++, x += 4*scale) {
+		if (*text < 0x20 || *text > 0x7e)
+			continue;
+		uint32_t glyph = font4x6[*text - 0x20];
+		for (int r = 0; r < 6; r++)
+			for (int c = 0; c < 3; c++)
+				if ((glyph >> (3*(5 - r) + 2 - c)) & 1)
+					lcd_rect(x + c*scale, y + r*scale, scale, scale, color);
+	}
+}
+
 void lcd_present(void)
 {
 	/* Screen -> back buffer, line by line through the line buffers (used in order). */

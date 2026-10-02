@@ -3,13 +3,15 @@
 // Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 // SPDX-License-Identifier: BSD-2-Clause
 //
-// ChromatiX SDR (--with-app build, ESP-SDR on the ESP32): 2.4GHz spectrum analyzer/waterfall on the
-// LCD. I/Q bursts captured by the ESP32 (CAP16 over the ESP32 UART), FFT on the CPU.
+// ChromatiX SDR (--with-app build, ESP-SDR on the ESP32): spectrum analyzer/waterfall on the LCD.
+// I/Q bursts captured by the ESP32 (CAP16, over QSPI with the Chromatic ESP-SDR fork, else over the
+// ESP32 UART), FFT on the CPU (dsp.c).
 //
-// Controls: Left/Right: tune (5MHz), Up/Down: reference level (5dB, manual), A: span (16/40/80MHz),
-// B: gain (AGC/manual), Start: peak hold, Select: auto reference level (default), Menu: RSSI tone
-// (pitch following the peak level above the noise floor in the center quarter of the span: tune
-// to an emitter and hunt it down). Waterfall scaled from the noise floor.
+// Views (Select): spectrum + waterfall, waterfall, band scan (sweep of a frequency range in 64MHz
+// steps with the 80MS/s wide captures).
+// Controls: Left/Right: tune (held: accelerated) or move the cursor, Up/Down: tuning step, A: span
+// (cursor: tune to the cursor), B: cursor on/off, Start: peak hold, Menu: menu (band presets,
+// gain, reference level, waterfall, RSSI tone, scan range, help, info).
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -52,15 +54,11 @@ static void log_status(const char *fmt, ...)
 
 /* Layout/Colors -------------------------------------------------------------------------------- */
 
-#define HEADER_Y   0
-#define SPEC_Y     14
+#define HEADER_H   14
+#define SPEC_Y     HEADER_H
 #define SPEC_H     56
-#define MARKER_Y   (SPEC_Y + SPEC_H)
-#define MARKER_H   8
-#define WATER_Y    (MARKER_Y + MARKER_H)
-#define WATER_H    (LCD_HEIGHT - WATER_Y)
+#define AXIS_H     8
 #define RANGE_DB4  (60*4) /* Spectrum: displayed range below the reference level (1/4 dB). */
-#define WATER_DB4  (36*4) /* Waterfall: displayed range above the noise floor (1/4 dB). */
 
 enum {
 	COLOR_BLACK = 0,
@@ -72,6 +70,12 @@ enum {
 	COLOR_WIFI,
 	COLOR_BLE,
 	COLOR_RED,
+	COLOR_CURSOR,
+	COLOR_DIM,
+	COLOR_CELL,
+	COLOR_ISM,
+	COLOR_MENU,
+	COLOR_SELECT,
 	COLOR_HEAT  = 64, /* 64-255: waterfall heat map. */
 	HEAT_COLORS = 192,
 };
@@ -79,15 +83,21 @@ enum {
 static void palette_init(void)
 {
 	static const uint8_t colors[][3] = {
-		{  0,   0,   0}, /* Black.     */
-		{255, 255, 255}, /* White.     */
-		{ 48,  48,  64}, /* Grid.      */
-		{ 64, 255,  64}, /* Trace.     */
-		{  0,  80,  24}, /* Fill.      */
-		{255, 224,   0}, /* Peak hold. */
-		{  0, 200, 255}, /* Wi-Fi.     */
-		{255,  64, 255}, /* BLE.       */
-		{255,  48,  48}, /* Red.       */
+		{  0,   0,   0}, /* Black.          */
+		{255, 255, 255}, /* White.          */
+		{ 48,  48,  64}, /* Grid.           */
+		{ 64, 255,  64}, /* Trace.          */
+		{  0,  80,  24}, /* Fill.           */
+		{255, 224,   0}, /* Peak hold.      */
+		{  0, 200, 255}, /* Wi-Fi.          */
+		{255,  64, 255}, /* BLE.            */
+		{255,  48,  48}, /* Red.            */
+		{255, 160,   0}, /* Cursor.         */
+		{140, 140, 160}, /* Dim text.       */
+		{255, 120,  60}, /* Cellular bands. */
+		{120, 120, 255}, /* ISM band.       */
+		{ 16,  24,  64}, /* Menu.           */
+		{ 40,  90, 200}, /* Menu selection. */
 	};
 	for (int i = 0; i < (int)(sizeof(colors)/sizeof(colors[0])); i++)
 		lcd_palette(i, colors[i][0], colors[i][1], colors[i][2]);
@@ -120,23 +130,100 @@ static const struct {
 static const int gains[] = {-1, 20, 30, 40, 50, 60, 70}; /* -1: AGC (hardware gain). */
 #define GAINS (int)(sizeof(gains)/sizeof(gains[0]))
 
+static const struct {
+	int         khz;
+	const char *name;
+} steps[] = {
+	{   10, "10K"},
+	{  100, "100K"},
+	{ 1000, "1M"},
+	{ 5000, "5M"},
+	{20000, "20M"},
+};
+#define STEPS (int)(sizeof(steps)/sizeof(steps[0]))
+
+/* Band presets (menu): center frequency and span. */
+static const struct {
+	const char *name;
+	int         khz;
+	int         span;
+} presets[] = {
+	{"WIFI 2.4GHZ",   2442000, 2},
+	{"WIFI CH 1",     2412000, 1},
+	{"WIFI CH 6",     2437000, 1},
+	{"WIFI CH 11",    2462000, 1},
+	{"BLUETOOTH/BLE", 2441000, 2},
+	{"LTE B1 DL",     2152000, 2},
+	{"LTE B40",       2350000, 2},
+	{"LTE B7 UL",     2535000, 2},
+	{"LTE B38",       2595000, 1},
+	{"LTE B7 DL",     2655000, 2},
+};
+#define PRESETS (int)(sizeof(presets)/sizeof(presets[0]))
+
+/* Band scan ranges (kHz). */
+static const struct {
+	const char *name;
+	int         lo;
+	int         hi;
+} scans[] = {
+	{"FULL",     2150000, 2880000},
+	{"2.4G ISM", 2400000, 2500000},
+	{"LTE B40",  2300000, 2400000},
+	{"LTE B7",   2500000, 2690000},
+	{"LOW",      2150000, 2400000},
+	{"HIGH",     2500000, 2880000},
+};
+#define SCANS (int)(sizeof(scans)/sizeof(scans[0]))
+
+/* Known bands (overlays). */
+static const struct {
+	int         lo, hi; /* kHz. */
+	uint8_t     color;
+	const char *name;
+} bands[] = {
+	{2110000, 2170000, COLOR_CELL, "B1 DL"},
+	{2300000, 2400000, COLOR_CELL, "B40"},
+	{2400000, 2483500, COLOR_ISM,  "ISM"},
+	{2500000, 2570000, COLOR_CELL, "B7 UL"},
+	{2570000, 2620000, COLOR_CELL, "B38"},
+	{2620000, 2690000, COLOR_CELL, "B7 DL"},
+};
+#define BANDS (int)(sizeof(bands)/sizeof(bands[0]))
+
+enum {
+	MODE_SPECTRUM = 0,
+	MODE_WATERFALL,
+	MODE_SCAN,
+};
+
 static int freq_khz  = 2437000;
 static int freqk     = 0; /* ESP32 kHz tuning (FREQK, Chromatic ESP-SDR fork). */
 static int freq_min  = 2386000; /* FREQK range (kHz). */
 static int freq_max  = 2504000;
 static int span      = 1;
 static int gain      = 0;
+static int step      = 3;
+static int mode      = MODE_SPECTRUM;
+static int preset    = 0;
+static int scan      = 0;
 static int ref_db4   = -1; /* < 0: to set. */
-static int ref_auto  = 1;  /* Reference level following the peak level (else Up/Down). */
+static int ref_auto  = 1;  /* Reference level following the peak level (else manual). */
 static int peak_hold = 0;
 static int sound     = 0; /* RSSI tone. */
+static int cursor    = 0; /* Cursor on. */
+static int cursor_x  = 80;
+static int wf_speed  = 1;  /* Waterfall: one line every wf_speed updates. */
+static int wf_range  = 36; /* Waterfall: dB above the noise floor. */
 static int qspi      = 0; /* Captures over QSPI (else UART). */
 static int host      = 0; /* USB host relay active. */
 static int gain_db   = -1; /* Displayed gain (-1: AGC). */
+static int fps10;
+static char esp_info[48];
 
 /* Stock ESP-SDR: the ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz,
    2484MHz): its out of channel frequencies don't move the LO (measured on the console crystal
-   harmonics). The Chromatic ESP-SDR fork tunes 2386-2504MHz in kHz steps (FREQK). */
+   harmonics). The Chromatic ESP-SDR fork tunes 2150-2880MHz in kHz steps (FREQK). */
 static int next_channel(int mhz, int dir)
 {
 	static const int channels[] = {
@@ -154,39 +241,62 @@ static int next_channel(int mhz, int dir)
 	return channels[i];
 }
 
-static void set_freq(void)
+static void esp_cmd(const char *cmd)
 {
-	char cmd[32], reply[32];
-	if (freqk)
-		snprintf(cmd, sizeof(cmd), "FREQK %d", freq_khz);
-	else
-		snprintf(cmd, sizeof(cmd), "FREQ %d", freq_khz/1000);
+	char reply[32];
 	esp32sdr_cmd(cmd, reply, sizeof(reply), 200);
 }
 
-static void set_filter(void)
+static void set_freq_khz(int khz)
 {
-	/* ESP32 RX filter: opened for the 80MHz span (default ~+-17MHz passband). */
-	char reply[32];
-	esp32sdr_cmd((spans[span].mhz == 80) ? "LPF 0" : "LPF AUTO", reply, sizeof(reply), 200);
+	char cmd[32];
+	if (freqk)
+		snprintf(cmd, sizeof(cmd), "FREQK %d", khz);
+	else
+		snprintf(cmd, sizeof(cmd), "FREQ %d", khz/1000);
+	esp_cmd(cmd);
+}
+
+static void set_filter(int wide)
+{
+	/* ESP32 RX filter: opened for the 80MHz span/scan (default ~+-17MHz passband). */
+	esp_cmd(wide ? "LPF 0" : "LPF AUTO");
 }
 
 static void set_gain(void)
 {
-	char cmd[32], reply[32];
+	char cmd[32];
 	gain_db = gains[gain];
 	if (gain_db < 0)
 		snprintf(cmd, sizeof(cmd), "GAIN HARDWARE");
 	else
 		snprintf(cmd, sizeof(cmd), "GAIN MANUAL %d", gain_db);
-	esp32sdr_cmd(cmd, reply, sizeof(reply), 200);
+	esp_cmd(cmd);
 }
 
-/* Display -------------------------------------------------------------------------------------- */
+/* Display State -------------------------------------------------------------------------------- */
 
 static int col_db4[LCD_WIDTH];
 static int peak_db4[LCD_WIDTH];
 static int floor_db4 = -1; /* Noise floor (median of the center half columns, smoothed). */
+static int view_lo, view_hi; /* Displayed range (kHz). */
+
+static void reset_levels(void)
+{
+	floor_db4 = -1;
+	if (ref_auto)
+		ref_db4 = -1;
+	memset(peak_db4, 0, sizeof(peak_db4));
+}
+
+static void tune(int khz)
+{
+	if (freqk)
+		khz = (khz < freq_min) ? freq_min : (khz > freq_max) ? freq_max : khz;
+	freq_khz = khz;
+	set_freq_khz(freq_khz);
+	reset_levels();
+}
 
 static void update_floor(void)
 {
@@ -201,12 +311,25 @@ static void update_floor(void)
 	floor_db4 = (floor_db4 < 0) ? median : floor_db4 + (median - floor_db4)/4;
 }
 
-static int freq_to_x(int khz)
+static void update_ref(int peak_x)
 {
-	/* Column of a frequency (kHz), -1 outside of the span. */
-	int lo = freq_khz - 500*spans[span].mhz;
-	int x  = (khz - lo)*LCD_WIDTH/(1000*spans[span].mhz);
-	return (khz < lo || x >= LCD_WIDTH) ? -1 : x;
+	/* Auto reference: 5dB above the peak (5dB steps), followed when off by 10dB or more. */
+	int ref_target = (col_db4[peak_x] + 5*4 + 19)/20*20;
+	if (ref_db4 < 0 || (ref_auto && (ref_target - ref_db4 >= 10*4 || ref_db4 - ref_target >= 10*4)))
+		ref_db4 = ref_target;
+}
+
+static int x_to_khz(int x)
+{
+	return view_lo + (int)((int64_t)(2*x + 1)*(view_hi - view_lo)/(2*LCD_WIDTH));
+}
+
+static int khz_to_x(int khz)
+{
+	/* Column of a frequency, -1 outside of the view. */
+	if (khz < view_lo || khz >= view_hi)
+		return -1;
+	return (int)((int64_t)(khz - view_lo)*LCD_WIDTH/(view_hi - view_lo));
 }
 
 static int db4_to_y(int db4)
@@ -215,45 +338,120 @@ static int db4_to_y(int db4)
 	return (y < 0) ? 0 : (y > SPEC_H - 1) ? SPEC_H - 1 : y;
 }
 
-static void draw_header(int fps10, int peak_x)
+static void format_khz(char *s, int len, int khz, int decimals)
 {
-	char line[48];
-	lcd_rect(0, HEADER_Y, LCD_WIDTH, SPEC_Y, COLOR_BLACK);
-	const char *link = host ? "USB" : qspi ? "QSPI" : "UART";
-	char freq[16], gain_text[8];
-	if (freq_khz % 1000)
-		snprintf(freq, sizeof(freq), "%d.%03d", freq_khz/1000, freq_khz % 1000);
+	/* MHz with 0-3 decimals. */
+	static const int div[] = {1000, 100, 10, 1};
+	if (decimals == 0)
+		snprintf(s, len, "%d", khz/1000);
 	else
-		snprintf(freq, sizeof(freq), "%d", freq_khz/1000);
-	if (gain_db < 0)
-		snprintf(gain_text, sizeof(gain_text), "AGC");
-	else
-		snprintf(gain_text, sizeof(gain_text), "%d", gain_db);
-	snprintf(line, sizeof(line), "%s MHZ SPAN %d GAIN %s %s", freq, spans[span].mhz, gain_text,
-		link);
-	lcd_text(1, HEADER_Y + 1, COLOR_WHITE, line);
-	int peak_khz = freq_khz - 500*spans[span].mhz + (2*peak_x + 1)*500*spans[span].mhz/LCD_WIDTH;
-	snprintf(line, sizeof(line), "REF %d PK %d.%d %d %s%d.%dFPS", ref_db4/4, peak_khz/1000,
-		(peak_khz % 1000)/100, col_db4[peak_x]/4, sound ? "SND " : peak_hold ? "HOLD " : "",
-		fps10/10, fps10 % 10);
-	lcd_text(1, HEADER_Y + 8, COLOR_WHITE, line);
+		snprintf(s, len, "%d.%0*d", khz/1000, decimals, (khz % 1000)/div[decimals]);
+}
+
+/* Band scan state (see below). */
+static int scan_step;
+static int scan_steps(void);
+
+/* Toast ---------------------------------------------------------------------------------------- */
+
+static char     toast_text[40];
+static uint32_t toast_until;
+
+static void toast(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(toast_text, sizeof(toast_text), fmt, ap);
+	va_end(ap);
+	toast_until = esp32sdr_ms() + 1500;
+}
+
+/* Drawing -------------------------------------------------------------------------------------- */
+
+static void draw_header(int peak_x)
+{
+	char line[48], f[16];
+	lcd_rect(0, 0, LCD_WIDTH, HEADER_H, COLOR_BLACK);
+	if (mode == MODE_SCAN) {
+		lcd_text_scaled(1, 1, COLOR_WHITE, "SCAN", 2);
+		snprintf(line, sizeof(line), "%s %d-%d", scans[scan].name, view_lo/1000, view_hi/1000);
+		lcd_text(36, 1, COLOR_WHITE, line);
+		/* Sweep progress. */
+		lcd_rect(0, HEADER_H - 1, (scan_step + 1)*LCD_WIDTH/scan_steps(), 1, COLOR_CURSOR);
+	} else {
+		format_khz(f, sizeof(f), freq_khz, 3);
+		lcd_text_scaled(1, 1, COLOR_WHITE, f, 2);
+		lcd_text(67, 7, COLOR_DIM, "MHZ");
+		snprintf(line, sizeof(line), "SPAN%d STEP%s", spans[span].mhz, steps[step].name);
+		lcd_text(81, 1, COLOR_WHITE, line);
+	}
+	/* Cursor or peak readout. */
+	int x = cursor ? cursor_x : peak_x;
+	format_khz(f, sizeof(f), x_to_khz(x), (view_hi - view_lo) > 100000 ? 1 : 2);
+	snprintf(line, sizeof(line), "%s %s %d", cursor ? "CUR" : "PK", f, col_db4[x]/4);
+	lcd_text((mode == MODE_SCAN) ? 36 : 81, 8, cursor ? COLOR_CURSOR : COLOR_PEAK, line);
+}
+
+static void draw_axis(int y)
+{
+	/* Frequency labels: spacing giving >= 24 pixels per label. */
+	static const int spacings[] = {1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000};
+	char label[8];
+	int  width = view_hi - view_lo, spacing = spacings[7];
+	for (int i = 0; i < 8; i++)
+		if ((int64_t)spacings[i]*LCD_WIDTH/width >= 24) {
+			spacing = spacings[i];
+			break;
+		}
+	lcd_rect(0, y, LCD_WIDTH, AXIS_H, COLOR_BLACK);
+	for (int f = (view_lo + spacing - 1)/spacing*spacing; f < view_hi; f += spacing) {
+		int x = khz_to_x(f);
+		snprintf(label, sizeof(label), "%d", f/1000);
+		int lx = x - 2*(int)strlen(label) + 1;
+		if (lx >= 0 && lx + 4*(int)strlen(label) <= LCD_WIDTH)
+			lcd_text(lx, y + 1, COLOR_DIM, label);
+		lcd_rect(x, y, 1, 1, COLOR_DIM);
+	}
+}
+
+static void draw_bands(void)
+{
+	/* Known bands (top of the spectrum), Wi-Fi channels/BLE advertising channels. */
+	for (int i = 0; i < BANDS; i++) {
+		int lo = (bands[i].lo > view_lo) ? bands[i].lo : view_lo;
+		int hi = (bands[i].hi < view_hi) ? bands[i].hi : view_hi - 1;
+		if (lo >= hi)
+			continue;
+		int x0 = khz_to_x(lo), x1 = khz_to_x(hi);
+		lcd_rect(x0, SPEC_Y, x1 - x0 + 1, 1, bands[i].color);
+		if (x1 - x0 > 4*(int)strlen(bands[i].name) + 2)
+			lcd_text(x0 + 1, SPEC_Y + 2, bands[i].color, bands[i].name);
+	}
+	if (view_hi - view_lo <= 100000) {
+		char label[4];
+		for (int ch = 1; ch <= 14; ch++) {
+			int x = khz_to_x(1000*((ch == 14) ? 2484 : 2407 + 5*ch));
+			if (x < 0 || (view_hi - view_lo > 40000 && ch != 1 && ch != 6 && ch != 11 && ch != 14))
+				continue;
+			snprintf(label, sizeof(label), "%d", ch);
+			lcd_text(x - 2*(int)strlen(label) + 1, SPEC_Y + 9, COLOR_WIFI, label);
+		}
+		static const int ble[] = {2402000, 2426000, 2480000};
+		for (int i = 0; i < 3; i++) {
+			int x = khz_to_x(ble[i]);
+			if (x >= 0)
+				lcd_rect(x, SPEC_Y + 1, 1, 6, COLOR_BLE);
+		}
+	}
 }
 
 static void draw_spectrum(void)
 {
 	lcd_rect(0, SPEC_Y, LCD_WIDTH, SPEC_H, COLOR_BLACK);
-	/* Grid: 10dB lines, 10MHz ticks. */
+	/* Grid: 10dB lines. */
 	for (int db = 1; db < 6; db++)
 		for (int x = 0; x < LCD_WIDTH; x += 2)
 			lcd_screen[SPEC_Y + db*SPEC_H/6][x] = COLOR_GRID;
-	int f_lo = freq_khz/1000 - spans[span].mhz/2;
-	int f_hi = freq_khz/1000 + spans[span].mhz/2;
-	for (int f = (f_lo + 9)/10*10; f <= f_hi; f += 10) {
-		int x = freq_to_x(1000*f);
-		if (x >= 0)
-			for (int y = SPEC_Y; y < SPEC_Y + SPEC_H; y += 2)
-				lcd_screen[y][x] = COLOR_GRID;
-	}
 	/* Trace (filled), peak hold. */
 	int prev = db4_to_y(col_db4[0]);
 	for (int x = 0; x < LCD_WIDTH; x++) {
@@ -267,50 +465,168 @@ static void draw_spectrum(void)
 		if (peak_hold)
 			lcd_screen[SPEC_Y + db4_to_y(peak_db4[x])][x] = COLOR_PEAK;
 	}
+	draw_bands();
+	if (cursor)
+		for (int y = SPEC_Y; y < SPEC_Y + SPEC_H; y += 2)
+			lcd_screen[y][cursor_x] = COLOR_CURSOR;
+	/* Status flags (top right). */
+	char flags[32];
+	snprintf(flags, sizeof(flags), "%s%s%s%d.%d", host ? "USB " : "", peak_hold ? "HOLD " : "",
+		sound ? "TONE " : "", fps10/10, fps10 % 10);
+	lcd_text(LCD_WIDTH - 4*(int)strlen(flags), SPEC_Y + SPEC_H - 7, COLOR_DIM, flags);
 }
 
-static void draw_markers(void)
+static void draw_waterfall(int y0, int h, int new_line)
 {
-	char label[4];
-	lcd_rect(0, MARKER_Y, LCD_WIDTH, MARKER_H, COLOR_BLACK);
-	/* Wi-Fi channels 1-14: numbers, 20MHz band of the non-overlapping ones on the last row. */
-	int w = 20*LCD_WIDTH/spans[span].mhz;
-	for (int ch = 1; ch <= 14; ch++) {
-		int f    = (ch == 14) ? 2484 : 2407 + 5*ch;
-		int x    = freq_to_x(1000*f);
-		int main = (ch == 1 || ch == 6 || ch == 11 || ch == 14);
-		if (x < 0)
-			continue;
-		if (main)
-			lcd_rect(x - w/2 + 1, MARKER_Y + MARKER_H - 1, w - 2, 1, COLOR_WIFI);
-		if (main || spans[span].mhz <= 40) {
-			snprintf(label, sizeof(label), "%d", ch);
-			lcd_text(x - 2*(int)strlen(label) + 1, MARKER_Y, COLOR_WIFI, label);
+	if (new_line) {
+		memmove(lcd_screen[y0 + 1], lcd_screen[y0], (h - 1)*LCD_WIDTH);
+		for (int x = 0; x < LCD_WIDTH; x++) {
+			int v = (col_db4[x] - (floor_db4 - 4*4))*HEAT_COLORS/(wf_range*4);
+			v = (v < 0) ? 0 : (v > HEAT_COLORS - 1) ? HEAT_COLORS - 1 : v;
+			lcd_screen[y0][x] = COLOR_HEAT + v;
 		}
 	}
-	/* BLE advertising channels 37/38/39. */
-	static const int ble[] = {2402, 2426, 2480};
-	for (int i = 0; i < 3; i++) {
-		int x = freq_to_x(1000*ble[i]);
-		if (x >= 0)
-			lcd_rect(x, MARKER_Y, 1, MARKER_H - 2, COLOR_BLE);
+	/* Cursor (not part of the scrolled image: drawn on the presented frame only). */
+}
+
+static void draw_message(const char *msg, uint8_t color)
+{
+	int w = 4*(int)strlen(msg) + 6;
+	int x = (LCD_WIDTH - w)/2, y = SPEC_Y + SPEC_H + AXIS_H + 6;
+	lcd_rect(x, y, w, 10, COLOR_MENU);
+	lcd_rect(x, y, w, 1, color);
+	lcd_text(x + 3, y + 3, color, msg);
+}
+
+/* Menu/Pages ----------------------------------------------------------------------------------- */
+
+enum {
+	MENU_BAND = 0,
+	MENU_GAIN,
+	MENU_REF,
+	MENU_WF_SPEED,
+	MENU_WF_RANGE,
+	MENU_TONE,
+	MENU_SCAN,
+	MENU_HELP,
+	MENU_INFO,
+	MENU_ITEMS,
+};
+
+static int menu_open = 0;
+static int menu_item = 0;
+static int page      = 0; /* 0: none, 1: help, 2: info. */
+
+static void menu_value(int item, char *s, int len)
+{
+	switch (item) {
+	case MENU_BAND:     snprintf(s, len, "%s", presets[preset].name); break;
+	case MENU_GAIN:
+		if (gains[gain] < 0)
+			snprintf(s, len, "AGC");
+		else
+			snprintf(s, len, "%d", gains[gain]);
+		break;
+	case MENU_REF:
+		if (ref_auto)
+			snprintf(s, len, "AUTO");
+		else
+			snprintf(s, len, "%d DB", ref_db4/4);
+		break;
+	case MENU_WF_SPEED: snprintf(s, len, "1/%d", wf_speed); break;
+	case MENU_WF_RANGE: snprintf(s, len, "%d DB", wf_range); break;
+	case MENU_TONE:     snprintf(s, len, "%s", sound ? "ON" : "OFF"); break;
+	case MENU_SCAN:     snprintf(s, len, "%s", scans[scan].name); break;
+	default:            s[0] = 0; break;
 	}
 }
 
-static void draw_waterfall(void)
+static void draw_menu(void)
 {
-	memmove(lcd_screen[WATER_Y + 1], lcd_screen[WATER_Y], (WATER_H - 1)*LCD_WIDTH);
-	for (int x = 0; x < LCD_WIDTH; x++) {
-		int v = (col_db4[x] - (floor_db4 - 4*4))*HEAT_COLORS/WATER_DB4;
-		v = (v < 0) ? 0 : (v > HEAT_COLORS - 1) ? HEAT_COLORS - 1 : v;
-		lcd_screen[WATER_Y][x] = COLOR_HEAT + v;
+	static const char *names[MENU_ITEMS] = {
+		"BAND", "GAIN", "REF LEVEL", "WATERFALL", "WF RANGE", "RSSI TONE", "SCAN RANGE", "HELP",
+		"INFO",
+	};
+	int x = 12, y = 18, w = LCD_WIDTH - 24, h = 14 + 9*MENU_ITEMS;
+	lcd_rect(x, y, w, h, COLOR_MENU);
+	lcd_rect(x, y, w, 1, COLOR_SELECT);
+	lcd_text(x + 4, y + 3, COLOR_WHITE, "MENU");
+	lcd_text(x + w - 4*12 - 2, y + 3, COLOR_DIM, "A/<>:SET B:X");
+	for (int i = 0; i < MENU_ITEMS; i++) {
+		char value[24];
+		int  iy = y + 12 + 9*i;
+		if (i == menu_item)
+			lcd_rect(x + 2, iy - 1, w - 4, 8, COLOR_SELECT);
+		lcd_text(x + 4, iy, COLOR_WHITE, names[i]);
+		menu_value(i, value, sizeof(value));
+		lcd_text(x + w - 4 - 4*(int)strlen(value), iy, COLOR_PEAK, value);
 	}
 }
 
-static void draw_message(const char *msg)
+static void draw_page(void)
 {
-	lcd_rect(0, SPEC_Y + SPEC_H/2 - 4, LCD_WIDTH, 9, COLOR_BLACK);
-	lcd_text((LCD_WIDTH - 4*(int)strlen(msg))/2, SPEC_Y + SPEC_H/2 - 3, COLOR_RED, msg);
+	static const char *help[] = {
+		"LEFT/RIGHT  TUNE (HOLD: FAST)",
+		"UP/DOWN     TUNING STEP",
+		"A           SPAN 16/40/80MHZ",
+		"B           CURSOR (A: TUNE TO)",
+		"START       PEAK HOLD",
+		"SELECT      VIEW: SPECTRUM,",
+		"            WATERFALL, SCAN",
+		"MENU        BANDS, GAIN, REF,",
+		"            WATERFALL, TONE...",
+		"SCAN: LEFT/RIGHT CURSOR,",
+		"      A: OPEN AT CURSOR",
+	};
+	char info[8][40];
+	const char **lines = help;
+	int n = sizeof(help)/sizeof(help[0]);
+	if (page == 2) {
+		snprintf(info[0], 40, "ESP32: %s", esp_info);
+		snprintf(info[1], 40, "CAPTURES: %s", qspi ? "QSPI (FAST)" : "UART");
+		snprintf(info[2], 40, "TUNING: %d-%d MHZ", freq_min/1000, freq_max/1000);
+		snprintf(info[3], 40, "%s", freqk ? "(CHROMATIX ESP-SDR FORK)" : "(STOCK ESP-SDR)");
+		snprintf(info[4], 40, "USB HOST: %s", host ? "ACTIVE" : "IDLE");
+		snprintf(info[5], 40, "UPDATE RATE: %d.%d/S", fps10/10, fps10 % 10);
+		snprintf(info[6], 40, "FFT: 512 PTS, CPU (VEXRISCV)");
+		snprintf(info[7], 40, "SPECTRUM ORIENT. CORRECTED");
+		static const char *ptr[8];
+		for (int i = 0; i < 8; i++)
+			ptr[i] = info[i];
+		lines = ptr;
+		n = 8;
+	}
+	int x = 4, y = 16, w = LCD_WIDTH - 8, h = 14 + 8*n;
+	lcd_rect(x, y, w, h, COLOR_MENU);
+	lcd_rect(x, y, w, 1, COLOR_SELECT);
+	lcd_text(x + 3, y + 3, COLOR_WHITE, (page == 1) ? "HELP" : "INFO");
+	for (int i = 0; i < n; i++)
+		lcd_text(x + 3, y + 12 + 8*i, COLOR_WHITE, lines[i]);
+}
+
+static uint8_t overlay_saved[LCD_HEIGHT][LCD_WIDTH] __attribute__((aligned(4)));
+
+static int draw_overlays(void)
+{
+	/* Overlays (menu, pages, toast) on top of the screen, the screen saved first (restored after
+	   the LCD update: the waterfall scrolls its image). Returns 1 if saved. */
+	int toast_on = (int32_t)(toast_until - esp32sdr_ms()) > 0;
+	if (!menu_open && !page && !toast_on)
+		return 0;
+	memcpy(overlay_saved, lcd_screen, sizeof(overlay_saved));
+	if (menu_open)
+		draw_menu();
+	if (page)
+		draw_page();
+	if (!menu_open && !page && toast_on)
+		draw_message(toast_text, COLOR_WHITE);
+	return 1;
+}
+
+static void restore_overlays(int saved)
+{
+	if (saved)
+		memcpy(lcd_screen, overlay_saved, sizeof(overlay_saved));
 }
 
 /* RSSI Tone ------------------------------------------------------------------------------------ */
@@ -348,17 +664,143 @@ static void tone_init(void)
 
 static void tone_update(void)
 {
-	/* Pitch: 200Hz + 40Hz/dB of the center quarter peak above the noise floor. */
-	if (!sound) {
+	/* Pitch: 200Hz + 40Hz/dB of the peak above the noise floor around the cursor (or the center
+	   quarter of the span). */
+	if (!sound || mode == MODE_SCAN) {
 		tone_freq = 0;
 		return;
 	}
 	int peak = 0;
-	for (int x = 3*LCD_WIDTH/8; x < 5*LCD_WIDTH/8; x++)
+	int x0 = cursor ? cursor_x - 4 : 3*LCD_WIDTH/8, x1 = cursor ? cursor_x + 4 : 5*LCD_WIDTH/8;
+	for (int x = (x0 < 0) ? 0 : x0; x < x1 && x < LCD_WIDTH; x++)
 		peak = (col_db4[x] > peak) ? col_db4[x] : peak;
 	int db = (peak - floor_db4)/4;
 	db = (db < 0) ? 0 : (db > 50) ? 50 : db;
 	tone_freq = 200 + 40*db;
+}
+
+/* Spectrum ------------------------------------------------------------------------------------- */
+
+#define SAMPLES      4096
+#define SCAN_SAMPLES 2048
+#define SCAN_STEP    64000 /* kHz: center +-32MHz of the 80MS/s wide captures. */
+
+static int8_t   iq[2*SAMPLES];
+static uint64_t power[FFT_SIZE];
+static uint32_t updates;
+
+static int find_peak(void)
+{
+	int peak_x = 0;
+	for (int x = 0; x < LCD_WIDTH; x++)
+		if (col_db4[x] > col_db4[peak_x])
+			peak_x = x;
+	return peak_x;
+}
+
+static void present(int peak_x, int new_line)
+{
+	/* Spectrum/axis/waterfall layout of the current view, overlays, LCD. */
+	draw_header(peak_x);
+	int axis_y = (mode == MODE_WATERFALL) ? HEADER_H : SPEC_Y + SPEC_H;
+	if (mode != MODE_WATERFALL)
+		draw_spectrum();
+	draw_axis(axis_y);
+	if (cursor) /* Cursor mark in the axis row (the waterfall image scrolls). */
+		lcd_rect(cursor_x - 1, axis_y + AXIS_H - 2, 3, 2, COLOR_CURSOR);
+	draw_waterfall(axis_y + AXIS_H, LCD_HEIGHT - axis_y - AXIS_H, new_line);
+	int saved = draw_overlays();
+	lcd_present();
+	restore_overlays(saved);
+}
+
+static int show_spectrum(const int8_t *data, int samples)
+{
+	/* Spectrum: FFT bins -> columns (max). */
+	view_lo = freq_khz - 500*spans[span].mhz;
+	view_hi = freq_khz + 500*spans[span].mhz;
+	dsp_power_spectrum(data, samples, power);
+	for (int x = 0; x < LCD_WIDTH; x++) {
+		uint64_t p = 0;
+		for (int k = x*FFT_SIZE/LCD_WIDTH; k < (x + 1)*FFT_SIZE/LCD_WIDTH; k++)
+			p = (power[k] > p) ? power[k] : p;
+		col_db4[x] = dsp_db4(p);
+		if (col_db4[x] > peak_db4[x])
+			peak_db4[x] = col_db4[x];
+	}
+	int peak_x = find_peak();
+	update_floor();
+	update_ref(peak_x);
+	tone_update();
+	updates++;
+	present(peak_x, updates % wf_speed == 0);
+	return peak_x;
+}
+
+/* Band Scan ------------------------------------------------------------------------------------ */
+
+static int scan_new[LCD_WIDTH]; /* Columns of the current sweep. */
+
+static int scan_steps(void)
+{
+	return (scans[scan].hi - scans[scan].lo + SCAN_STEP - 1)/SCAN_STEP;
+}
+
+static void scan_start(void)
+{
+	scan_step = 0;
+	view_lo   = scans[scan].lo;
+	view_hi   = scans[scan].hi;
+	for (int x = 0; x < LCD_WIDTH; x++)
+		scan_new[x] = 0;
+	reset_levels();
+}
+
+static int scan_update(void)
+{
+	/* One sweep step: tune, 80MS/s capture, bins within +-32MHz -> columns (max). */
+	int center = view_lo + SCAN_STEP/2 + scan_step*SCAN_STEP;
+	set_freq_khz(center);
+	if (esp32sdr_capture(SCAN_SAMPLES, ESP32SDR_RATE_80MSPS, iq, NULL) != 0) {
+		esp32sdr_flush();
+		return -1;
+	}
+	dsp_power_spectrum(iq, SCAN_SAMPLES, power);
+	for (int k = 0; k < FFT_SIZE; k++) {
+		int f = center + (k - FFT_SIZE/2)*80000/FFT_SIZE;
+		if (k < FFT_SIZE/2 - 205 || k > FFT_SIZE/2 + 205) /* +-32MHz. */
+			continue;
+		int x = khz_to_x(f);
+		if (x < 0)
+			continue;
+		int db4 = dsp_db4(power[k]);
+		if (db4 > scan_new[x])
+			scan_new[x] = db4;
+	}
+	/* Columns of this step shown as they come, the waterfall line once per sweep. */
+	for (int x = 0; x < LCD_WIDTH; x++) {
+		int f = x_to_khz(x);
+		if (f >= center - SCAN_STEP/2 && f < center + SCAN_STEP/2) {
+			col_db4[x] = scan_new[x];
+			scan_new[x] = 0;
+			if (col_db4[x] > peak_db4[x])
+				peak_db4[x] = col_db4[x];
+		}
+	}
+	int peak_x = find_peak();
+	int done   = 0;
+	if (ref_db4 < 0)
+		update_ref(peak_x);
+	if (scan_step + 1 >= scan_steps()) {
+		update_floor();
+		update_ref(peak_x);
+		updates++;
+		done = 1;
+	}
+	/* Waterfall line once per sweep. */
+	present(peak_x, done && updates % wf_speed == 0);
+	scan_step = done ? 0 : scan_step + 1;
+	return 0;
 }
 
 /* Buttons -------------------------------------------------------------------------------------- */
@@ -368,61 +810,203 @@ enum {
 };
 
 static uint32_t buttons_last;
+static uint32_t buttons_repeat; /* Held directions repeated (held over 6 updates). */
 static int      buttons_held;
 
 static uint32_t buttons_pressed(void)
 {
-	/* Pressed edges, auto repeat for the directions (held over 6 updates). */
+	/* Pressed edges, Left/Right auto repeat (buttons_repeat: all the directions). */
 	uint32_t buttons = demo_buttons_status_read();
 	uint32_t pressed = buttons & ~buttons_last;
 	uint32_t dirs    = (1 << BTN_LEFT) | (1 << BTN_RIGHT) | (1 << BTN_UP) | (1 << BTN_DOWN);
+	buttons_repeat = 0;
 	if (buttons & dirs) {
 		if (++buttons_held > 6)
-			pressed |= buttons & dirs;
+			buttons_repeat = buttons & dirs;
 	} else
 		buttons_held = 0;
 	buttons_last = buttons;
-	return pressed;
+	return pressed | (buttons_repeat & ((1 << BTN_LEFT) | (1 << BTN_RIGHT)));
 }
 
-/* Main ----------------------------------------------------------------------------------------- */
-
-#define SAMPLES 4096
-
-static int8_t   iq[2*SAMPLES];
-static uint64_t power[FFT_SIZE];
-
-static int fps10;
-
-static int show_spectrum(const int8_t *data, int samples)
+static void set_mode(int m)
 {
-	/* Spectrum: FFT bins -> columns (max). */
-	dsp_power_spectrum(data, samples, power);
-	int peak_x = 0;
-	for (int x = 0; x < LCD_WIDTH; x++) {
-		uint64_t p = 0;
-		for (int k = x*FFT_SIZE/LCD_WIDTH; k < (x + 1)*FFT_SIZE/LCD_WIDTH; k++)
-			p = (power[k] > p) ? power[k] : p;
-		col_db4[x] = dsp_db4(p);
-		if (col_db4[x] > peak_db4[x])
-			peak_db4[x] = col_db4[x];
-		if (col_db4[x] > col_db4[peak_x])
-			peak_x = x;
+	int wide_before = (mode == MODE_SCAN) || (spans[span].mhz == 80);
+	mode = m;
+	int wide = (mode == MODE_SCAN) || (spans[span].mhz == 80);
+	if (wide != wide_before)
+		set_filter(wide);
+	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
+	if (mode == MODE_SCAN) {
+		scan_start();
+		toast("SCAN %s: A OPENS CURSOR", scans[scan].name);
+	} else {
+		tune(freq_khz);
+		toast((mode == MODE_SPECTRUM) ? "SPECTRUM + WATERFALL" : "WATERFALL");
 	}
-	update_floor();
-	/* Auto reference: 5dB above the peak (5dB steps), followed when off by 10dB or more. */
-	int ref_target = (col_db4[peak_x] + 5*4 + 19)/20*20;
-	if (ref_db4 < 0 || (ref_auto && (ref_target - ref_db4 >= 10*4 || ref_db4 - ref_target >= 10*4)))
-		ref_db4 = ref_target;
-	tone_update();
+}
 
-	/* Display. */
-	draw_spectrum();
-	draw_markers();
-	draw_waterfall();
-	draw_header(fps10, peak_x);
-	lcd_present();
-	return peak_x;
+static void menu_change(int dir)
+{
+	switch (menu_item) {
+	case MENU_BAND:
+		preset = (preset + PRESETS + dir) % PRESETS;
+		break;
+	case MENU_GAIN:
+		gain = (gain + GAINS + dir) % GAINS;
+		set_gain();
+		reset_levels();
+		break;
+	case MENU_REF:
+		if (ref_auto) {
+			ref_auto = 0;
+			if (ref_db4 < 0)
+				ref_db4 = 0;
+		}
+		ref_db4 += dir*5*4;
+		break;
+	case MENU_WF_SPEED:
+		wf_speed = (dir > 0) ? ((wf_speed < 8) ? 2*wf_speed : 8) : ((wf_speed > 1) ? wf_speed/2 : 1);
+		break;
+	case MENU_WF_RANGE:
+		wf_range += dir*6;
+		wf_range  = (wf_range < 12) ? 12 : (wf_range > 60) ? 60 : wf_range;
+		break;
+	case MENU_TONE:
+		sound = !sound;
+		break;
+	case MENU_SCAN:
+		scan = (scan + SCANS + dir) % SCANS;
+		if (mode == MODE_SCAN)
+			scan_start();
+		break;
+	}
+}
+
+static void menu_select(void)
+{
+	switch (menu_item) {
+	case MENU_BAND:
+		/* Apply the preset: spectrum view. */
+		span = presets[preset].span;
+		menu_open = 0;
+		set_mode(MODE_SPECTRUM);
+		set_filter(spans[span].mhz == 80);
+		tune(presets[preset].khz);
+		toast("%s", presets[preset].name);
+		break;
+	case MENU_REF:
+		ref_auto = 1;
+		ref_db4  = -1;
+		break;
+	case MENU_HELP:
+		page = 1;
+		menu_open = 0;
+		break;
+	case MENU_INFO:
+		page = 2;
+		menu_open = 0;
+		break;
+	default:
+		menu_change(1);
+		break;
+	}
+}
+
+static void handle_buttons(void)
+{
+	uint32_t p = buttons_pressed();
+	if (menu_open)
+		p |= buttons_repeat & ((1 << BTN_UP) | (1 << BTN_DOWN));
+	if (!p)
+		return;
+	/* Pages: any button closes. */
+	if (page) {
+		page = 0;
+		return;
+	}
+	/* Menu (Up/Down repeated too). */
+	if (menu_open) {
+		if (p & ((1 << BTN_MENU) | (1 << BTN_B)))
+			menu_open = 0;
+		if (p & (1 << BTN_UP))
+			menu_item = (menu_item + MENU_ITEMS - 1) % MENU_ITEMS;
+		if (p & (1 << BTN_DOWN))
+			menu_item = (menu_item + 1) % MENU_ITEMS;
+		if (p & (1 << BTN_LEFT))
+			menu_change(-1);
+		if (p & (1 << BTN_RIGHT))
+			menu_change(1);
+		if (p & (1 << BTN_A))
+			menu_select();
+		return;
+	}
+	if (p & (1 << BTN_MENU)) {
+		menu_open = 1;
+		return;
+	}
+	if (p & (1 << BTN_SEL)) {
+		int modes = freqk ? 3 : 2; /* Scan: Chromatic ESP-SDR fork (kHz tuning, wide captures). */
+		set_mode((mode + 1) % modes);
+		return;
+	}
+	if (p & (1 << BTN_START)) {
+		peak_hold = !peak_hold;
+		memset(peak_db4, 0, sizeof(peak_db4));
+		toast("PEAK HOLD %s", peak_hold ? "ON" : "OFF");
+	}
+	if (p & (1 << BTN_B)) {
+		cursor = !cursor;
+		toast(cursor ? "CURSOR: <> MOVE, A: TUNE" : "CURSOR OFF");
+	}
+	int dir = (p & (1 << BTN_RIGHT)) ? 1 : (p & (1 << BTN_LEFT)) ? -1 : 0;
+	if (mode == MODE_SCAN || cursor) {
+		/* Cursor: 1 column (held: 4). */
+		if (dir) {
+			cursor   = 1;
+			cursor_x += dir*((buttons_held > 30) ? 4 : 1);
+			cursor_x  = (cursor_x < 0) ? 0 : (cursor_x > LCD_WIDTH - 1) ? LCD_WIDTH - 1 : cursor_x;
+		}
+		if (p & (1 << BTN_A)) {
+			int khz = x_to_khz(cursor_x);
+			if (mode == MODE_SCAN) {
+				span = freqk ? 1 : span;
+				set_mode(MODE_SPECTRUM);
+			}
+			tune(freqk ? khz/10*10 : 1000*next_channel(khz/1000, 0));
+			cursor_x = LCD_WIDTH/2;
+			char f[16];
+			format_khz(f, sizeof(f), freq_khz, 3);
+			toast("TUNED %s MHZ", f);
+		}
+	} else {
+		if (dir) {
+			/* Tuning step (held: x5 after ~1s). */
+			if (freqk) {
+				int s = steps[step].khz*((buttons_held > 30) ? 5 : 1);
+				tune(freq_khz + dir*s);
+			} else
+				tune(1000*next_channel(freq_khz/1000, dir));
+		}
+		if (p & (1 << BTN_A)) {
+			int wide_before = (spans[span].mhz == 80);
+			span = (span + 1) % SPANS;
+			if ((spans[span].mhz == 80) != wide_before)
+				set_filter(spans[span].mhz == 80);
+			reset_levels();
+			toast("SPAN %d MHZ%s", spans[span].mhz, (spans[span].mhz == 80) ? " (WIDE)" : "");
+		}
+	}
+	if (mode != MODE_SCAN && (p & ((1 << BTN_UP) | (1 << BTN_DOWN)))) {
+		step += (p & (1 << BTN_UP)) ? 1 : -1;
+		step  = (step < 0) ? 0 : (step > STEPS - 1) ? STEPS - 1 : step;
+		toast("STEP %sHZ", steps[step].name);
+	}
+	if (mode == MODE_SCAN && (p & ((1 << BTN_UP) | (1 << BTN_DOWN)))) {
+		scan = (scan + SCANS + ((p & (1 << BTN_UP)) ? 1 : -1)) % SCANS;
+		scan_start();
+		toast("SCAN %s %d-%d MHZ", scans[scan].name, scans[scan].lo/1000, scans[scan].hi/1000);
+	}
 }
 
 /* USB Host Relay ------------------------------------------------------------------------------- */
@@ -466,11 +1050,8 @@ static void host_command(char *line)
 	}
 	/* Displayed settings. */
 	if (sscanf(line, "FREQ %u", &n) == 1 || sscanf(line, "FREQK %u", &n) == 1) {
-		freq_khz  = (line[4] == 'K') ? (int)n : (int)n*1000;
-		floor_db4 = -1;
-		if (ref_auto)
-			ref_db4 = -1;
-		memset(peak_db4, 0, sizeof(peak_db4));
+		freq_khz = (line[4] == 'K') ? (int)n : (int)n*1000;
+		reset_levels();
 	} else if (!strcmp(line, "GAIN HARDWARE")) {
 		gain_db = -1;
 	} else if (sscanf(line, "GAIN MANUAL %u", &n) == 1) {
@@ -495,9 +1076,8 @@ static void host_command(char *line)
 	}
 	for (int i = 0; i < 3; i++)
 		if (spans[i].index == (int)rate && span != i) {
-			span      = i;
-			ref_db4   = -1;
-			floor_db4 = -1;
+			span = i;
+			reset_levels();
 		}
 	if (!qspi)
 		relay_captures = 0; /* Stock ESP-SDR: payloads relayed from the UART. */
@@ -583,10 +1163,14 @@ int main(void)
 	palette_init();
 	lcd_init();
 	tone_init();
-	lcd_text(1, 1, COLOR_WHITE, "CHROMATIX SDR: WAITING FOR ESP-SDR...");
+	lcd_text_scaled(24, 50, COLOR_WHITE, "CHROMATIX", 2);
+	lcd_text_scaled(56, 66, COLOR_TRACE, "SDR", 2);
+	lcd_text(26, 90, COLOR_DIM, "WAITING FOR ESP-SDR...");
 	lcd_present();
 
 	esp32sdr_cmd("SYNC 1", reply, sizeof(reply), 200);
+	if (esp32sdr_cmd("INFO", esp_info, sizeof(esp_info), 200) < 0)
+		snprintf(esp_info, sizeof(esp_info), "?");
 	/* kHz tuning (Chromatic ESP-SDR fork), else Wi-Fi channel frequencies only. */
 	unsigned kmin, kmax;
 	if (esp32sdr_cmd("RANGEK?", reply, sizeof(reply), 200) > 0 &&
@@ -598,24 +1182,30 @@ int main(void)
 	/* Captures over QSPI (Chromatic ESP-SDR fork) if supported, else over the UART. */
 	qspi = (esp32sdr_qspi((void *)(MAIN_RAM_BASE + LAYOUT_DATA_OFFSET),
 		LAYOUT_PSRAM_OFFSET + LAYOUT_DATA_OFFSET) == 0);
-	set_freq();
+	set_freq_khz(freq_khz);
 	set_gain();
-	set_filter();
+	set_filter(0);
+	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
+	toast("MENU: BANDS/HELP  SELECT: VIEW");
 	/* USB link: ESP-SDR protocol relay for the host. */
 	int usb = (usblink_init() == 0);
 
 	uint32_t errors[6] = {0};
 	uint32_t frames = 0, fps_frames = 0, fps_t0 = esp32sdr_ms();
 	for (;;) {
-		/* USB host relay. */
-		/* Relay paused during host debug sessions (1200 baud touch, until the port is closed). */
+		/* USB host relay (paused during host debug sessions: 1200 baud touch, until the port is
+		   closed). */
 		if (usb && !usblink_touched()) {
 			relay_poll();
 			int active = host_len || relay_captures ||
 				(esp32sdr_ms() - host_last_ms < HOST_TIMEOUT_MS && host_last_ms);
 			if (active && !host) {
-				host = 1;
-				memset(peak_db4, 0, sizeof(peak_db4));
+				host      = 1;
+				menu_open = 0;
+				page      = 0;
+				if (mode == MODE_SCAN)
+					mode = MODE_SPECTRUM;
+				reset_levels();
 			}
 			if (active)
 				continue;
@@ -623,78 +1213,36 @@ int main(void)
 				/* Host gone: local settings back. */
 				host = 0;
 				esp32sdr_flush();
-				span      = (span < SPANS) ? span : 1;
-				set_filter();
-				ref_db4   = -1;
-				floor_db4 = -1;
-				set_freq();
+				span = (span < SPANS) ? span : 1;
+				set_filter(spans[span].mhz == 80);
+				tune(freq_khz);
 				set_gain();
+				toast("USB HOST DONE");
 			}
 		}
 
 		/* Controls. */
-		uint32_t pressed = buttons_pressed();
-		if (pressed & ((1 << BTN_LEFT) | (1 << BTN_RIGHT))) {
-			int dir = (pressed & (1 << BTN_RIGHT)) ? 1 : -1;
-			if (freqk) {
-				freq_khz += dir*5000;
-				freq_khz  = (freq_khz < freq_min) ? freq_khz + 5000 :
-				            (freq_khz > freq_max) ? freq_khz - 5000 : freq_khz;
-			} else
-				freq_khz = 1000*next_channel(freq_khz/1000, dir);
-			if (ref_auto)
-				ref_db4 = -1;
-			floor_db4 = -1;
-			set_freq();
-		}
-		if (pressed & (1 << BTN_UP)) {
-			ref_db4 += 5*4;
-			ref_auto = 0;
-		}
-		if (pressed & (1 << BTN_DOWN)) {
-			ref_db4 -= 5*4;
-			ref_auto = 0;
-		}
-		if (pressed & (1 << BTN_A)) {
-			span      = (span + 1) % SPANS;
-			ref_db4   = -1;
-			floor_db4 = -1;
-			set_filter();
-		}
-		if (pressed & (1 << BTN_B)) {
-			gain      = (gain + 1) % GAINS;
-			ref_db4   = -1;
-			floor_db4 = -1;
-			set_gain();
-		}
-		if (pressed & (1 << BTN_START))
-			peak_hold = !peak_hold;
-		if (pressed & (1 << BTN_SEL)) {
-			ref_db4  = -1;
-			ref_auto = 1;
-		}
-		if (pressed & (1 << BTN_MENU))
-			sound = !sound;
-		if (pressed & ((1 << BTN_START) | (1 << BTN_A) | (1 << BTN_LEFT) | (1 << BTN_RIGHT)))
-			memset(peak_db4, 0, sizeof(peak_db4));
+		handle_buttons();
 
-		/* Capture. */
+		/* Capture/display. */
 		uint32_t t_capture = esp32sdr_ms();
-		int r = esp32sdr_capture(SAMPLES, spans[span].index, iq, NULL);
+		int r, peak_x = 0;
+		if (mode == MODE_SCAN)
+			r = scan_update();
+		else {
+			r = esp32sdr_capture(SAMPLES, spans[span].index, iq, NULL);
+			if (r == 0)
+				peak_x = show_spectrum(iq, SAMPLES);
+		}
 		if (r != 0) {
-			errors[-r]++;
-			draw_message("ESP-SDR: NO CAPTURE");
+			errors[(r < 0 && r >= -5) ? -r : 0]++;
+			memcpy(overlay_saved, lcd_screen, sizeof(overlay_saved));
+			draw_message("ESP-SDR: NO CAPTURE", COLOR_RED);
 			lcd_present();
-			log_status("frames %lu errors %lu/%lu/%lu/%lu/%lu\n", (unsigned long)frames,
-				(unsigned long)errors[1], (unsigned long)errors[2], (unsigned long)errors[3],
-				(unsigned long)errors[4], (unsigned long)errors[5]);
+			restore_overlays(1);
 			esp32sdr_flush();
 			continue;
 		}
-
-		/* Spectrum/display. */
-		uint32_t t_display = esp32sdr_ms();
-		int peak_x = show_spectrum(iq, SAMPLES);
 		uint32_t t_end = esp32sdr_ms();
 
 		/* Statistics. */
@@ -705,13 +1253,12 @@ int main(void)
 			fps10      = fps_frames*10000/(t - fps_t0);
 			fps_frames = 0;
 			fps_t0     = t;
-			log_status("%s frames %lu errors %lu fps %d.%d freq %dkHz span %d gain %d ref %d peak %d@%d\n"
-				"ms: capture %lu display %lu, relay: %lu frames %lu bytes\n",
-				qspi ? "qspi" : "uart", (unsigned long)frames,
+			log_status("%s mode %d frames %lu errors %lu fps %d.%d freq %dkHz span %d gain %d "
+				"ref %d peak %d@%d\nms: update %lu, relay: %lu frames %lu bytes\n",
+				qspi ? "qspi" : "uart", mode, (unsigned long)frames,
 				(unsigned long)(errors[1] + errors[2] + errors[3] + errors[4] + errors[5]),
 				fps10/10, fps10 % 10, freq_khz, spans[span].mhz, gain_db, ref_db4/4,
-				col_db4[peak_x]/4, peak_x,
-				(unsigned long)(t_display - t_capture), (unsigned long)(t_end - t_display),
+				col_db4[peak_x]/4, peak_x, (unsigned long)(t_end - t_capture),
 				(unsigned long)relay_frames, (unsigned long)relay_bytes);
 		}
 	}
