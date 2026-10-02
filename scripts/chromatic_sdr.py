@@ -28,7 +28,7 @@ RATES = {16: 6, 40: 1, 80: 0} # MS/s -> ESP-SDR rate index.
 
 # Stock ESP-SDR: the ESP32 only tunes reliably on the Wi-Fi channel frequencies (its out of channel
 # frequencies don't move the LO, measured on the console crystal harmonics). The Chromatic ESP-SDR
-# fork (firmware/esp32-sdr) tunes 2386-2504MHz in kHz steps (FREQK).
+# fork (firmware/esp32-sdr) tunes 2150-2880MHz in kHz steps (FREQK).
 CHANNELS = list(range(2412, 2473, 5)) + [2484]
 
 def conjugate(data):
@@ -56,6 +56,7 @@ class ESPSDR:
         self.sync()
         r = self.cmd("RANGEK?").split()
         self.rangek = (int(r[1]), int(r[2])) if len(r) == 3 and r[0] == "RANGEK" else None
+        self.rate   = None
 
     def tune(self, mhz):
         """Tune (MHz, kHz resolution with the Chromatic fork, else integer MHz)."""
@@ -97,6 +98,10 @@ class ESPSDR:
     def capture(self, samples=16380, rate=40, bits=8):
         """I/Q capture: list of (I, Q) bytes (int8 interleaved) as bytes, capture duration in us."""
         cmd = {8: "CAP16", 10: "CAP20"}[bits]
+        if rate != self.rate:
+            # 80MS/s: RX filter opened (+-38MHz usable, Chromatic ESP-SDR fork).
+            self.cmd("LPF 0" if rate == 80 else "LPF AUTO")
+            self.rate = rate
         header = self.cmd(f"{cmd} {samples} {RATES[rate]}")
         if not header.startswith("DATA "):
             raise IOError(f"Capture error: {header}")
