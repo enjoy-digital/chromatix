@@ -16,14 +16,19 @@ The module talks the ESP-SDR protocol over the Chromatic USB CDC port:
 mkdir build && cd build && cmake .. && make
 export SOAPY_SDR_PLUGIN_PATH=$PWD     # Or: sudo make install.
 SoapySDRUtil --probe="driver=chromatic"
-gqrx                                  # Device string: driver=chromatic
+gqrx                                  # Device string: soapy=0,driver=chromatic
 ```
+
+The console must run `firmware/sdr` (`scripts/chromatic.py --serial /dev/ttyACM0 run
+firmware/sdr/sdr.bin`): it relays the protocol on the USB CDC port. Debug tools
+(`scripts/chromatic.py --serial`) take the port back with a 1200 baud touch; the relay resumes 1s
+after they close it.
 
 Device arguments: `serial=<port>` (default: the Chromatic CDC port,
 `/dev/serial/by-id/*Chromatic*if02`), `samples=<burst samples>` (256-16380, default 16380).
 
 - Sample rates: 16/40 MS/s (ESP32 hardware rates), frequency: 100-6000 MHz (1 MHz steps, the
-  ESP32 RF front-end is for 2.4 GHz), gain: AGC or 0-72 (manual).
+  ESP32 RF front-end is for 2.4 GHz), gain: AGC or 0-72 (manual, `LNA` element).
 - Formats: CS8 (native), CS16, CF32.
 
 ## Bursts

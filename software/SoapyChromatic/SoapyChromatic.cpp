@@ -288,6 +288,26 @@ public:
         return SoapySDR::Range(0, gain_max, 1);
     }
 
+    // Single gain element (gqrx/gr-osmosdr gain sliders).
+    std::vector<std::string> listGains(const int, const size_t) const override { return {"LNA"}; }
+
+    void setGain(const int direction, const size_t channel, const std::string &,
+        const double value) override
+    {
+        setGain(direction, channel, value);
+    }
+
+    double getGain(const int direction, const size_t channel, const std::string &) const override
+    {
+        return getGain(direction, channel);
+    }
+
+    SoapySDR::Range getGainRange(const int direction, const size_t channel,
+        const std::string &) const override
+    {
+        return getGainRange(direction, channel);
+    }
+
     // Stream.
     SoapySDR::Stream *setupStream(const int direction, const std::string &format,
         const std::vector<size_t> &channels, const SoapySDR::Kwargs &) override
