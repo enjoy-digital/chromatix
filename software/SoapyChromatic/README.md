@@ -3,7 +3,8 @@
 [SoapySDR](https://github.com/pothosware/SoapySDR) module for the Chromatic SDR: GNU Radio, gqrx,
 CubicSDR, SoapySDR Python... receive 2.4 GHz I/Q from the Chromatic ESP32 (ESP-SDR).
 
-The module talks the ESP-SDR protocol over the Chromatic USB CDC port:
+The module talks the [ESP-SDR](https://espargos.net/espsdr/) protocol (ESP-SDR by
+[ESPARGOS](https://espargos.net/), Florian Euchner) over the Chromatic USB CDC port:
 
 - `--with-app` bitstream + `firmware/sdr` (ESP32: `firmware/esp32-sdr`): the console relays the
   protocol, captures go ESP32 -> QSPI -> PSRAM -> DMA -> USB (~73 captures/s of 16380 samples,

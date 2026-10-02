@@ -196,6 +196,10 @@ sound live (only meaningful near realtime), `--wav` records it in simulation tim
   [Amaranth](https://github.com/amaranth-lang/amaranth): the USB 2.0 device core.
 - [openFPGALoader](https://github.com/trabucayre/openFPGALoader), [Yosys](https://github.com/YosysHQ/yosys),
   [Verilator](https://github.com/verilator/verilator) and [three.js](https://threejs.org/).
+- [ESP-SDR](https://espargos.net/espsdr/) by [ESPARGOS](https://espargos.net/) (Florian Euchner,
+  [esp-sdr](https://github.com/ESPARGOS/esp-sdr), GPL-3.0): raw I/Q captures from the ESP32
+  radio, the base of the Chromatic SDR (`sdr` branch: its ESP32 firmware is ESP-SDR with a
+  Chromatic transport and tuning, the console/PC tools speak its protocol).
 - [germaneguise](https://github.com/germaneguise): the 320x288 USB capture idea
   ([#10](https://github.com/ModRetro/oss-chromatic-console-fpga/pull/10)).
 

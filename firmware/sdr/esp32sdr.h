@@ -3,7 +3,8 @@
 // Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 // SPDX-License-Identifier: BSD-2-Clause
 //
-// ESP-SDR client (https://github.com/ESPARGOS/esp-sdr protocol) over the ESP32 UART (--with-app
+// ESP-SDR (https://espargos.net/espsdr/, https://github.com/ESPARGOS/esp-sdr, by ESPARGOS: Florian
+// Euchner) client over the ESP32 UART (--with-app
 // esp32_uart CSRs, 2Mbaud): newline-terminated ASCII commands, text replies, captures replied with
 // "DATA <samples> <crc32> <capture-us>" followed by the binary I/Q payload. With the Chromatic
 // ESP-SDR fork (firmware/esp32-sdr), the payload can be written to the main RAM over QSPI instead.

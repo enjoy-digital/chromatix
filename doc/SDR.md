@@ -5,6 +5,12 @@ Goal: a portable SDR from the Chromatic, using [ESP-SDR](https://espargos.net/es
 captures raw I/Q samples from the ESP32 radio, without extra hardware. The console adds the screen,
 buttons, FPGA processing and a USB 2.0 link to the PC.
 
+Credits: [ESP-SDR](https://espargos.net/espsdr/) is the work of [ESPARGOS](https://espargos.net/)
+(Florian Euchner): the raw I/Q capture of the ESP32 radio, its firmware and protocol (and the
+[ESP-WebSDR](https://github.com/ESPARGOS/esp-web-sdr) viewer) are the foundation of everything here;
+ChromatiX adds the Chromatic transport/tuning (`firmware/esp32-sdr`, a patch of ESP-SDR) and the
+console/PC side.
+
 What to expect: a **2.4 GHz** receiver (Wi-Fi, Bluetooth/BLE, ISM: spectrum, waterfall, bursts), not
 a wideband SDR (no broadcast FM/AM). Captures are bursts (low duty cycle), not continuous.
 

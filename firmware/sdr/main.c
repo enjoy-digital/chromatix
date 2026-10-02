@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //
 // ChromatiX SDR (--with-app build, ESP-SDR on the ESP32): spectrum analyzer/waterfall on the LCD.
+// ESP-SDR (https://espargos.net/espsdr/) by ESPARGOS (Florian Euchner): ESP32 raw I/Q captures.
 // I/Q bursts captured by the ESP32 (CAP16, over QSPI with the Chromatic ESP-SDR fork, else over the
 // ESP32 UART), FFT on the CPU (dsp.c).
 //
@@ -589,7 +590,7 @@ static void draw_page(void)
 		snprintf(info[4], 40, "USB HOST: %s", host ? "ACTIVE" : "IDLE");
 		snprintf(info[5], 40, "UPDATE RATE: %d.%d/S", fps10/10, fps10 % 10);
 		snprintf(info[6], 40, "FFT: 512 PTS, CPU (VEXRISCV)");
-		snprintf(info[7], 40, "SPECTRUM ORIENT. CORRECTED");
+		snprintf(info[7], 40, "ESP-SDR: ESPARGOS.NET/ESPSDR");
 		static const char *ptr[8];
 		for (int i = 0; i < 8; i++)
 			ptr[i] = info[i];
@@ -1166,7 +1167,10 @@ int main(void)
 	lcd_text_scaled(24, 50, COLOR_WHITE, "CHROMATIX", 2);
 	lcd_text_scaled(56, 66, COLOR_TRACE, "SDR", 2);
 	lcd_text(26, 90, COLOR_DIM, "WAITING FOR ESP-SDR...");
+	lcd_text(14, 116, COLOR_DIM, "I/Q CAPTURES: ESP-SDR BY ESPARGOS");
+	lcd_text(42, 124, COLOR_DIM, "ESPARGOS.NET/ESPSDR");
 	lcd_present();
+	uint32_t splash_ms = esp32sdr_ms();
 
 	esp32sdr_cmd("SYNC 1", reply, sizeof(reply), 200);
 	if (esp32sdr_cmd("INFO", esp_info, sizeof(esp_info), 200) < 0)
@@ -1185,6 +1189,7 @@ int main(void)
 	set_freq_khz(freq_khz);
 	set_gain();
 	set_filter(0);
+	while (esp32sdr_ms() - splash_ms < 2000); /* Startup screen (credits) shown for 2s. */
 	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
 	toast("MENU: BANDS/HELP  SELECT: VIEW");
 	/* USB link: ESP-SDR protocol relay for the host. */

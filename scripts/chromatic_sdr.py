@@ -10,6 +10,9 @@
 Chromatic SDR host client: ESP-SDR protocol over the USB CDC port, relayed by firmware/sdr (USB
 link, captures at the USB rate) or the ESP32 directly (standard bitstream USB bridge, 2Mbaud).
 
+ESP-SDR (https://espargos.net/espsdr/, https://github.com/ESPARGOS/esp-sdr) by ESPARGOS (Florian
+Euchner): ESP32 raw I/Q captures, firmware and protocol.
+
     chromatic_sdr.py info
     chromatic_sdr.py bench    [--count 50]
     chromatic_sdr.py spectrum [--freq 2437] [--rate 40] spectrum.png

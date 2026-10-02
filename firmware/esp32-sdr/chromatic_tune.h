@@ -3,6 +3,8 @@
 // Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 // SPDX-License-Identifier: BSD-2-Clause
 //
+// Part of the Chromatic port of ESP-SDR (https://espargos.net/espsdr/, ESPARGOS: Florian Euchner).
+//
 // ESP-SDR Chromatic tuning (original ESP32): RF PLL frequency table entry loaded with the requested
 // divider + VCO capacitor code then PHY software calibration: 2150-2880MHz, 1kHz steps (instead of
 // ESP-SDR's 2412MHz calibration + direct PLL divider: the LO doesn't move off the Wi-Fi channels).

@@ -3,7 +3,8 @@
 // Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 // SPDX-License-Identifier: BSD-2-Clause
 //
-// SoapySDR module for the Chromatic SDR: ESP-SDR protocol over the Chromatic USB CDC port, relayed
+// SoapySDR module for the Chromatic SDR: ESP-SDR protocol (https://espargos.net/espsdr/, ESPARGOS:
+// Florian Euchner) over the Chromatic USB CDC port, relayed
 // by firmware/sdr (--with-app USB link: capture payloads at the USB rate) or the ESP32 directly
 // (standard bitstream USB bridge, 2Mbaud).
 //

@@ -1,6 +1,7 @@
 # Chromatic ESP-SDR (ESP32 firmware)
 
-[ESP-SDR](https://github.com/ESPARGOS/esp-sdr) (GPL-3.0) for the Chromatic ESP32, with a Chromatic
+[ESP-SDR](https://espargos.net/espsdr/) by [ESPARGOS](https://espargos.net/) (Florian Euchner,
+[esp-sdr](https://github.com/ESPARGOS/esp-sdr), GPL-3.0) for the Chromatic ESP32, with a Chromatic
 transport: captures written to the FPGA PSRAM over the ESP32 -> FPGA QSPI link (the ModRetro
 menu/OSD link) instead of the UART. Commands and `DATA` headers stay on the UART (protocol
 unchanged), so the firmware also works as a stock ESP-SDR (PC viewers through the USB bridge of the

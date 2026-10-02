@@ -3,6 +3,8 @@
 // Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 // SPDX-License-Identifier: BSD-2-Clause
 //
+// Part of the Chromatic port of ESP-SDR (https://espargos.net/espsdr/, ESPARGOS: Florian Euchner).
+//
 // ESP-SDR Chromatic transport: captures written to the FPGA PSRAM over the ESP32 -> FPGA QSPI link
 // (the ModRetro menu/OSD link), commands and DATA headers stay on the UART.
 //
