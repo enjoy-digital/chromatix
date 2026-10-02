@@ -6,7 +6,7 @@
 // ChromatiX SDR (--with-app build, ESP-SDR on the ESP32): 2.4GHz spectrum analyzer/waterfall on the
 // LCD. I/Q bursts captured by the ESP32 (CAP16 over the ESP32 UART), FFT on the CPU.
 //
-// Controls: Left/Right: tune (5MHz), Up/Down: reference level (5dB), A: span (16/40MHz),
+// Controls: Left/Right: tune (Wi-Fi channels), Up/Down: reference level (5dB), A: span (16/40MHz),
 // B: gain (AGC/manual), Start: peak hold, Select: auto reference level, Menu: RSSI tone (pitch
 // following the peak level above the noise floor in the center quarter of the span: tune to an
 // emitter and hunt it down). Waterfall scaled from the noise floor.
@@ -129,6 +129,26 @@ static int sound     = 0; /* RSSI tone. */
 static int qspi      = 0; /* Captures over QSPI (else UART). */
 static int host      = 0; /* USB host relay active. */
 static int gain_db   = -1; /* Displayed gain (-1: AGC). */
+
+/* The ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz, 2484MHz):
+   out of channel frequencies (ESP-SDR direct PLL offset) don't move the LO (measured on the console
+   crystal harmonics). */
+static int next_channel(int mhz, int dir)
+{
+	static const int channels[] = {
+		2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462, 2467, 2472, 2484,
+	};
+	const int n = sizeof(channels)/sizeof(channels[0]);
+	int i = 0;
+	while (i < n - 1 && channels[i] < mhz)
+		i++;
+	if (channels[i] == mhz)
+		i += dir;
+	else if (dir < 0)
+		i -= 1;
+	i = (i < 0) ? 0 : (i > n - 1) ? n - 1 : i;
+	return channels[i];
+}
 
 static void set_freq(void)
 {
@@ -581,8 +601,7 @@ int main(void)
 		/* Controls. */
 		uint32_t pressed = buttons_pressed();
 		if (pressed & ((1 << BTN_LEFT) | (1 << BTN_RIGHT))) {
-			freq_mhz += (pressed & (1 << BTN_RIGHT)) ? 5 : -5;
-			freq_mhz  = (freq_mhz < 2300) ? 2300 : (freq_mhz > 2600) ? 2600 : freq_mhz;
+			freq_mhz = next_channel(freq_mhz, (pressed & (1 << BTN_RIGHT)) ? 1 : -1);
 			set_freq();
 		}
 		if (pressed & (1 << BTN_UP))

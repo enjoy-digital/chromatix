@@ -13,8 +13,9 @@
 
 #include "tables.h"
 
-/* Averaged power spectrum of samples I/Q pairs (segments of FFT_SIZE), DC centered: power[0] is
-   -fs/2, power[FFT_SIZE/2] is DC (interpolated from its neighbours: LO leakage removed). */
+/* Averaged power spectrum of samples I/Q pairs (segments of FFT_SIZE, ESP32 inverted spectrum
+   corrected), DC centered: power[0] is -fs/2, power[FFT_SIZE/2] is DC (interpolated from its
+   neighbours: LO leakage removed). */
 void dsp_power_spectrum(const int8_t *iq, int samples, uint64_t *power);
 /* 10*log10(power) in 1/4 dB. */
 int  dsp_db4(uint64_t power);

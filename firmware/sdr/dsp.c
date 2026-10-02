@@ -66,9 +66,11 @@ void dsp_power_spectrum(const int8_t *iq, int samples, uint64_t *power)
 		}
 		dc_i /= FFT_SIZE;
 		dc_q /= FFT_SIZE;
+		/* Conjugated: the ESP32 I/Q spectrum is inverted (measured on the console crystal
+		   harmonics). */
 		for (int n = 0; n < FFT_SIZE; n++) {
-			re[n] = ((x[2*n + 0] - dc_i)*hann[n]) >> 9;
-			im[n] = ((x[2*n + 1] - dc_q)*hann[n]) >> 9;
+			re[n] =  ((x[2*n + 0] - dc_i)*hann[n]) >> 9;
+			im[n] = -(((x[2*n + 1] - dc_q)*hann[n]) >> 9);
 		}
 		fft();
 		/* DC centered. */
