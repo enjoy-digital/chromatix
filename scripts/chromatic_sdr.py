@@ -13,7 +13,7 @@ link, captures at the USB rate) or the ESP32 directly (standard bitstream USB br
     chromatic_sdr.py info
     chromatic_sdr.py bench    [--count 50]
     chromatic_sdr.py spectrum [--freq 2437] [--rate 40] spectrum.png
-    chromatic_sdr.py record   [--freq 2437] [--count 100] iq.cs8
+    chromatic_sdr.py record   [--freq 2437] [--count 100] iq.cs8 (conjugated: true spectrum)
 """
 
 import sys
@@ -25,6 +25,17 @@ import argparse
 import serial
 
 RATES = {16: 6, 40: 1, 80: 0} # MS/s -> ESP-SDR rate index.
+
+# The ESP32 only tunes reliably on the Wi-Fi channel frequencies (ESP-SDR out of channel frequencies
+# don't move its LO, measured on the console crystal harmonics).
+CHANNELS = list(range(2412, 2473, 5)) + [2484]
+
+def conjugate(data):
+    """ESP32 8-bit I/Q (inverted spectrum) -> conjugated I/Q bytes (int8, Q negated, clipped)."""
+    import numpy as np
+    iq = np.frombuffer(data, dtype=np.int8).astype(np.int16)
+    iq[1::2] = np.clip(-iq[1::2], -128, 127)
+    return iq.astype(np.int8).tobytes()
 
 def default_port():
     ports = sorted(glob.glob("/dev/serial/by-id/*Chromatic*if02*"))
@@ -93,7 +104,7 @@ class ESPSDR:
 def spectrum(data, nfft=1024):
     import numpy as np
     iq  = np.frombuffer(data, dtype=np.int8).astype(np.float32)
-    x   = (iq[0::2] + 1j*iq[1::2])
+    x   = (iq[0::2] - 1j*iq[1::2]) # Conjugated (ESP32 inverted spectrum).
     x   = x[:len(x)//nfft*nfft].reshape(-1, nfft)
     x   = x - x.mean(axis=1, keepdims=True)
     win = np.hanning(nfft)
@@ -112,6 +123,8 @@ def main():
     parser.add_argument("filename", nargs="?", help="Output file (spectrum: .png, record: .cs8).")
     args = parser.parse_args()
 
+    if args.command != "info" and args.freq not in CHANNELS:
+        print(f"Warning: {args.freq} MHz is not a Wi-Fi channel frequency: the LO may not move.")
     sdr = ESPSDR(args.port)
     if args.command == "info":
         for c in ["INFO", "CAPS", "LIMITS?", "RANGE?", "TRANSPORT?", "GAIN?"]:
@@ -157,7 +170,7 @@ def main():
     if args.command == "record" and captures:
         with open(args.filename or "iq.cs8", "wb") as f:
             for d in captures:
-                f.write(d)
+                f.write(conjugate(d))
     sdr.close()
 
 if __name__ == "__main__":

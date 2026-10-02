@@ -32,9 +32,12 @@ after they close it.
 Device arguments: `serial=<port>` (default: the Chromatic CDC port,
 `/dev/serial/by-id/*Chromatic*if02`), `samples=<burst samples>` (256-16380, default 16380).
 
-- Sample rates: 16/40 MS/s (ESP32 hardware rates), frequency: 100-6000 MHz (the ESP32 RF front-end
-  is for 2.4 GHz; the ESP32 tunes in 1 MHz steps, the remaining offset is applied by a digital
-  mixer: any frequency), gain: AGC or 0-72 (manual, `LNA` element).
+- Sample rates: 16/40 MS/s (ESP32 hardware rates), gain: AGC or 0-72 (manual, `LNA` element).
+- Frequency: 2410-2486 MHz. The original ESP32 only tunes reliably on the Wi-Fi channel
+  frequencies (2412-2472 MHz in 5 MHz steps, 2484 MHz; ESP-SDR's other frequencies don't move its
+  LO, see doc/SDR.md): the module tunes the nearest channel and applies the remaining offset with a
+  digital mixer.
+- The ESP32 I/Q spectrum is inverted: the samples are conjugated (true spectrum).
 - Bursts captured before a settings change (frequency, gain, rate) are dropped: changes are seen
   from the next burst.
 - Formats: CS8 (native), CS16, CF32.

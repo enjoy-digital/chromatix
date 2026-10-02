@@ -12,7 +12,10 @@
 // with SOAPY_SDR_END_BURST; there are gaps between bursts. Bursts captured before a settings change
 // (frequency, gain, rate) are dropped.
 //
-// The ESP32 tunes in 1MHz steps: the remaining offset is applied by a digital mixer (NCO).
+// The ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz, 2484MHz;
+// ESP-SDR out of channel frequencies don't move its LO, measured on the console crystal
+// harmonics): it is tuned to the nearest channel, the remaining offset is applied by a digital
+// mixer (NCO). The ESP32 I/Q spectrum is inverted: the samples are conjugated.
 //
 // Device arguments: driver=chromatic, serial=<port> (default: the Chromatic CDC port),
 // samples=<burst samples> (default 16380).
@@ -199,12 +202,7 @@ public:
             burst_samples = std::max(256, std::min(16380, std::stoi(args.at("samples"))));
         sync();
         info = command("INFO");
-        unsigned lo, hi, step, gmax;
-        std::string range = command("RANGE?");
-        if (sscanf(range.c_str(), "RANGE %u %u %u", &lo, &hi, &step) == 3) {
-            freq_min = lo*1e6;
-            freq_max = hi*1e6;
-        }
+        unsigned gmax;
         std::string limits = command("LIMITS?");
         auto g = limits.find("\"gain\":[0,");
         if (g != std::string::npos && sscanf(limits.c_str() + g, "\"gain\":[0,%u", &gmax) == 1)
@@ -246,10 +244,16 @@ public:
     void setFrequency(const int, const size_t, const double frequency,
         const SoapySDR::Kwargs & = SoapySDR::Kwargs()) override
     {
-        // ESP32 at the nearest MHz, offset by the NCO.
+        // ESP32 at the nearest Wi-Fi channel, offset by the NCO.
         TRACE("setFrequency(%.0f)", frequency);
+        static const unsigned channels[] = {
+            2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462, 2467, 2472, 2484,
+        };
         double   f   = std::max(freq_min, std::min(freq_max, frequency));
-        unsigned mhz = (unsigned)(f/1e6 + 0.5);
+        unsigned mhz = channels[0];
+        for (unsigned ch : channels)
+            if (std::fabs(ch*1e6 - f) < std::fabs(mhz*1e6 - f))
+                mhz = ch;
         if (mhz*1e6 != hw_freq) {
             std::string r = command("FREQ " + std::to_string(mhz));
             if (r != "OK")
@@ -264,7 +268,7 @@ public:
 
     SoapySDR::RangeList getFrequencyRange(const int, const size_t) const override
     {
-        return {SoapySDR::Range(freq_min, freq_max, 1e6)};
+        return {SoapySDR::Range(freq_min, freq_max)};
     }
 
     // Sample rate (ESP32 hardware rates).
@@ -410,11 +414,9 @@ public:
         size_t n     = std::min(numElems, total - offset);
         const int8_t *src = current->iq.data() + 2*offset;
         bool mix = (current->offset != 0);
-        if (stream_format == SOAPY_SDR_CS8 && !mix)
-            memcpy(buffs[0], src, 2*n);
-        else {
+        {
             for (size_t i = 0; i < n; i++) {
-                std::complex<double> x(src[2*i + 0], src[2*i + 1]);
+                std::complex<double> x(src[2*i + 0], -src[2*i + 1]); // Conjugated (inverted).
                 if (mix) {
                     x   *= nco;
                     nco *= nco_step;
@@ -521,7 +523,7 @@ private:
     SerialLink link;
     std::mutex link_mutex;
     std::string info;
-    double freq = 2437e6, hw_freq = 0, freq_min = 2300e6, freq_max = 2600e6;
+    double freq = 2437e6, hw_freq = 0, freq_min = 2410e6, freq_max = 2486e6;
     std::atomic<unsigned> generation{0};
     double rate = 40e6;
     double gain = 40;
