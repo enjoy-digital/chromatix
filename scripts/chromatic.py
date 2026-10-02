@@ -7,7 +7,8 @@
 # SPDX-License-Identifier: BSD-2-Clause
 
 """
-ChromatiX control/test utility (requires a --with-debug-bridge build).
+ChromatiX control/test utility (requires a --with-debug-bridge build, or a --with-app build for
+run).
 
 Start the LiteX server on the Chromatic USB CDC port first:
     litex_server --uart --uart-port /dev/ttyACM0 --uart-baudrate 115200
@@ -23,10 +24,12 @@ Then:
 import os
 import sys
 import time
+import zlib
 import argparse
 import subprocess
 
 from litex import RemoteClient
+from litex.tools.remote.comm_uart import CommUART, CMD_READ_BURST_INCR
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from chromatix.gateware.debug import BUTTONS
@@ -51,14 +54,58 @@ VCART_MBC     = {
 }
 VCART_RAM_SIZES = {0: 0, 1: 2048, 2: 8192, 3: 32768, 4: 131072, 5: 65536} # Header code -> bytes.
 
+# CPU application build: main RAM (PSRAM_BASE = main RAM start) layout (firmware/common/layout.h).
+APP_HOST_OFFSET = 0x35f000 # Host block: arguments.
+APP_DATA_OFFSET = 0x370000 # Data (ex: files loaded with the firmware).
+HOST_ARGS_MAGIC = 0x53475241
+
 STATUS_FIELDS = ["bist_done", "bist_failed", "lcd_init_done", "menu_disabled", "low_battery", "bat_is_li", "headphones"]
+
+# Direct UARTBone Link -----------------------------------------------------------------------------
+
+class RobustCommUART(CommUART):
+    """
+    UARTBone over the USB CDC port without litex_server, with read timeouts and resynchronization:
+    reads can get stuck on the USB IN path (reply bytes held until the next request), the link is
+    then resynchronized (UARTBone timeout, dummy read pushing the stuck bytes, input drained) and
+    the read retried.
+    """
+    def __init__(self, port, csr_csv, timeout=0.5, retries=5):
+        CommUART.__init__(self, port, csr_csv=csr_csv)
+        self.port.timeout = timeout
+        self.retries      = retries
+        self.resyncs      = 0
+
+    def _read(self, length):
+        r = self.port.read(length)
+        if len(r) < length:
+            raise TimeoutError(f"UARTBone read timeout ({len(r)}/{length} bytes).")
+        return r
+
+    def resync(self):
+        self.resyncs += 1
+        time.sleep(0.15) # UARTBone FSM timeout (100ms).
+        self._write([CMD_READ_BURST_INCR, 1, 0, 0, 0, 0])
+        time.sleep(0.15)
+        self.port.reset_input_buffer()
+
+    def read(self, addr, length=None, burst="incr"):
+        for attempt in range(self.retries):
+            try:
+                return CommUART.read(self, addr, length, burst)
+            except TimeoutError:
+                self.resync()
+        raise TimeoutError(f"UARTBone read at 0x{addr:08x} failed after {self.retries} attempts.")
 
 # Chromatic ----------------------------------------------------------------------------------------
 
 class Chromatic:
-    def __init__(self, host="localhost", port=1234, csr_csv=None):
+    def __init__(self, host="localhost", port=1234, csr_csv=None, serial=None):
         csr_csv = csr_csv or os.path.join(os.path.dirname(os.path.abspath(__file__)), "csr.csv")
-        self.bus = RemoteClient(host=host, port=port, csr_csv=csr_csv)
+        if serial is not None:
+            self.bus = RobustCommUART(serial, csr_csv=csr_csv) # Direct (no litex_server).
+        else:
+            self.bus = RemoteClient(host=host, port=port, csr_csv=csr_csv)
         self.bus.open()
 
     def close(self):
@@ -132,6 +179,23 @@ class Chromatic:
     def read_save(self, rom):
         size = VCART_RAM_SIZES.get(rom[0x149], 0) or (512 if rom_config(rom)["mbc"] == 2 else 0)
         return self.read_psram(VCART_RAM, size)
+
+    # Firmware (CPU application build).
+    def run_firmware(self, firmware, files=(), verify=True, args=None):
+        """
+        Load a firmware at the CPU main RAM start (its reset address) and data files at main RAM
+        offsets, with the CPU held in reset (ctrl cpu_rst), then start it (optional arguments in the
+        host block).
+        """
+        self.bus.regs.ctrl_reset.write(0b10) # cpu_rst.
+        for offset, data in [(0, firmware), *files]:
+            self.write_psram(offset, data)
+            if verify and zlib.crc32(self.read_psram(offset, len(data))) != zlib.crc32(data):
+                raise IOError(f"Verification failed at main RAM offset 0x{offset:x}.")
+        magic = HOST_ARGS_MAGIC if args else 0
+        block = magic.to_bytes(4, "little") + (args or "").encode()[:1019] + b"\0"
+        self.write_psram(APP_HOST_OFFSET, block)
+        self.bus.regs.ctrl_reset.write(0)
 
     def unload_rom(self):
         """Back to the physical cartridge."""
@@ -232,6 +296,7 @@ def main():
     parser.add_argument("--host",    default="localhost",    help="LiteX server host.")
     parser.add_argument("--port",    default=1234, type=int, help="LiteX server port.")
     parser.add_argument("--csr-csv", default=None,           help="CSR configuration file.")
+    parser.add_argument("--serial",  default=None,           help="Direct link on this CDC port (no litex_server), ex: /dev/ttyACM0.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("ident",  help="Print the SoC identifier.")
@@ -258,6 +323,12 @@ def main():
 
     subparsers.add_parser("unload", help="Back to the physical cartridge.")
 
+    p = subparsers.add_parser("run", help="Load and start a firmware (--with-app build).")
+    p.add_argument("firmware",                         help="Firmware binary (ex: firmware/fbtest/fbtest.bin).")
+    p.add_argument("--file",      default=[],          help="Data file at a main RAM offset.", nargs=2, action="append", metavar=("FILE", "OFFSET"))
+    p.add_argument("--no-verify", action="store_true", help="Don't read back/check the loaded data.")
+    p.add_argument("--args",      default=None,        help="Firmware arguments (host block).")
+
     p = subparsers.add_parser("sequence", help="Run a sequence (ex: \"press:start wait:2 capture:x.png\").")
     p.add_argument("sequence", help="Space-separated steps (press:a+b[@duration], buttons:a+b, wait:s, capture:file).")
 
@@ -267,7 +338,7 @@ def main():
         capture(args.filename, frames=args.frames, fps=args.fps, scale=args.scale, size=args.size)
         return
 
-    chromatic = Chromatic(host=args.host, port=args.port, csr_csv=args.csr_csv)
+    chromatic = Chromatic(host=args.host, port=args.port, csr_csv=args.csr_csv, serial=args.serial)
     try:
         if args.command == "ident":
             print(chromatic.ident())
@@ -295,6 +366,13 @@ def main():
             print(f"{len(data)} bytes saved to {args.file}.")
         elif args.command == "unload":
             chromatic.unload_rom()
+        elif args.command == "run":
+            firmware = _read_file(args.firmware)
+            files    = [(int(offset, 0), _read_file(name)) for name, offset in args.file]
+            size     = len(firmware) + sum(len(data) for _, data in files)
+            t0       = time.time()
+            chromatic.run_firmware(firmware, files, verify=not args.no_verify, args=args.args)
+            print(f"{size//1024}KB loaded in {time.time() - t0:.1f}s, CPU started.")
     finally:
         # Release the virtual buttons (also on errors/Ctrl-C).
         if args.command in ["press", "sequence"]:
