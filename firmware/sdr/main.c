@@ -6,10 +6,10 @@
 // ChromatiX SDR (--with-app build, ESP-SDR on the ESP32): 2.4GHz spectrum analyzer/waterfall on the
 // LCD. I/Q bursts captured by the ESP32 (CAP16 over the ESP32 UART), FFT on the CPU.
 //
-// Controls: Left/Right: tune (Wi-Fi channels), Up/Down: reference level (5dB), A: span (16/40MHz),
-// B: gain (AGC/manual), Start: peak hold, Select: auto reference level, Menu: RSSI tone (pitch
-// following the peak level above the noise floor in the center quarter of the span: tune to an
-// emitter and hunt it down). Waterfall scaled from the noise floor.
+// Controls: Left/Right: tune (5MHz), Up/Down: reference level (5dB, manual), A: span (16/40MHz),
+// B: gain (AGC/manual), Start: peak hold, Select: auto reference level (default), Menu: RSSI tone
+// (pitch following the peak level above the noise floor in the center quarter of the span: tune
+// to an emitter and hunt it down). Waterfall scaled from the noise floor.
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -120,19 +120,23 @@ static const struct {
 static const int gains[] = {-1, 20, 30, 40, 50, 60, 70}; /* -1: AGC (hardware gain). */
 #define GAINS (int)(sizeof(gains)/sizeof(gains[0]))
 
-static int freq_mhz  = 2437;
+static int freq_khz  = 2437000;
+static int freqk     = 0; /* ESP32 kHz tuning (FREQK, Chromatic ESP-SDR fork). */
+static int freq_min  = 2386000; /* FREQK range (kHz). */
+static int freq_max  = 2504000;
 static int span      = 1;
 static int gain      = 0;
-static int ref_db4   = -1; /* < 0: auto. */
+static int ref_db4   = -1; /* < 0: to set. */
+static int ref_auto  = 1;  /* Reference level following the peak level (else Up/Down). */
 static int peak_hold = 0;
 static int sound     = 0; /* RSSI tone. */
 static int qspi      = 0; /* Captures over QSPI (else UART). */
 static int host      = 0; /* USB host relay active. */
 static int gain_db   = -1; /* Displayed gain (-1: AGC). */
 
-/* The ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz, 2484MHz):
-   out of channel frequencies (ESP-SDR direct PLL offset) don't move the LO (measured on the console
-   crystal harmonics). */
+/* Stock ESP-SDR: the ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz,
+   2484MHz): its out of channel frequencies don't move the LO (measured on the console crystal
+   harmonics). The Chromatic ESP-SDR fork tunes 2386-2504MHz in kHz steps (FREQK). */
 static int next_channel(int mhz, int dir)
 {
 	static const int channels[] = {
@@ -153,7 +157,10 @@ static int next_channel(int mhz, int dir)
 static void set_freq(void)
 {
 	char cmd[32], reply[32];
-	snprintf(cmd, sizeof(cmd), "FREQ %d", freq_mhz);
+	if (freqk)
+		snprintf(cmd, sizeof(cmd), "FREQK %d", freq_khz);
+	else
+		snprintf(cmd, sizeof(cmd), "FREQ %d", freq_khz/1000);
 	esp32sdr_cmd(cmd, reply, sizeof(reply), 200);
 }
 
@@ -187,12 +194,12 @@ static void update_floor(void)
 	floor_db4 = (floor_db4 < 0) ? median : floor_db4 + (median - floor_db4)/4;
 }
 
-static int freq_to_x(int mhz_x10)
+static int freq_to_x(int khz)
 {
-	/* Column of a frequency (MHz*10), -1 outside of the span. */
-	int lo = 10*freq_mhz - 5*spans[span].mhz;
-	int x  = (mhz_x10 - lo)*LCD_WIDTH/(10*spans[span].mhz);
-	return (mhz_x10 < lo || x >= LCD_WIDTH) ? -1 : x;
+	/* Column of a frequency (kHz), -1 outside of the span. */
+	int lo = freq_khz - 500*spans[span].mhz;
+	int x  = (khz - lo)*LCD_WIDTH/(1000*spans[span].mhz);
+	return (khz < lo || x >= LCD_WIDTH) ? -1 : x;
 }
 
 static int db4_to_y(int db4)
@@ -206,14 +213,19 @@ static void draw_header(int fps10, int peak_x)
 	char line[48];
 	lcd_rect(0, HEADER_Y, LCD_WIDTH, SPEC_Y, COLOR_BLACK);
 	const char *link = host ? "USB" : qspi ? "QSPI" : "UART";
-	if (gain_db < 0)
-		snprintf(line, sizeof(line), "%4d MHZ SPAN %d GAIN AGC %s", freq_mhz, spans[span].mhz,
-			link);
+	char freq[16], gain_text[8];
+	if (freq_khz % 1000)
+		snprintf(freq, sizeof(freq), "%d.%03d", freq_khz/1000, freq_khz % 1000);
 	else
-		snprintf(line, sizeof(line), "%4d MHZ SPAN %d GAIN %d %s", freq_mhz, spans[span].mhz,
-			gain_db, link);
+		snprintf(freq, sizeof(freq), "%d", freq_khz/1000);
+	if (gain_db < 0)
+		snprintf(gain_text, sizeof(gain_text), "AGC");
+	else
+		snprintf(gain_text, sizeof(gain_text), "%d", gain_db);
+	snprintf(line, sizeof(line), "%s MHZ SPAN %d GAIN %s %s", freq, spans[span].mhz, gain_text,
+		link);
 	lcd_text(1, HEADER_Y + 1, COLOR_WHITE, line);
-	int peak_khz = 1000*freq_mhz - 500*spans[span].mhz + (2*peak_x + 1)*500*spans[span].mhz/LCD_WIDTH;
+	int peak_khz = freq_khz - 500*spans[span].mhz + (2*peak_x + 1)*500*spans[span].mhz/LCD_WIDTH;
 	snprintf(line, sizeof(line), "REF %d PK %d.%d %d %s%d.%dFPS", ref_db4/4, peak_khz/1000,
 		(peak_khz % 1000)/100, col_db4[peak_x]/4, sound ? "SND " : peak_hold ? "HOLD " : "",
 		fps10/10, fps10 % 10);
@@ -227,10 +239,10 @@ static void draw_spectrum(void)
 	for (int db = 1; db < 6; db++)
 		for (int x = 0; x < LCD_WIDTH; x += 2)
 			lcd_screen[SPEC_Y + db*SPEC_H/6][x] = COLOR_GRID;
-	int f_lo = freq_mhz - spans[span].mhz/2;
-	int f_hi = freq_mhz + spans[span].mhz/2;
+	int f_lo = freq_khz/1000 - spans[span].mhz/2;
+	int f_hi = freq_khz/1000 + spans[span].mhz/2;
 	for (int f = (f_lo + 9)/10*10; f <= f_hi; f += 10) {
-		int x = freq_to_x(10*f);
+		int x = freq_to_x(1000*f);
 		if (x >= 0)
 			for (int y = SPEC_Y; y < SPEC_Y + SPEC_H; y += 2)
 				lcd_screen[y][x] = COLOR_GRID;
@@ -258,7 +270,7 @@ static void draw_markers(void)
 	int w = 20*LCD_WIDTH/spans[span].mhz;
 	for (int ch = 1; ch <= 14; ch++) {
 		int f    = (ch == 14) ? 2484 : 2407 + 5*ch;
-		int x    = freq_to_x(10*f);
+		int x    = freq_to_x(1000*f);
 		int main = (ch == 1 || ch == 6 || ch == 11 || ch == 14);
 		if (x < 0)
 			continue;
@@ -272,7 +284,7 @@ static void draw_markers(void)
 	/* BLE advertising channels 37/38/39. */
 	static const int ble[] = {2402, 2426, 2480};
 	for (int i = 0; i < 3; i++) {
-		int x = freq_to_x(10*ble[i]);
+		int x = freq_to_x(1000*ble[i]);
 		if (x >= 0)
 			lcd_rect(x, MARKER_Y, 1, MARKER_H - 2, COLOR_BLE);
 	}
@@ -391,8 +403,10 @@ static int show_spectrum(const int8_t *data, int samples)
 			peak_x = x;
 	}
 	update_floor();
-	if (ref_db4 < 0)
-		ref_db4 = (col_db4[peak_x] + 5*4 + 19)/20*20; /* Auto: 5dB above the peak, 5dB steps. */
+	/* Auto reference: 5dB above the peak (5dB steps), followed when off by 10dB or more. */
+	int ref_target = (col_db4[peak_x] + 5*4 + 19)/20*20;
+	if (ref_db4 < 0 || (ref_auto && (ref_target - ref_db4 >= 10*4 || ref_db4 - ref_target >= 10*4)))
+		ref_db4 = ref_target;
 	tone_update();
 
 	/* Display. */
@@ -444,8 +458,11 @@ static void host_command(char *line)
 		return;
 	}
 	/* Displayed settings. */
-	if (sscanf(line, "FREQ %u", &n) == 1) {
-		freq_mhz = n;
+	if (sscanf(line, "FREQ %u", &n) == 1 || sscanf(line, "FREQK %u", &n) == 1) {
+		freq_khz  = (line[4] == 'K') ? (int)n : (int)n*1000;
+		floor_db4 = -1;
+		if (ref_auto)
+			ref_db4 = -1;
 		memset(peak_db4, 0, sizeof(peak_db4));
 	} else if (!strcmp(line, "GAIN HARDWARE")) {
 		gain_db = -1;
@@ -563,6 +580,14 @@ int main(void)
 	lcd_present();
 
 	esp32sdr_cmd("SYNC 1", reply, sizeof(reply), 200);
+	/* kHz tuning (Chromatic ESP-SDR fork), else Wi-Fi channel frequencies only. */
+	unsigned kmin, kmax;
+	if (esp32sdr_cmd("RANGEK?", reply, sizeof(reply), 200) > 0 &&
+		sscanf(reply, "RANGEK %u %u", &kmin, &kmax) == 2) {
+		freqk    = 1;
+		freq_min = kmin;
+		freq_max = kmax;
+	}
 	/* Captures over QSPI (Chromatic ESP-SDR fork) if supported, else over the UART. */
 	qspi = (esp32sdr_qspi((void *)(MAIN_RAM_BASE + LAYOUT_DATA_OFFSET),
 		LAYOUT_PSRAM_OFFSET + LAYOUT_DATA_OFFSET) == 0);
@@ -601,13 +626,26 @@ int main(void)
 		/* Controls. */
 		uint32_t pressed = buttons_pressed();
 		if (pressed & ((1 << BTN_LEFT) | (1 << BTN_RIGHT))) {
-			freq_mhz = next_channel(freq_mhz, (pressed & (1 << BTN_RIGHT)) ? 1 : -1);
+			int dir = (pressed & (1 << BTN_RIGHT)) ? 1 : -1;
+			if (freqk) {
+				freq_khz += dir*5000;
+				freq_khz  = (freq_khz < freq_min) ? freq_khz + 5000 :
+				            (freq_khz > freq_max) ? freq_khz - 5000 : freq_khz;
+			} else
+				freq_khz = 1000*next_channel(freq_khz/1000, dir);
+			if (ref_auto)
+				ref_db4 = -1;
+			floor_db4 = -1;
 			set_freq();
 		}
-		if (pressed & (1 << BTN_UP))
+		if (pressed & (1 << BTN_UP)) {
 			ref_db4 += 5*4;
-		if (pressed & (1 << BTN_DOWN))
+			ref_auto = 0;
+		}
+		if (pressed & (1 << BTN_DOWN)) {
 			ref_db4 -= 5*4;
+			ref_auto = 0;
+		}
 		if (pressed & (1 << BTN_A)) {
 			span      = (span + 1) % SPANS;
 			ref_db4   = -1;
@@ -621,8 +659,10 @@ int main(void)
 		}
 		if (pressed & (1 << BTN_START))
 			peak_hold = !peak_hold;
-		if (pressed & (1 << BTN_SEL))
-			ref_db4 = -1;
+		if (pressed & (1 << BTN_SEL)) {
+			ref_db4  = -1;
+			ref_auto = 1;
+		}
 		if (pressed & (1 << BTN_MENU))
 			sound = !sound;
 		if (pressed & ((1 << BTN_START) | (1 << BTN_A) | (1 << BTN_LEFT) | (1 << BTN_RIGHT)))
@@ -655,11 +695,11 @@ int main(void)
 			fps10      = fps_frames*10000/(t - fps_t0);
 			fps_frames = 0;
 			fps_t0     = t;
-			log_status("%s frames %lu errors %lu fps %d.%d freq %d span %d gain %d ref %d peak %d@%d\n"
+			log_status("%s frames %lu errors %lu fps %d.%d freq %dkHz span %d gain %d ref %d peak %d@%d\n"
 				"ms: capture %lu display %lu, relay: %lu frames %lu bytes\n",
 				qspi ? "qspi" : "uart", (unsigned long)frames,
 				(unsigned long)(errors[1] + errors[2] + errors[3] + errors[4] + errors[5]),
-				fps10/10, fps10 % 10, freq_mhz, spans[span].mhz, gain_db, ref_db4/4,
+				fps10/10, fps10 % 10, freq_khz, spans[span].mhz, gain_db, ref_db4/4,
 				col_db4[peak_x]/4, peak_x,
 				(unsigned long)(t_display - t_capture), (unsigned long)(t_end - t_display),
 				(unsigned long)relay_frames, (unsigned long)relay_bytes);
