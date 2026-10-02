@@ -20,6 +20,7 @@ import subprocess
 from types import MethodType, SimpleNamespace
 
 from migen import *
+from migen.genlib.cdc import MultiReg
 
 from litex.gen import *
 from litex.gen.genlib.cdc import BusSynchronizer
@@ -37,6 +38,7 @@ from chromatix import Platform
 from chromatix.gateware.crg        import CRG
 from chromatix.gateware.sources    import add_verilog_sources
 from chromatix.gateware.usb_device import USBDevice
+from chromatix.gateware.cdc_link   import CDCLink
 from chromatix.gateware.misc       import TickGenerator, StatusLed, ESP32Control
 from chromatix.gateware.buttons    import Buttons, BUTTONS
 from chromatix.gateware.debug      import DebugControl
@@ -726,8 +728,20 @@ class BaseSoC(SoCMini):
             cdc_phy = CDCStreamPHY()
             self.cdc_rx = stream.ClockDomainCrossing([("data", 8)], cd_from="phy", cd_to="sys")
             self.cdc_tx = stream.ClockDomainCrossing([("data", 8)], cd_from="sys", cd_to="phy")
-            cdc_phy.source = self.cdc_rx.source
-            cdc_phy.sink   = self.cdc_tx.sink
+            if not with_app:
+                cdc_phy.source = self.cdc_rx.source
+                cdc_phy.sink   = self.cdc_tx.sink
+            else:
+                # Applications: CDC stream switched to an application UART + DMA (USB link, ex: I/Q
+                # streaming), back to the UARTBone with a host 1200 baud touch.
+                self.usb_link = usb_link = CDCLink(bus_address_width=self.bus.address_width)
+                self.bus.add_master(name="usb_link_dma", master=usb_link.bus)
+                self.comb += [
+                    self.cdc_rx.source.connect(usb_link.source),
+                    usb_link.sink.connect(self.cdc_tx.sink),
+                ]
+                cdc_phy.source = usb_link.debug_source
+                cdc_phy.sink   = usb_link.debug_sink
             self.uartbone = UARTBone(
                 phy           = cdc_phy,
                 clk_freq      = sys_clk_freq,
@@ -755,6 +769,11 @@ class BaseSoC(SoCMini):
                 usb_dev.cdc_source.connect(self.cdc_rx.sink),
                 self.cdc_tx.source.connect(usb_dev.cdc_sink),
             ]
+        if with_app:
+            # Host 1200 baud touch (CDC line coding).
+            usb_touch = Signal()
+            self.sync.phy += usb_touch.eq(usb_dev.ctrl_uart.dte_rate == 1200)
+            self.specials += MultiReg(usb_touch, self.usb_link.touch)
         self.comb += [
             usb_dev.reset.eq(usb_rst),
             esp32_ctrl.usb_locked.eq(usb_dev.locked),

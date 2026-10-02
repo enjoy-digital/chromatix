@@ -88,8 +88,8 @@ def test_soc_bios_elaboration(tmp_path):
 
 def test_soc_app_elaboration(tmp_path):
     """CPU application: VexRiscv (I/D caches, no ROM: reset in the PSRAM main RAM) + PSRAM
-    framebuffer/PCM audio in place of the Game Boy core, UARTBone + crossover UART on the USB CDC,
-    CPU UART to the ESP32."""
+    framebuffer/PCM audio in place of the Game Boy core, UARTBone + crossover UART on the USB CDC
+    (switchable to an application UART + DMA), CPU UART to the ESP32."""
     target   = load_target()
     platform = Platform()
     target.add_timing_constraints(platform)
@@ -104,10 +104,11 @@ def test_soc_app_elaboration(tmp_path):
     assert "VexRiscv" in verilog and "VexRiscv_Lite" not in verilog
     assert "emu_system_top" not in verilog
     assert "uartbone" in verilog
-    for name in ["uart", "esp32_uart"]:
+    for name in ["uart", "esp32_uart", "usb_link"]:
         assert f"csr_base,{name}," in csrs, name
     for name in ["ctrl_reset", "framebuffer_line", "framebuffer_status", "pcm_data",
-        "demo_buttons_status", "memory_counters_requests", "esp32_uart_rxtx"]:
+        "demo_buttons_status", "memory_counters_requests", "esp32_uart_rxtx", "usb_link_control",
+        "usb_link_status", "usb_link_uart_rxtx", "usb_link_dma_base", "usb_link_dma_enable"]:
         assert f"csr_register,{name}," in csrs, name
     assert "constant,pcm_interrupt," in csrs
     assert f"memory_region,main_ram,0x40000000,{target.APP_RAM_SIZE},cached" in csrs
