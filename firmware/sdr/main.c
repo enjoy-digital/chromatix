@@ -7,8 +7,9 @@
 // LCD. I/Q bursts captured by the ESP32 (CAP16 over the ESP32 UART), FFT on the CPU.
 //
 // Controls: Left/Right: tune (5MHz), Up/Down: reference level (5dB), A: span (16/40MHz),
-// B: gain (AGC/manual), Start: peak hold, Select: auto reference level. Waterfall scaled from the
-// noise floor.
+// B: gain (AGC/manual), Start: peak hold, Select: auto reference level, Menu: RSSI tone (pitch
+// following the peak level above the noise floor in the center quarter of the span: tune to an
+// emitter and hunt it down). Waterfall scaled from the noise floor.
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -124,6 +125,7 @@ static int span      = 1;
 static int gain      = 0;
 static int ref_db4   = -1; /* < 0: auto. */
 static int peak_hold = 0;
+static int sound     = 0; /* RSSI tone. */
 static int qspi      = 0; /* Captures over QSPI (else UART). */
 static int host      = 0; /* USB host relay active. */
 static int gain_db   = -1; /* Displayed gain (-1: AGC). */
@@ -193,7 +195,8 @@ static void draw_header(int fps10, int peak_x)
 	lcd_text(1, HEADER_Y + 1, COLOR_WHITE, line);
 	int peak_khz = 1000*freq_mhz - 500*spans[span].mhz + (2*peak_x + 1)*500*spans[span].mhz/LCD_WIDTH;
 	snprintf(line, sizeof(line), "REF %d PK %d.%d %d %s%d.%dFPS", ref_db4/4, peak_khz/1000,
-		(peak_khz % 1000)/100, col_db4[peak_x]/4, peak_hold ? "HOLD " : "", fps10/10, fps10 % 10);
+		(peak_khz % 1000)/100, col_db4[peak_x]/4, sound ? "SND " : peak_hold ? "HOLD " : "",
+		fps10/10, fps10 % 10);
 	lcd_text(1, HEADER_Y + 8, COLOR_WHITE, line);
 }
 
@@ -271,6 +274,54 @@ static void draw_message(const char *msg)
 	lcd_text((LCD_WIDTH - 4*(int)strlen(msg))/2, SPEC_Y + SPEC_H/2 - 3, COLOR_RED, msg);
 }
 
+/* RSSI Tone ------------------------------------------------------------------------------------ */
+
+#define PCM_RATE  11025
+#define PCM_DEPTH 512
+
+static volatile uint32_t tone_freq;
+static uint32_t          tone_phase;
+
+static void tone_fill(void)
+{
+	/* Square wave (or silence), FIFO filled (refilled from the PCM IRQ when half empty). */
+	while (pcm_level_read() < PCM_DEPTH - 8) {
+		int16_t sample = 0;
+		if (tone_freq) {
+			tone_phase += tone_freq;
+			sample = ((tone_phase/(PCM_RATE/2)) & 1) ? 3000 : -3000;
+		}
+		pcm_data_write(((uint32_t)(uint16_t)sample << 16) | (uint16_t)sample);
+	}
+}
+
+static void tone_isr(void)
+{
+	tone_fill();
+}
+
+static void tone_init(void)
+{
+	irq_attach(PCM_INTERRUPT, tone_isr);
+	pcm_ev_enable_write(1);
+	irq_setmask(irq_getmask() | (1 << PCM_INTERRUPT));
+}
+
+static void tone_update(void)
+{
+	/* Pitch: 200Hz + 40Hz/dB of the center quarter peak above the noise floor. */
+	if (!sound) {
+		tone_freq = 0;
+		return;
+	}
+	int peak = 0;
+	for (int x = 3*LCD_WIDTH/8; x < 5*LCD_WIDTH/8; x++)
+		peak = (col_db4[x] > peak) ? col_db4[x] : peak;
+	int db = (peak - floor_db4)/4;
+	db = (db < 0) ? 0 : (db > 50) ? 50 : db;
+	tone_freq = 200 + 40*db;
+}
+
 /* Buttons -------------------------------------------------------------------------------------- */
 
 enum {
@@ -322,6 +373,7 @@ static int show_spectrum(const int8_t *data, int samples)
 	update_floor();
 	if (ref_db4 < 0)
 		ref_db4 = (col_db4[peak_x] + 5*4 + 19)/20*20; /* Auto: 5dB above the peak, 5dB steps. */
+	tone_update();
 
 	/* Display. */
 	draw_spectrum();
@@ -486,6 +538,7 @@ int main(void)
 	esp32sdr_init();
 	palette_init();
 	lcd_init();
+	tone_init();
 	lcd_text(1, 1, COLOR_WHITE, "CHROMATIX SDR: WAITING FOR ESP-SDR...");
 	lcd_present();
 
@@ -552,6 +605,8 @@ int main(void)
 			peak_hold = !peak_hold;
 		if (pressed & (1 << BTN_SEL))
 			ref_db4 = -1;
+		if (pressed & (1 << BTN_MENU))
+			sound = !sound;
 		if (pressed & ((1 << BTN_START) | (1 << BTN_A) | (1 << BTN_LEFT) | (1 << BTN_RIGHT)))
 			memset(peak_db4, 0, sizeof(peak_db4));
 

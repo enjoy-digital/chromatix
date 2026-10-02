@@ -79,7 +79,9 @@ ESP-SDR UART is limited to 2 Mbaud (`BAUD 1000000|2000000`), faster needs the ES
   numbers (20MHz bands of channels 1/6/11/14), BLE advertising channels 37/38/39, waterfall (heat map
   scaled from the noise floor: median of the center half, ESP32 RX filter passband).
 - **Controls**: Left/Right: tune (5MHz), Up/Down: reference level (5dB), A: span (16/40MHz), B: gain
-  (AGC, manual 20-70), Start: peak hold, Select: auto reference level.
+  (AGC, manual 20-70), Start: peak hold, Select: auto reference level, Menu: RSSI tone (PCM audio,
+  pitch following the peak level above the noise floor in the center quarter of the span: tune to
+  an emitter and hunt it down; measured over the USB audio: 520-1120Hz following Wi-Fi bursts).
 - **Measured**: 9.5 updates/s (capture 67ms, DSP 30ms, draw 6ms, present 2ms), no capture errors
   after the startup resync. 80MS/s gives no wider view (the ESP32 RX filter is ~40MHz wide, its CAPS
   only list RX40/RX16), so the spans are 16 and 40MHz.
@@ -134,5 +136,4 @@ Host spectrum (400 relayed captures, `chromatic_sdr.py spectrum --freq 2412`): W
    duty cycle.
 2. **ESP32 duties**: the SDR ESP32 firmware has no menu/OSD/power management: merging the
    transport into the ModRetro MCU firmware (GPL) would keep them (SDR as a mode).
-3. **App extras**: RSSI sonification, channel occupancy view, recording to the PC from the
-   console buttons.
+3. **App extras**: channel occupancy view, recording to the PC from the console buttons.
