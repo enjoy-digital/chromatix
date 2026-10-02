@@ -6,7 +6,7 @@
 // ChromatiX SDR (--with-app build, ESP-SDR on the ESP32): 2.4GHz spectrum analyzer/waterfall on the
 // LCD. I/Q bursts captured by the ESP32 (CAP16 over the ESP32 UART), FFT on the CPU.
 //
-// Controls: Left/Right: tune (5MHz), Up/Down: reference level (5dB, manual), A: span (16/40MHz),
+// Controls: Left/Right: tune (5MHz), Up/Down: reference level (5dB, manual), A: span (16/40/80MHz),
 // B: gain (AGC/manual), Start: peak hold, Select: auto reference level (default), Menu: RSSI tone
 // (pitch following the peak level above the noise floor in the center quarter of the span: tune
 // to an emitter and hunt it down). Waterfall scaled from the noise floor.
@@ -113,9 +113,9 @@ static const struct {
 } spans[] = {
 	{ESP32SDR_RATE_16MSPS, 16},
 	{ESP32SDR_RATE_40MSPS, 40},
-	{ESP32SDR_RATE_80MSPS, 80}, /* Host captures only: no wider view (ESP32 RX filter: ~40MHz). */
+	{ESP32SDR_RATE_80MSPS, 80}, /* With the RX filter opened (LPF 0): +-38MHz usable. */
 };
-#define SPANS 2 /* Local spans. */
+#define SPANS (freqk ? 3 : 2) /* Local spans (80MHz: Chromatic ESP-SDR fork). */
 
 static const int gains[] = {-1, 20, 30, 40, 50, 60, 70}; /* -1: AGC (hardware gain). */
 #define GAINS (int)(sizeof(gains)/sizeof(gains[0]))
@@ -162,6 +162,13 @@ static void set_freq(void)
 	else
 		snprintf(cmd, sizeof(cmd), "FREQ %d", freq_khz/1000);
 	esp32sdr_cmd(cmd, reply, sizeof(reply), 200);
+}
+
+static void set_filter(void)
+{
+	/* ESP32 RX filter: opened for the 80MHz span (default ~+-17MHz passband). */
+	char reply[32];
+	esp32sdr_cmd((spans[span].mhz == 80) ? "LPF 0" : "LPF AUTO", reply, sizeof(reply), 200);
 }
 
 static void set_gain(void)
@@ -593,6 +600,7 @@ int main(void)
 		LAYOUT_PSRAM_OFFSET + LAYOUT_DATA_OFFSET) == 0);
 	set_freq();
 	set_gain();
+	set_filter();
 	/* USB link: ESP-SDR protocol relay for the host. */
 	int usb = (usblink_init() == 0);
 
@@ -616,6 +624,7 @@ int main(void)
 				host = 0;
 				esp32sdr_flush();
 				span      = (span < SPANS) ? span : 1;
+				set_filter();
 				ref_db4   = -1;
 				floor_db4 = -1;
 				set_freq();
@@ -650,6 +659,7 @@ int main(void)
 			span      = (span + 1) % SPANS;
 			ref_db4   = -1;
 			floor_db4 = -1;
+			set_filter();
 		}
 		if (pressed & (1 << BTN_B)) {
 			gain      = (gain + 1) % GAINS;
