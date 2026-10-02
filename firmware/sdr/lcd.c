@@ -44,21 +44,13 @@ void lcd_rect(int x, int y, int w, int h, uint8_t color)
 
 void lcd_text(int x, int y, uint8_t color, const char *text)
 {
-	/* 4x6 cells (3x6 glyphs + 1 column spacing), ASCII 0x20-0x7e. */
-	for (; *text; text++, x += 4) {
-		if (*text < 0x20 || *text > 0x7e)
-			continue;
-		uint32_t glyph = font4x6[*text - 0x20];
-		for (int r = 0; r < 6; r++)
-			for (int c = 0; c < 3; c++)
-				if ((glyph >> (3*(5 - r) + 2 - c)) & 1)
-					lcd_rect(x + c, y + r, 1, 1, color);
-	}
+	lcd_text_scaled(x, y, color, text, 1);
 }
 
 void lcd_text_scaled(int x, int y, uint8_t color, const char *text, int scale)
 {
-	/* lcd_text with each font pixel drawn as a scale x scale square. */
+	/* 4x6 cells (3x6 glyphs + 1 column spacing), ASCII 0x20-0x7e, font pixels drawn as scale x scale
+	   squares. */
 	for (; *text; text++, x += 4*scale) {
 		if (*text < 0x20 || *text > 0x7e)
 			continue;

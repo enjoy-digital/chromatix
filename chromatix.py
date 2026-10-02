@@ -35,22 +35,22 @@ from litex.soc.integration.builder  import Builder
 
 from chromatix import Platform
 
-from chromatix.gateware.crg        import CRG
-from chromatix.gateware.sources    import add_verilog_sources
-from chromatix.gateware.usb_device import USBDevice
-from chromatix.gateware.cdc_link   import CDCLink
-from chromatix.gateware.misc       import TickGenerator, StatusLed, ESP32Control
-from chromatix.gateware.buttons    import Buttons, BUTTONS
-from chromatix.gateware.debug      import DebugControl
-from chromatix.gateware.memory     import MemorySystem, MemoryCounters
-from chromatix.gateware.vcart      import VirtualCart, VirtualCartCSR
-from chromatix.gateware.demo       import ButtonsCSR, ToneGenerator, PCMAudio
-from chromatix.gateware.video      import VideoPipeline
-from chromatix.gateware.lcd        import ST7785Init, load_st7785_sequence
-from chromatix.gateware.codec      import CodecControl, CodecI2S, load_tlv320_registers
-from chromatix.gateware.sysmon     import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
-from chromatix.gateware.adc        import BatteryADC
-from chromatix.gateware.terminal   import LCDTerminal
+from chromatix.gateware.crg         import CRG
+from chromatix.gateware.sources     import add_verilog_sources
+from chromatix.gateware.usb_device  import USBDevice
+from chromatix.gateware.cdc_link    import CDCLink
+from chromatix.gateware.misc        import TickGenerator, StatusLed, ESP32Control
+from chromatix.gateware.buttons     import Buttons, BUTTONS
+from chromatix.gateware.debug       import DebugControl
+from chromatix.gateware.memory      import MemorySystem, MemoryCounters
+from chromatix.gateware.vcart       import VirtualCart, VirtualCartCSR
+from chromatix.gateware.demo        import ButtonsCSR, ToneGenerator, PCMAudio
+from chromatix.gateware.video       import VideoPipeline
+from chromatix.gateware.lcd         import ST7785Init, load_st7785_sequence
+from chromatix.gateware.codec       import CodecControl, CodecI2S, load_tlv320_registers
+from chromatix.gateware.sysmon      import SystemMonitorUART, SystemMonitorBridge, SystemMonitorPayloads, SystemMonitorControl
+from chromatix.gateware.adc         import BatteryADC
+from chromatix.gateware.terminal    import LCDTerminal
 from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
 
 # Timing Constraints -------------------------------------------------------------------------------
@@ -734,8 +734,9 @@ class BaseSoC(SoCMini):
             else:
                 # Applications: CDC stream switched to an application UART + DMA (USB link, ex: I/Q
                 # streaming), back to the UARTBone with a host 1200 baud touch.
-                self.usb_link = usb_link = CDCLink(bus_address_width=self.bus.address_width,
-                    release_cycles=int(sys_clk_freq))
+                self.usb_link = usb_link = CDCLink(sys_clk_freq,
+                    bus_address_width = self.bus.address_width,
+                )
                 self.bus.add_master(name="usb_link_dma", master=usb_link.bus)
                 self.comb += [
                     self.cdc_rx.source.connect(usb_link.source),
@@ -939,8 +940,8 @@ def compile_firmware_libraries(builder, names=("libc", "libcompiler_rt", "libbas
         if name in names:
             dst_dir = os.path.join(builder.software_dir, name)
             os.makedirs(dst_dir, exist_ok=True)
-            subprocess.check_call(["make", f"-j{os.cpu_count()}", "-C", dst_dir, "-f",
-                os.path.join(src_dir, "Makefile")])
+            make_cmd = ["make", f"-j{os.cpu_count()}", "-C", dst_dir, "-f", os.path.join(src_dir, "Makefile")]
+            subprocess.check_call(make_cmd)
 
 def main():
     parser = argparse.ArgumentParser(description="ChromatiX: LiteX based FPGA design for the ModRetro Chromatic.")

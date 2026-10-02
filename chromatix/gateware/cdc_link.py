@@ -19,6 +19,14 @@ from litex.soc.interconnect.csr import *
 from litex.soc.cores.uart import UART
 from litex.soc.cores.dma import WishboneDMAReader
 
+# Stream PHY ---------------------------------------------------------------------------------------
+
+class StreamPHY:
+    """UART PHY made of byte streams (source: received bytes, sink: bytes to send)."""
+    def __init__(self):
+        self.source = stream.Endpoint([("data", 8)])
+        self.sink   = stream.Endpoint([("data", 8)])
+
 # CDC Link -----------------------------------------------------------------------------------------
 
 class CDCLink(LiteXModule):
@@ -35,10 +43,10 @@ class CDCLink(LiteXModule):
     The host switches back to the debug bridge with a "1200 baud touch" (`touch`: CDC line coding
     set to 1200 baud, rising edge), so a stuck application can always be replaced. The debug session
     lasts while the host keeps the port open (`dtr`: the host asserts DTR while the port is open);
-    the stream goes back to the application `release_cycles` after DTR is released.
+    the stream goes back to the application `release_time` seconds after DTR is released.
     """
-    def __init__(self, uart_fifo_depth=64, dma_fifo_depth=64, bus_data_width=32,
-        bus_address_width=32, release_cycles=int(67e6)):
+    def __init__(self, clk_freq, release_time=1.0, uart_fifo_depth=64, dma_fifo_depth=64,
+        bus_data_width=32, bus_address_width=32):
         # CDC byte stream (sys).
         self.source       = stream.Endpoint([("data", 8)]) # Host -> device.
         self.sink         = stream.Endpoint([("data", 8)]) # Device -> host.
@@ -53,24 +61,17 @@ class CDCLink(LiteXModule):
             address_width=bus_address_width, addressing="word")
 
         self.control = CSRStorage(fields=[
-            CSRField("app", size=1, offset=0,
-                description="CDC stream to the application (else debug bridge, also on a touch)."),
+            CSRField("app", size=1, description="CDC stream to the application (else debug bridge)."),
         ])
         self.status = CSRStatus(fields=[
-            CSRField("dma_idle", size=1, offset=0,
-                description="DMA done (or disabled) and its data sent."),
-            CSRField("touch",    size=1, offset=1,
-                description="Debug session (host 1200 baud touch, until DTR released)."),
+            CSRField("dma_idle", size=1, description="DMA done (or disabled) and its data sent."),
+            CSRField("touch",    size=1, description="Debug session (host 1200 baud touch, until DTR released)."),
         ])
 
         # # #
 
         # Application UART (CPU) and DMA reader -> bytes.
-        class _UARTPHY:
-            pass
-        phy        = _UARTPHY()
-        phy.source = stream.Endpoint([("data", 8)]) # Host -> UART RX.
-        phy.sink   = stream.Endpoint([("data", 8)]) # UART TX -> host.
+        phy        = StreamPHY() # Source: host -> UART RX, sink: UART TX -> host.
         self.uart  = UART(phy, tx_fifo_depth=uart_fifo_depth, rx_fifo_depth=uart_fifo_depth,
             rx_fifo_rx_we=True)
         self.dma   = WishboneDMAReader(self.bus, fifo_depth=dma_fifo_depth, with_csr=True,
@@ -79,10 +80,11 @@ class CDCLink(LiteXModule):
         self.comb += self.dma.source.connect(conv.sink)
 
         # Application selection / host touch.
-        app       = Signal()
-        touch_d   = Signal()
-        touched   = Signal()
-        release   = Signal(max=release_cycles + 1)
+        release_cycles = int(release_time*clk_freq)
+        app     = Signal()
+        touch_d = Signal()
+        touched = Signal()
+        release = Signal(max=release_cycles + 1)
         self.sync += [
             touch_d.eq(self.touch),
             If(self.dtr | ~touched,
@@ -109,7 +111,7 @@ class CDCLink(LiteXModule):
                 self.source.connect(phy.source),
             ).Else(
                 self.source.connect(self.debug_source),
-            )
+            ),
         ]
 
         # Device -> host.
@@ -120,5 +122,5 @@ class CDCLink(LiteXModule):
                 conv.source.connect(self.sink, omit={"last"}),
             ).Else(
                 phy.sink.connect(self.sink),
-            )
+            ),
         ]

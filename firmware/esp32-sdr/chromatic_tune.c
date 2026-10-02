@@ -44,19 +44,23 @@ extern int16_t phy_freq_offset;
 extern unsigned rom_chip_i2c_readReg(unsigned block, unsigned host, unsigned reg);
 extern void     rom_chip_i2c_writeReg(unsigned block, unsigned host, unsigned reg, unsigned data);
 
-/* RF PLL frequency table (per frequency index, 3 words, see write_wifi_chan_data). */
-#define FTAB_SEL  0x3ff4e0c4
-#define FTAB_DATA 0x3ff4e0c0
+/* RF PLL frequency table: 85 entries (2400-2484MHz) of 3 words (write_wifi_chan_data,
+   bt_opt_write_mem): word 0: VCO capacitor bank code (bits 7:0, analog block 0x62 reg 1), word 1:
+   divider (LO = 480MHz*(2 + word/2^20)), word 2: front-end tuning. */
+#define FTAB_ENTRIES 85
+#define FTAB_SEL     0x3ff4e0c4 /* Word address (bits 7:0), write strobe (bit 9). */
+#define FTAB_DATA    0x3ff4e0c0 /* Read data. */
+#define FTAB_DATA_W  0x3ff4e148 /* Write data. */
+#define FTAB_WRITE   (1 << 9)
+
+/* Tuning ranges (kHz). */
+#define TABLE_MIN_KHZ 2150000 /* Mode 1: table tuning. */
+#define TABLE_MAX_KHZ 2880000
+#define TUNE_MIN_KHZ  2386000 /* Mode 2: calibration + offset. */
+#define TUNE_MAX_KHZ  2504000
+#define OFFSET_SCALE  1.0546  /* Mode 2: LO move (MHz) per offset MHz. */
 
 int chromatic_tune_mode = 1;
-
-/* Table tuning (mode 1): 2150-2880MHz. */
-#define TABLE_MIN_KHZ 2150000
-#define TABLE_MAX_KHZ 2880000
-
-#define TUNE_MIN_KHZ 2386000
-#define TUNE_MAX_KHZ 2504000
-#define OFFSET_SCALE 1.0546 /* LO move (MHz) per offset MHz. */
 
 static void reply(const char *text)
 {
@@ -77,12 +81,6 @@ static void tune_sw(unsigned index, int offset)
 {
     set_chan_freq_sw_start(index, offset, chip7_phy_init_ctrl[1]);
 }
-
-/* RF PLL frequency table: 85 entries (2400-2484MHz) of 3 words (write_wifi_chan_data,
-   bt_opt_write_mem): word 0: VCO capacitor bank code (bits 7:0, analog block 0x62 reg 1), word 1:
-   divider (LO = 480MHz*(2 + word/2^20)), word 2: front-end tuning. */
-#define FTAB_DATA_W 0x3ff4e148
-#define FTAB_WRITE  (1 << 9)
 
 static uint32_t ftab_read(unsigned addr)
 {
@@ -114,7 +112,7 @@ static bool tune_table(unsigned khz)
        capacitor code: calibrated one around its MHz, else from the fit), calibrated, restored. */
     double   mhz   = khz/1000.0;
     int      index = (int)(mhz + 0.5) - 2400;
-    index = (index < 0) ? 0 : (index > 84) ? 84 : index;
+    index = (index < 0) ? 0 : (index > FTAB_ENTRIES - 1) ? FTAB_ENTRIES - 1 : index;
     uint32_t w0 = ftab_read(3*index + 0);
     uint32_t w1 = ftab_read(3*index + 1);
     uint32_t dcap = (mhz - (2400 + index) < 1.0 && (2400 + index) - mhz < 1.0) ? (w0 & 0xff) :
@@ -229,13 +227,9 @@ bool chromatic_tune_command(const char *line, void (*prepare)(void))
         reply("OK\n");
         return true;
     }
-    if (sscanf(line, "FTAB %u %c", &index, &extra) == 1 && index < 85) { /* 85*3 words. */
-        unsigned w[3];
-        for (int k = 0; k < 3; k++) {
-            DPORT_REG_WRITE(FTAB_SEL, (DPORT_REG_READ(FTAB_SEL) & ~0xffu) | (index*3 + k));
-            w[k] = DPORT_REG_READ(FTAB_DATA);
-        }
-        snprintf(text, sizeof(text), "FTAB %08x %08x %08x\n", w[0], w[1], w[2]);
+    if (sscanf(line, "FTAB %u %c", &index, &extra) == 1 && index < FTAB_ENTRIES) {
+        snprintf(text, sizeof(text), "FTAB %08x %08x %08x\n", (unsigned)ftab_read(3*index + 0),
+            (unsigned)ftab_read(3*index + 1), (unsigned)ftab_read(3*index + 2));
         reply(text);
         return true;
     }

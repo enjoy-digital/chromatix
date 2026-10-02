@@ -23,6 +23,7 @@ import glob
 import argparse
 
 import serial
+import numpy as np
 
 RATES = {16: 6, 40: 1, 80: 0} # MS/s -> ESP-SDR rate index.
 
@@ -31,9 +32,10 @@ RATES = {16: 6, 40: 1, 80: 0} # MS/s -> ESP-SDR rate index.
 # fork (firmware/esp32-sdr) tunes 2150-2880MHz in kHz steps (FREQK).
 CHANNELS = list(range(2412, 2473, 5)) + [2484]
 
+# Helpers ------------------------------------------------------------------------------------------
+
 def conjugate(data):
     """ESP32 8-bit I/Q (inverted spectrum) -> conjugated I/Q bytes (int8, Q negated, clipped)."""
-    import numpy as np
     iq = np.frombuffer(data, dtype=np.int8).astype(np.int16)
     iq[1::2] = np.clip(-iq[1::2], -128, 127)
     return iq.astype(np.int8).tobytes()
@@ -45,6 +47,7 @@ def default_port():
 # ESP-SDR ------------------------------------------------------------------------------------------
 
 class ESPSDR:
+    """ESP-SDR protocol client (ESP-SDR README): commands, replies, CRC checked captures."""
     def __init__(self, port=None, timeout=1.0):
         self.port = serial.Serial()
         self.port.port     = port or default_port()
@@ -75,14 +78,14 @@ class ESPSDR:
             raise TimeoutError("ESP-SDR reply timeout.")
         return line.decode(errors="replace").strip()
 
-    def cmd(self, command, reply=True):
+    def cmd(self, command):
         self.port.write((command + "\n").encode())
-        return self.readline() if reply else None
+        return self.readline()
 
     def sync(self):
         """Resynchronize (incomplete transfers): SYNC with a nonce until it is echoed."""
         nonce = int(time.time()*1000) & 0xffffffff
-        for attempt in range(4):
+        for _ in range(4):
             time.sleep(0.05)
             self.port.reset_input_buffer()
             self.port.write(f"SYNC {nonce}\n".encode())
@@ -96,7 +99,7 @@ class ESPSDR:
         raise IOError("ESP-SDR not responding.")
 
     def capture(self, samples=16380, rate=40, bits=8):
-        """I/Q capture: list of (I, Q) bytes (int8 interleaved) as bytes, capture duration in us."""
+        """I/Q capture: (payload: int8 I/Q interleaved, ESP32 order, capture duration in us)."""
         cmd = {8: "CAP16", 10: "CAP20"}[bits]
         if rate != self.rate:
             # 80MS/s: RX filter opened (+-38MHz usable, Chromatic ESP-SDR fork).
@@ -106,19 +109,19 @@ class ESPSDR:
         if not header.startswith("DATA "):
             raise IOError(f"Capture error: {header}")
         _, n, crc, us = header.split()
-        n     = int(n)
-        size  = 2*n if bits == 8 else (20*n + 7)//8
-        data  = self.port.read(size)
+        n    = int(n)
+        size = 2*n if bits == 8 else (20*n + 7)//8
+        data = self.port.read(size)
         if len(data) != size:
             raise TimeoutError(f"Capture payload timeout ({len(data)}/{size} bytes).")
         if zlib.crc32(data) != int(crc, 16):
             raise IOError("Capture CRC error.")
         return data, int(us)
 
-# Commands -----------------------------------------------------------------------------------------
+# Spectrum -----------------------------------------------------------------------------------------
 
 def spectrum(data, nfft=1024):
-    import numpy as np
+    """Averaged power spectrum (dB) of a capture, DC centered."""
     iq  = np.frombuffer(data, dtype=np.int8).astype(np.float32)
     x   = (iq[0::2] - 1j*iq[1::2]) # Conjugated (ESP32 inverted spectrum).
     x   = x[:len(x)//nfft*nfft].reshape(-1, nfft)
@@ -127,16 +130,17 @@ def spectrum(data, nfft=1024):
     p   = (np.abs(np.fft.fftshift(np.fft.fft(x*win, axis=1), axes=1))**2).mean(axis=0)
     return 10*np.log10(p + 1e-12)
 
+# Run ----------------------------------------------------------------------------------------------
+
 def main():
     parser = argparse.ArgumentParser(description="Chromatic SDR host client (ESP-SDR protocol).")
-    parser.add_argument("--port",   default=None, help="Serial port (default: Chromatic CDC).")
-    parser.add_argument("--freq",   default=2437, type=float, help="Center frequency (MHz).")
-    parser.add_argument("--rate",   default=40,   type=int, choices=sorted(RATES),
-        help="Sample rate (MS/s).")
-    parser.add_argument("--gain",   default=None, type=int, help="Manual gain (default: AGC).")
-    parser.add_argument("--count",  default=50,   type=int, help="Captures.")
+    parser.add_argument("--port",   default=None,                 help="Serial port (default: Chromatic CDC).")
+    parser.add_argument("--freq",   default=2437, type=float,     help="Center frequency (MHz).")
+    parser.add_argument("--rate",   default=40,   type=int,       help="Sample rate (MS/s).", choices=sorted(RATES))
+    parser.add_argument("--gain",   default=None, type=int,       help="Manual gain (default: AGC).")
+    parser.add_argument("--count",  default=50,   type=int,       help="Captures.")
     parser.add_argument("command",  choices=["info", "bench", "spectrum", "record"])
-    parser.add_argument("filename", nargs="?", help="Output file (spectrum: .png, record: .cs8).")
+    parser.add_argument("filename", nargs="?",                    help="Output file (spectrum: .png, record: .cs8).")
     args = parser.parse_args()
 
     sdr = ESPSDR(args.port)
@@ -150,9 +154,9 @@ def main():
 
     captures, errors, nbytes = [], 0, 0
     t0 = time.time()
-    for i in range(args.count):
+    for _ in range(args.count):
         try:
-            data, us = sdr.capture(rate=args.rate)
+            data, _ = sdr.capture(rate=args.rate)
             nbytes += len(data)
             if args.command != "bench":
                 captures.append(data)
@@ -166,7 +170,6 @@ def main():
         f"{nbytes/dt/1e6:.2f} MB/s ({nbytes/2/dt/1e6:.2f} MS/s delivered), {errors} errors.")
 
     if args.command == "spectrum" and captures:
-        import numpy as np
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -176,9 +179,11 @@ def main():
         plt.figure(figsize=(10, 4))
         plt.plot(freqs, peak, lw=0.6, label="max hold")
         plt.plot(freqs, db,   lw=0.8, label="average")
-        plt.xlabel("Frequency (MHz)"); plt.ylabel("Power (dB, arbitrary)")
+        plt.xlabel("Frequency (MHz)")
+        plt.ylabel("Power (dB, arbitrary)")
         plt.title(f"Chromatic SDR: {args.freq} MHz, {args.rate} MS/s, {len(captures)} captures")
-        plt.grid(alpha=0.3); plt.legend()
+        plt.grid(alpha=0.3)
+        plt.legend()
         plt.tight_layout()
         plt.savefig(args.filename or "spectrum.png", dpi=120)
     if args.command == "record" and captures:

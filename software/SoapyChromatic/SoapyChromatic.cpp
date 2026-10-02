@@ -26,23 +26,24 @@
 #include <SoapySDR/Formats.hpp>
 #include <SoapySDR/Logger.hpp>
 #include <SoapySDR/Registry.hpp>
-#include <SoapySDR/Time.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <complex>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include <cstdlib>
 #include <fcntl.h>
 #include <glob.h>
 #include <poll.h>
@@ -54,7 +55,7 @@
 
 static bool debug_enabled()
 {
-    static bool enabled = getenv("CHROMATIC_SOAPY_DEBUG") != nullptr;
+    static bool enabled = std::getenv("CHROMATIC_SOAPY_DEBUG") != nullptr;
     return enabled;
 }
 
@@ -519,8 +520,10 @@ private:
                     burst.timeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
                     burst.iq.resize(2*n);
+                    const uint8_t *data = (const uint8_t *)burst.iq.data();
+                    uint32_t       crc  = std::strtoul(crc_hex, nullptr, 16);
                     ok = link.read((uint8_t *)burst.iq.data(), 2*n, 1000) &&
-                        crc32((const uint8_t *)burst.iq.data(), 2*n) == strtoul(crc_hex, NULL, 16);
+                        crc32(data, 2*n) == crc;
                 }
                 if (!ok)
                     SoapySDR::logf(SOAPY_SDR_WARNING, "Chromatic: capture error (%s)",
@@ -547,28 +550,36 @@ private:
             thread.join();
     }
 
-    SerialLink link;
-    std::mutex link_mutex;
+    // Link (protocol commands serialized with the capture thread).
+    SerialLink  link;
+    std::mutex  link_mutex;
     std::string info;
-    double freq = 2437e6, hw_freq = 0, freq_min = 2410e6, freq_max = 2486e6;
-    std::atomic<unsigned> generation{0};
-    bool freqk = false;
-    double rate = 40e6;
-    double gain = 40;
-    unsigned gain_max = 72;
-    bool agc = true;
-    int burst_samples = 16380;
-    std::string stream_format = SOAPY_SDR_CF32;
 
-    std::thread thread;
-    std::atomic<bool> running{false};
-    std::mutex queue_mutex;
+    // Settings.
+    double                freq          = 2437e6; // Requested frequency (Hz).
+    double                hw_freq       = 0;      // ESP32 frequency (Hz), NCO for the rest.
+    double                freq_min      = 2410e6;
+    double                freq_max      = 2486e6;
+    bool                  freqk         = false;  // kHz tuning (Chromatic ESP-SDR fork).
+    double                rate          = 40e6;
+    double                gain          = 40;
+    unsigned              gain_max      = 72;
+    bool                  agc           = true;
+    int                   burst_samples = 16380;
+    std::string           stream_format = SOAPY_SDR_CF32;
+    std::atomic<unsigned> generation{0};          // Settings generation (stale bursts dropped).
+
+    // Stream: capture thread -> bursts queue -> readStream.
+    std::thread             thread;
+    std::atomic<bool>       running{false};
+    std::mutex              queue_mutex;
     std::condition_variable queue_cv;
-    std::deque<Burst> queue;
-    std::unique_ptr<Burst> current;
-    size_t offset = 0;
-    std::complex<double> nco{1.0}, nco_step{1.0};
-    bool overflow = false;
+    std::deque<Burst>       queue;
+    bool                    overflow = false;
+    std::unique_ptr<Burst>  current;         // Burst being read.
+    size_t                  offset   = 0;    // Read position in the current burst (samples).
+    std::complex<double>    nco{1.0};        // NCO phase.
+    std::complex<double>    nco_step{1.0};   // NCO phase increment per sample.
 };
 
 // Registration -----------------------------------------------------------------------------------
@@ -577,7 +588,7 @@ static std::string default_port()
 {
     glob_t g;
     std::string port;
-    if (glob("/dev/serial/by-id/*Chromatic*if02*", 0, NULL, &g) == 0 && g.gl_pathc)
+    if (glob("/dev/serial/by-id/*Chromatic*if02*", 0, nullptr, &g) == 0 && g.gl_pathc)
         port = g.gl_pathv[0];
     globfree(&g);
     return port;

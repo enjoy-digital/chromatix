@@ -16,6 +16,20 @@
 
 #include "esp32sdr.h"
 
+/* UART ----------------------------------------------------------------------------------------- */
+
+static int uart_pop(void)
+{
+	/* Received byte or -1. Without rx_fifo_rx_we, the RX event clear pops the RX FIFO. */
+	if (esp32_uart_rxempty_read())
+		return -1;
+	int c = esp32_uart_rxtx_read();
+#ifndef CONFIG_ESP32_UART_RX_FIFO_RX_WE
+	esp32_uart_ev_pending_write(2);
+#endif
+	return c;
+}
+
 /* Time ----------------------------------------------------------------------------------------- */
 
 void esp32sdr_init(void)
@@ -33,13 +47,8 @@ void esp32sdr_flush(void)
 	/* Drop pending bytes until the line is quiet (20ms: end of an ongoing transfer). */
 	uint32_t deadline = esp32sdr_ms() + 20;
 	while ((int32_t)(esp32sdr_ms() - deadline) <= 0)
-		if (!esp32_uart_rxempty_read()) {
-			(void)esp32_uart_rxtx_read();
-#ifndef CONFIG_ESP32_UART_RX_FIFO_RX_WE
-			esp32_uart_ev_pending_write(2);
-#endif
+		if (uart_pop() >= 0)
 			deadline = esp32sdr_ms() + 20;
-		}
 }
 
 uint32_t esp32sdr_ms(void)
@@ -48,7 +57,7 @@ uint32_t esp32sdr_ms(void)
 	return (0xffffffff - timer0_value_read())/(CONFIG_CLOCK_FREQUENCY/1000);
 }
 
-/* UART ----------------------------------------------------------------------------------------- */
+/* Lines ---------------------------------------------------------------------------------------- */
 
 static void uart_putc(char c)
 {
@@ -58,25 +67,16 @@ static void uart_putc(char c)
 
 static int uart_getc(uint32_t deadline)
 {
-	while (esp32_uart_rxempty_read())
+	int c;
+	while ((c = uart_pop()) < 0)
 		if ((int32_t)(esp32sdr_ms() - deadline) > 0)
 			return -1;
-	int c = esp32_uart_rxtx_read();
-#ifndef CONFIG_ESP32_UART_RX_FIFO_RX_WE
-	esp32_uart_ev_pending_write(2); /* RX event clear: pops the RX FIFO. */
-#endif
 	return c;
 }
 
 int esp32sdr_rx(void)
 {
-	if (esp32_uart_rxempty_read())
-		return -1;
-	int c = esp32_uart_rxtx_read();
-#ifndef CONFIG_ESP32_UART_RX_FIFO_RX_WE
-	esp32_uart_ev_pending_write(2);
-#endif
-	return c;
+	return uart_pop();
 }
 
 static int read_line(char *line, int len, uint32_t deadline)

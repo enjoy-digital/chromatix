@@ -478,15 +478,15 @@ static void draw_spectrum(void)
 
 static void draw_waterfall(int y0, int h, int new_line)
 {
-	if (new_line) {
-		memmove(lcd_screen[y0 + 1], lcd_screen[y0], (h - 1)*LCD_WIDTH);
-		for (int x = 0; x < LCD_WIDTH; x++) {
-			int v = (col_db4[x] - (floor_db4 - 4*4))*HEAT_COLORS/(wf_range*4);
-			v = (v < 0) ? 0 : (v > HEAT_COLORS - 1) ? HEAT_COLORS - 1 : v;
-			lcd_screen[y0][x] = COLOR_HEAT + v;
-		}
+	/* Scrolled image (overlays/cursor never drawn into it), new line on top. */
+	if (!new_line)
+		return;
+	memmove(lcd_screen[y0 + 1], lcd_screen[y0], (h - 1)*LCD_WIDTH);
+	for (int x = 0; x < LCD_WIDTH; x++) {
+		int v = (col_db4[x] - (floor_db4 - 4*4))*HEAT_COLORS/(wf_range*4);
+		v = (v < 0) ? 0 : (v > HEAT_COLORS - 1) ? HEAT_COLORS - 1 : v;
+		lcd_screen[y0][x] = COLOR_HEAT + v;
 	}
-	/* Cursor (not part of the scrolled image: drawn on the presented frame only). */
 }
 
 static void draw_message(const char *msg, uint8_t color)

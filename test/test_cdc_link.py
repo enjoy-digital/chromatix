@@ -8,6 +8,7 @@
 
 from migen import *
 
+from litex.gen import *
 from litex.gen.sim import run_simulation, passive
 
 from litex.soc.interconnect import wishbone
@@ -16,10 +17,10 @@ from chromatix.gateware.cdc_link import CDCLink
 
 MEM = [0x03020100 + 0x04040404*i for i in range(16)] # Bytes 0, 1, 2... in little endian words.
 
-class DUT(Module):
+class DUT(LiteXModule):
     def __init__(self):
-        self.submodules.link = CDCLink(release_cycles=16)
-        self.submodules.mem  = wishbone.SRAM(4*len(MEM), init=MEM)
+        self.link = CDCLink(clk_freq=16, release_time=1)
+        self.mem  = wishbone.SRAM(4*len(MEM), init=MEM)
         self.comb += self.link.bus.connect(self.mem.bus)
 
 @passive

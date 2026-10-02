@@ -73,7 +73,10 @@ def usb_touch(port):
     """
     for baudrate in [9600, 1200]:
         s = serial.Serial()
-        s.port, s.baudrate, s.dtr, s.rts = port, baudrate, False, False
+        s.port     = port
+        s.baudrate = baudrate
+        s.dtr      = False
+        s.rts      = False
         s.open()
         s.close()
     time.sleep(0.05)
