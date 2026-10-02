@@ -21,6 +21,10 @@ enum {
 
 void     esp32sdr_init(void);
 uint32_t esp32sdr_ms(void);
+/* Drop pending RX bytes (resync). */
+void     esp32sdr_flush(void);
+/* Command without reply (GAIN). */
+void     esp32sdr_send(const char *cmd);
 /* Command: reply line (without newline) in reply, returns its length or -1 (timeout). */
 int      esp32sdr_cmd(const char *cmd, char *reply, int len, uint32_t timeout_ms);
 /* 8-bit I/Q capture (I, Q interleaved): returns 0 if complete and CRC valid. */

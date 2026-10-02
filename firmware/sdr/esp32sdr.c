@@ -23,9 +23,21 @@ void esp32sdr_init(void)
 	timer0_load_write(0);
 	timer0_reload_write(0xffffffff);
 	timer0_en_write(1);
-	/* Drop pending bytes. */
-	for (int i = 0; i < 4096 && !esp32_uart_rxempty_read(); i++)
-		(void)esp32_uart_rxtx_read();
+	esp32sdr_flush();
+}
+
+void esp32sdr_flush(void)
+{
+	/* Drop pending bytes until the line is quiet (20ms: end of an ongoing transfer). */
+	uint32_t deadline = esp32sdr_ms() + 20;
+	while ((int32_t)(esp32sdr_ms() - deadline) <= 0)
+		if (!esp32_uart_rxempty_read()) {
+			(void)esp32_uart_rxtx_read();
+#ifndef CONFIG_ESP32_UART_RX_FIFO_RX_WE
+			esp32_uart_ev_pending_write(2);
+#endif
+			deadline = esp32sdr_ms() + 20;
+		}
 }
 
 uint32_t esp32sdr_ms(void)
@@ -77,11 +89,16 @@ static int read_line(char *line, int len, uint32_t deadline)
 
 /* Protocol ------------------------------------------------------------------------------------- */
 
-int esp32sdr_cmd(const char *cmd, char *reply, int len, uint32_t timeout_ms)
+void esp32sdr_send(const char *cmd)
 {
 	for (const char *p = cmd; *p; p++)
 		uart_putc(*p);
 	uart_putc('\n');
+}
+
+int esp32sdr_cmd(const char *cmd, char *reply, int len, uint32_t timeout_ms)
+{
+	esp32sdr_send(cmd);
 	return read_line(reply, len, esp32sdr_ms() + timeout_ms);
 }
 

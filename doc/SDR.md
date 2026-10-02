@@ -52,13 +52,47 @@ a wideband SDR (no broadcast FM/AM). Captures are bursts (low duty cycle), not c
   these are not available (no menu/OSD); the SDR ESP32 firmware (phase 2b) keeps what the console
   needs.
 
+## Phase 1: CPU application SoC (done)
+
+`--with-app` (ported from the `doom` branch): VexRiscv (8KB I/D caches) at 67MHz, 7.5MB PSRAM main
+RAM (16KB L2), tear-free PSRAM framebuffer, PCM audio, buttons, and a CPU UART to the ESP32 UART0
+(`esp32_uart`, 2 Mbaud, 512-byte RX FIFO). Gowin build: logic 69%, BSRAM 48/56, timing met at 67MHz.
+`firmware/fbtest` checks the framebuffer/buttons/audio on the hardware.
+
+## Phase 2a: I/Q over the ESP32 UART (done)
+
+The CPU drives ESP-SDR directly (`firmware/sdr/esp32sdr.c`: `FREQ`/`GAIN`/`CAP16`, CRC32 check,
+resync on errors): 50/50 CRC-valid 4096-sample captures in a row, 122KB/s (the USB bridge losses
+are gone). A 4096-sample capture takes ~67ms (41ms for the 8KB transfer at 2 Mbaud): the stock
+ESP-SDR UART is limited to 2 Mbaud (`BAUD 1000000|2000000`), faster needs the ESP-SDR fork (phase 2b).
+
+## Phase 3: SDR application (done, UART version)
+
+`firmware/sdr` (`make BUILD_DIR=../../build`, then
+`scripts/chromatic.py --serial /dev/ttyACM0 run firmware/sdr/sdr.bin --no-verify`):
+
+- **DSP** (`dsp.c`): 512-point int32 FFT (Q15 twiddles, tables from `gen_tables.py`), per-segment DC
+  removal, Hann window, 8 segments averaged per capture (4096 samples), 1/4 dB log. Checked against
+  numpy (same peak bin, dB shape correlation 0.9999).
+- **Display** (`lcd.c`, 160x144, 8-bit palette): header (frequency, span, gain, reference level,
+  peak frequency/level, update rate), spectrum (60dB, 10dB/10MHz grid, peak hold), Wi-Fi channel
+  numbers (20MHz bands of channels 1/6/11/14), BLE advertising channels 37/38/39, waterfall (heat map
+  scaled from the noise floor: median of the center half, ESP32 RX filter passband).
+- **Controls**: Left/Right: tune (5MHz), Up/Down: reference level (5dB), A: span (16/40MHz), B: gain
+  (AGC, manual 20-70), Start: peak hold, Select: auto reference level.
+- **Measured**: 9.5 updates/s (capture 67ms, DSP 30ms, draw 6ms, present 2ms), no capture errors
+  after the startup resync. 80MS/s gives no wider view (the ESP32 RX filter is ~40MHz wide, its CAPS
+  only list RX40/RX16), so the spans are 16 and 40MHz.
+
+<img src="images/sdr_console.png" width="320" alt="Chromatic SDR: spectrum and waterfall around Wi-Fi channel 6">
+
+Wi-Fi channel 6 band (2437MHz, AGC) on the console: the ~36MHz RX filter passband and the regular
+narrow lines (internal spurs, also seen in phase 0) are visible in the spectrum and waterfall.
+
 ## Next phases
 
-1. **CPU application SoC** (`--with-app`, ported from the `doom` branch): VexRiscv at 67MHz, PSRAM
-   main RAM, tear-free PSRAM framebuffer, PCM audio, buttons, plus a CPU UART to the ESP32.
-2. **I/Q into the FPGA**: (a) ESP-SDR commands and captures/snapshot spectra over the ESP32 UART,
-   (b) ESP-SDR fork writing captures over QSPI into a PSRAM ring (MB/s).
-3. **SDR application** on the console: FFT, spectrum + waterfall, Wi-Fi/BLE channel markers, tuning/
-   span/gain on the buttons, RSSI sonification; also on the PC (SDL) with recorded I/Q.
-4. **I/Q streaming to the PC** over USB 2.0 (dedicated bulk endpoint from the PSRAM ring) and a
+1. **ESP-SDR fork** (phase 2b): faster I/Q into the FPGA (QSPI to a PSRAM ring, or a faster UART),
+   on-ESP32 spectrum mode, keeping the console ESP32 duties.
+2. **SDR application extras**: RSSI sonification, channel occupancy view, DSP speedups (30ms/update).
+3. **I/Q streaming to the PC** over USB 2.0 (dedicated bulk endpoint from the PSRAM ring) and a
    SoapySDR module (GNU Radio, gqrx), or ESP-SDR protocol emulation for SoapyESPSDR/ESP-WebSDR.
