@@ -142,13 +142,13 @@ seen at every tuning) and the Wi-Fi access point on channel 1.
   2424MHz at 2420/2430/2440MHz for LO = 2422/2427/2432MHz). The ESP32 spectrum is inverted: the
   samples are conjugated by the console DSP, SoapyChromatic and `chromatic_sdr.py` (the ESP-SDR
   protocol/payload is unchanged).
-- **Tuning range**: ESP-SDR accepts 100-6000MHz, but on the original ESP32 only the Wi-Fi channel
-  frequencies (2412-2472MHz in 5MHz steps, 2484MHz) move the LO: out of channel requests
-  (calibration on 2412MHz then direct PLL offset) leave it in place, except a few MHz around
-  2412MHz (comb positions unchanged from 2405MHz down to 2300MHz, from 2490MHz up to 2600MHz, and
-  for most frequencies between channels). ESP-SDR documents its extended range as not RF-validated.
-  The console steps through the channels; SoapyChromatic tunes the ESP32 to the nearest channel and
-  applies the remaining offset with a digital mixer (range reported: 2410-2486MHz).
+- **Tuning range** (stock ESP-SDR, see the extended tuning section for the fix): ESP-SDR accepts
+  100-6000MHz, but on the original ESP32 only the Wi-Fi channel frequencies (2412-2472MHz in 5MHz
+  steps, 2484MHz) move the LO: out of channel requests (calibration on 2412MHz then direct PLL
+  offset) leave it in place, except a few MHz around 2412MHz (comb positions unchanged from 2405MHz
+  down to 2300MHz, from 2490MHz up to 2600MHz, and for most frequencies between channels). ESP-SDR
+  documents its extended range as not RF-validated. With stock ESP-SDR, the console steps through
+  the channels and SoapyChromatic tunes the nearest channel + digital mixer (2410-2486MHz).
 - **Checks after the fixes**:
   - Host (SoapyChromatic) at 2410/2412/2414.7/2425.3/2437/2439.9/2451/2463.6/2478/2484/2486MHz:
     every crystal harmonic in the span at its true frequency (2400.02, 2424.00, 2448.00, 2472.00,
@@ -162,6 +162,36 @@ seen at every tuning) and the Wi-Fi access point on channel 1.
     absolute frequency, on the AP side (an inverted spectrum would show them at ~2429MHz).
   - gqrx 2.15.8 (Xvfb, remote control) at 2436MHz (hardware frequency 2433.12MHz): lines at
     2424.0/2424.3, 2441.1 and 2448.0MHz on its axis.
+
+## Extended tuning: 2386-2504MHz in 1kHz steps (ESP32 fork)
+
+ESP-SDR's out of channel tuning (2412MHz calibration + direct PLL divider) leaves the VCO capacitor
+bank calibrated for 2412MHz: the LO doesn't follow. The ESP32 PHY library has a software channel
+calibration (`set_chan_freq_sw_start(index = MHz - 2400, offset, ctrl)`, used for the Wi-Fi
+channels by `set_channel_rfpll_freq` and by the Bluetooth PHY for its 1MHz channels), found by
+disassembling `libphy.a`. `firmware/esp32-sdr` (`chromatic_tune.c`) uses it:
+
+- **Calibration on the requested MHz** (index 0-84: 2400-2484MHz; no lock above 85) + an offset
+  for the fraction. The offset is in 1/1024 MHz units but the LO moves by **1.0546x** the offset
+  (measured, interpolated comb peaks).
+- **Beyond, offsets from the 2400/2484MHz calibrations**, same 1.0546 scale, with a -0.243MHz step
+  past a 15MHz move above 2484MHz (overlapping regions: switched at 14.9MHz). PLL lock from 2400 -
+  14.7MHz to 2484 + 22MHz: 2386-2504MHz used.
+- **Result**: `FREQK <kHz>` (and `FREQ`): LO within **+-2.6kHz** (~1ppm, the console/ESP32 crystals
+  difference is -1.2kHz) at 18 arbitrary frequencies over 2386.3-2503.8MHz, both sides of the
+  14.9MHz switch. The comb line at 2400MHz is not a reference: another source sits ~16kHz above it
+  (at LO 2412MHz: -17kHz from it, -1.3kHz from 2424MHz).
+- **Clients**: the console tunes 2386-2504MHz (5MHz steps, kHz from the host), SoapyChromatic and
+  `chromatic_sdr.py` use `FREQK` (range from `RANGEK?`, NCO only for the sub-kHz rest); stock
+  ESP-SDR: channel frequencies + NCO. Checked: SoapySDR (comb lines at their true frequencies at
+  2386.7-2503.5MHz), console standalone at 2387.0/2388.5/2453.5/2502.0/2503.5MHz (UVC trace),
+  gqrx at 2390.5MHz (hardware 2387.62MHz: lines at 2376.0/2400.0MHz on its axis). The console
+  reference level now follows the level changes across the band (auto until Up/Down).
+- **1090MHz/ADS-B**: not reachable with the ESP32 radio (LO range above, 2.4GHz antenna path).
+  The ESP32 ADS-B projects use an RTL-SDR dongle on an ESP32-P4 USB host or a dedicated 1090MHz
+  module; a video of an ESP32 SDR app "at 1575MHz" shows a 2.4GHz spectrum with the hardware at
+  2446.5MHz (the app warns: outside its verified ranges). An external front-end (cartridge slot)
+  would be needed.
 
 ## Next steps
 
