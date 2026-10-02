@@ -719,7 +719,7 @@ class BaseSoC(SoCMini):
                     esp32_uart_pads.rx.eq(esp32_ctrl.usb_txd),
                 ]
                 self.add_uart(name="esp32_uart", uart_pads=esp32_uart_pads, baudrate=int(2e6),
-                    fifo_depth=512)
+                    fifo_depth=512, rx_fifo_rx_we=True) # RX data popped on read.
             # UARTBone on the CDC byte stream (USB rate, no UART: the host baudrate is ignored).
             class CDCStreamPHY:
                 pass
