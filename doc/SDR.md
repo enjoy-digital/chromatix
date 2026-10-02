@@ -89,10 +89,50 @@ ESP-SDR UART is limited to 2 Mbaud (`BAUD 1000000|2000000`), faster needs the ES
 Wi-Fi channel 6 band (2437MHz, AGC) on the console: the ~36MHz RX filter passband and the regular
 narrow lines (internal spurs, also seen in phase 0) are visible in the spectrum and waterfall.
 
-## Next phases
+## Phase 2b: I/Q over QSPI (done)
 
-1. **ESP-SDR fork** (phase 2b): faster I/Q into the FPGA (QSPI to a PSRAM ring, or a faster UART),
-   on-ESP32 spectrum mode, keeping the console ESP32 duties.
-2. **SDR application extras**: RSSI sonification, channel occupancy view, DSP speedups (30ms/update).
-3. **I/Q streaming to the PC** over USB 2.0 (dedicated bulk endpoint from the PSRAM ring) and a
-   SoapySDR module (GNU Radio, gqrx), or ESP-SDR protocol emulation for SoapyESPSDR/ESP-WebSDR.
+`firmware/esp32-sdr`: ESP-SDR (GPL-3.0, fetched and patched at build time) with a Chromatic
+transport. `QSPI <address>` makes the captures go to the FPGA PSRAM over the ESP32 -> FPGA QSPI
+link (the ModRetro menu/OSD link: VSPI 40MHz quad, 1KB transfers written as PSRAM bursts by the
+existing gateware), only the `DATA` header on the UART. No gateware change: the CPU invalidates its
+caches and reads the payload from its main RAM (CRC checked).
+
+- `CAP16 16380` round trip: 7.3ms (vs ~170ms over the UART).
+- Console app: 4096-sample captures in 10ms, **25.6 -> 27 updates/s** (DSP: int16 block scaled FFT,
+  21ms per update), no CRC errors.
+
+## Phase 4: I/Q streaming to the PC, SoapySDR (done)
+
+The console relays the ESP-SDR protocol to the PC at the USB rate:
+
+- **Gateware** (`chromatix/gateware/cdc_link.py`, `--with-app`): the USB CDC byte stream is
+  switched by the application from the UARTBone debug bridge to an application UART (commands,
+  replies) + a DMA reader (bulk data from the main RAM). A host "1200 baud touch" switches it back
+  to the debug bridge (`scripts/chromatic.py` does it). Build: logic 75%, BSRAM 50/56, timing met.
+- **Firmware** (`firmware/sdr`): host command lines forwarded to the ESP32 (`BAUD`/`QSPI` answered
+  locally), replies relayed; after a capture `DATA` header, the payload (already in the main RAM
+  through QSPI) is sent by DMA. The relayed captures are displayed (header: `USB`), local captures
+  resume 2s after the last host command.
+- **Host**: `scripts/chromatic_sdr.py` (info, bench, spectrum, record) and a SoapySDR module
+  (`software/SoapyChromatic`: GNU Radio, gqrx, SoapySDR Python..., CS8/CS16/CF32, 16/40MS/s, AGC
+  or manual gain). The official SoapyESPSDR is ESP32-S31/Ethernet only.
+- **Measured**: 73 captures/s of 16380 samples, **2.4MB/s** (1.2MS/s delivered, ~3% duty cycle at
+  40MS/s), 0 errors over 833 relayed captures (27MB); stock ESP-SDR through the USB bridge: 31KB/s.
+  SoapySDR: 1.0MS/s (Python), GNU Radio soapy source: 1.12MS/s.
+
+<img src="images/sdr_host_spectrum.png" width="800" alt="Host spectrum over USB: Wi-Fi channel 1">
+
+<img src="images/sdr_console_usb.png" width="320" alt="Console display of the relayed captures">
+
+Host spectrum (400 relayed captures, `chromatic_sdr.py spectrum --freq 2412`): Wi-Fi channel 1
+(20MHz, max hold) and the console showing the same captures (`USB`).
+
+## Next steps
+
+1. **Throughput**: per capture, the ESP32 fills/checks its 64KB capture memory and packs it before
+   the QSPI writes; continuous ring captures (ESP-SDR ring mode on other chips) would raise the
+   duty cycle.
+2. **ESP32 duties**: the SDR ESP32 firmware has no menu/OSD/power management: merging the
+   transport into the ModRetro MCU firmware (GPL) would keep them (SDR as a mode).
+3. **App extras**: RSSI sonification, channel occupancy view, recording to the PC from the
+   console buttons.
