@@ -20,7 +20,8 @@
 #define CRC_INIT   0x555555
 #define CRC_POLY   0x00065B                /* x^24 + x^10 + x^9 + x^6 + x^4 + x^3 + x + 1. */
 
-static const struct dsp_filter filter = {filter_ble, FILTER_BLE_TAPS, FILTER_BLE_UP, FILTER_BLE_DOWN};
+static const struct dsp_filter filter = {filter_ble, FILTER_BLE_TAPS, FILTER_BLE_UP,
+	FILTER_BLE_DOWN};
 
 /* Buffers (offset in the direct mapped 8KB data cache). */
 static struct {

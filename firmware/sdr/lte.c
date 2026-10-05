@@ -19,11 +19,12 @@
 #define SSS_TDD   (3*SYM_CP + 1)    /* TDD (a slot's first symbol CP: 10). */
 #define CFO_BINS  8                 /* Wide search hypotheses: +-7.5kHz (8 bins of 937.5Hz). */
 #define CFO_STEP  500               /* Refined frequency offset step (Hz). */
-#define CFO_SPAN  4000              /* Refined frequency offset range (Hz, around the hypothesis). */
+#define CFO_SPAN  4000              /* Refined frequency offset range (+-Hz). */
 #define PSS_MIN   12                /* PSS detection threshold (%). */
 #define SSS_MIN   45                /* SSS detection threshold (%). */
 
-static const struct dsp_filter filter = {filter_lte, FILTER_LTE_TAPS, FILTER_LTE_UP, FILTER_LTE_DOWN};
+static const struct dsp_filter filter = {filter_lte, FILTER_LTE_TAPS, FILTER_LTE_UP,
+	FILTER_LTE_DOWN};
 
 /* Buffers: complex interleaved, the ones accessed together offset in the (direct mapped 8KB) data
    cache. */
@@ -331,7 +332,7 @@ static int pbch_subcarrier(int k)
 	return (k < 36) ? SYM - 36 + k : k - 35;
 }
 
-static uint8_t rm[120];               /* Rate matching: coded bit (stream*40 + k) of w (no nulls). */
+static uint8_t rm[120];               /* Rate matching: coded bit (stream*40 + k) of each w bit. */
 
 static void rm_init(void)
 {

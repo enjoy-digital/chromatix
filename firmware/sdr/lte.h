@@ -7,8 +7,8 @@
 // carrier channelized to 1.92MS/s, PSS (N_ID2) found by FFT correlation over 3 frequency offset
 // hypotheses (+-7.5kHz), refined in the time domain (frequency offset in 500Hz steps), then SSS
 // (N_ID1, FDD/TDD, subframe) decoded coherently (channel from the PSS): physical cell ID, frequency
-// offset (receiver LO error) and PSS correlation. Hardware independent (also built on the host for the
-// tests).
+// offset (receiver LO error) and PSS correlation. Hardware independent (also built on the host for
+// the tests).
 
 #ifndef LTE_H
 #define LTE_H

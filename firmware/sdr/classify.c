@@ -34,7 +34,7 @@ static struct {
 	uint8_t  mask[FRAMES][NF];                   /* Cells above the floor, then labels. */
 } b;
 
-static uint16_t spur[SLOTS][NF];                 /* Bins occupancy average (Q8: persistent lines). */
+static uint16_t spur[SLOTS][NF];                 /* Persistent bins average (Q8). */
 static uint16_t stack[FRAMES*NF];
 
 static const char *const names[SIG_CLASSES] = {
@@ -243,8 +243,8 @@ int sig_detect(const int8_t *iq, int samples, int center_khz, int slot, struct s
 				continue;
 			}
 			/* Bandwidth: bins active for >= 30% of the burst, mean level within 12dB of the
-			   strongest bin's (window leakage, GFSK sidelobes of strong bursts excluded). Drift: power centroid at the
-			   start and the end. */
+			   strongest bin's (window leakage, GFSK sidelobes of strong bursts excluded). Drift:
+			   power centroid at the start and the end. */
 			static int level[NF];
 			int g0 = -1, g1 = -1, peak = 0;
 			for (int f = fmin; f <= fmax; f++) {

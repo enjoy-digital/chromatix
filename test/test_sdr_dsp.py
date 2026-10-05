@@ -59,7 +59,8 @@ class DECTBurst(ctypes.Structure):
 
 class ZBFrame(ctypes.Structure):
     _fields_ = [("length", ctypes.c_int), ("psdu", ctypes.c_uint8*32), ("type", ctypes.c_int),
-        ("seq", ctypes.c_int), ("pan", ctypes.c_int), ("dst", ctypes.c_uint64), ("src", ctypes.c_uint64),
+        ("seq", ctypes.c_int), ("pan", ctypes.c_int), ("dst", ctypes.c_uint64),
+        ("src", ctypes.c_uint64),
         ("dst_mode", ctypes.c_int), ("src_mode", ctypes.c_int), ("pos", ctypes.c_int),
         ("level_db4", ctypes.c_int), ("errors", ctypes.c_int)]
 
@@ -105,7 +106,8 @@ def bits_msb(data):
 def lte_pss(nid2):
     u = [25, 29, 34][nid2]
     n = np.arange(62)
-    return np.where(n < 31, np.exp(-1j*np.pi*u*n*(n + 1)/63), np.exp(-1j*np.pi*u*(n + 1)*(n + 2)/63))
+    return np.where(n < 31, np.exp(-1j*np.pi*u*n*(n + 1)/63),
+        np.exp(-1j*np.pi*u*(n + 1)*(n + 2)/63))
 
 def lte_sss(nid1, nid2):
     def mseq(taps):
@@ -152,7 +154,8 @@ def lte_pbch(pci, mib, frame):
         state = (state >> 1) | (c[k] << 5)
     perm = [1, 17, 9, 25, 5, 21, 13, 29, 3, 19, 11, 27, 7, 23, 15, 31, 0, 16, 8, 24, 4, 20, 12, 28,
         2, 18, 10, 26, 6, 22, 14, 30]
-    w = [d[s][r*32 + col - 24] for s in range(3) for col in perm for r in range(2) if r*32 + col >= 24]
+    w = [d[s][r*32 + col - 24] for s in range(3) for col in perm for r in range(2)
+        if r*32 + col >= 24]
     e = np.array([w[j % 120] for j in range(1920)])[480*frame:480*(frame + 1)]
     e ^= gold(pci, 1920)[480*frame:480*(frame + 1)]
     x = ((1 - 2.0*e[0::2]) + 1j*(1 - 2.0*e[1::2]))/np.sqrt(2)
@@ -246,7 +249,8 @@ def zigbee_signal(psdu, fs=16e6):
             fcs ^= 0x8408
     psdu = psdu + bytes([fcs & 0xff, fcs >> 8])
     ppdu = bytes(4) + bytes([0xa7, len(psdu)]) + psdu
-    chips = [(ZB_CHIPS[s] >> (31 - k)) & 1 for b in ppdu for s in (b & 0xf, b >> 4) for k in range(32)]
+    chips = [(ZB_CHIPS[s] >> (31 - k)) & 1 for b in ppdu for s in (b & 0xf, b >> 4)
+        for k in range(32)]
     sps = fs/2e6
     t   = np.arange(int((len(chips) + 1)*sps))/sps
     x   = np.zeros(len(t), complex)

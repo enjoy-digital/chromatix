@@ -4,10 +4,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //
 // 2.4GHz signal identification on 80MS/s captures (205us, +-22MHz used): spectrogram (128-point
-// FFTs, Hann window: 625kHz x 1.6us cells, smoothed over 12.8us), cells above the per-bin noise floor + 6dB
-// (persistent lines: receiver spurs, masked), bursts = connected cells, classified from their
-// bandwidth, duration, frequency (Wi-Fi/BLE/802.15.4/DJI DroneID channels) and drift: Wi-Fi 20/40,
-// 10MHz OFDM (drone links), DJI DroneID, continuous wideband (analog video), microwave oven,
+// FFTs, Hann window: 625kHz x 1.6us cells, smoothed over 12.8us), cells above the per-bin noise
+// floor + 6dB (persistent lines: receiver spurs, masked), bursts = connected cells, classified from
+// their bandwidth, duration, frequency (Wi-Fi/BLE/802.15.4/DJI DroneID channels) and drift: Wi-Fi
+// 20/40, 10MHz OFDM (drone links), DJI DroneID, continuous wideband (analog video), microwave oven,
 // 802.15.4, BLE advertising, narrowband (BLE/Bluetooth/RC hopping), carriers. Hardware independent
 // (also built on the host for the tests).
 

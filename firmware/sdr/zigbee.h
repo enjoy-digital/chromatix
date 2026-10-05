@@ -7,8 +7,8 @@
 // frames up to ~25 bytes, ACKs, short data/command frames): channel channelized to 8MS/s (4
 // samples/chip), FM discriminator (O-QPSK half-sine = MSK: the frequency sign of each chip interval
 // is the chips transition, alternated), symbols matched against the 16 chip sequences, preamble and
-// SFD sync, PHR, PSDU and FCS check, MAC header parsed. Hardware independent (also built on the host
-// for the tests).
+// SFD sync, PHR, PSDU and FCS check, MAC header parsed. Hardware independent (also built on the
+// host for the tests).
 
 #ifndef ZIGBEE_H
 #define ZIGBEE_H

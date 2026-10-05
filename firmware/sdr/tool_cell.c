@@ -38,6 +38,7 @@ static const struct {
 #define OFFSET_KHZ  2000                 /* Carrier offset from the tuned frequency (DC away). */
 #define MAX_CARRIERS 16
 #define MAX_CAPTURES 40                  /* Per carrier (PSS: ~1 capture out of 5). */
+#define MIB_CAPTURES 60                  /* Per found cell (MIB: ~1 capture out of 20). */
 #define MIN_HITS     3
 #define SWEEP_GAIN   50                  /* Sweep: manual gain (comparable steps). */
 
@@ -53,7 +54,7 @@ struct carrier {
 	int bw_khz;        /* Occupied bandwidth. */
 	int level_db4;
 	int captures;
-	int raster;        /* Raster offset tried (0, -100kHz, +100kHz). */
+	int raster;        /* Raster offset tried (index: 0, -100, 100, ... +-300kHz). */
 	int hits;
 	int pci;           /* -1: not found. */
 	int tdd;
@@ -75,7 +76,6 @@ static int            ncarriers;
 static int            current;
 static int            scroll;
 static uint64_t       power[FFT_SIZE];
-static int            floor_db4;
 static int            search_ms;
 static int            lo_ppb;          /* Receiver LO error (cells' frequency offsets). */
 static int            lo_known;
@@ -184,8 +184,7 @@ static void find_carriers(void)
 			}
 		smooth[i] = s/n;
 	}
-	floor_db4 = percentile(smooth, bins, 20);
-	int threshold = floor_db4 + 4*4;
+	int threshold = percentile(smooth, bins, 20) + 4*4;
 	int gap_max   = 2000000/BIN_HZ;
 	for (int i = 0; i < bins; ) {
 		if (smooth[i] < threshold) {
@@ -304,9 +303,9 @@ static int decode(void)
 		}
 	} else if (c->pci < 0 && c->captures % 4 == 0)
 		c->raster = (c->raster + 1) % 7;
-	/* Done: cell and MIB found (MIB: ~1 capture out of 20), or MAX_CAPTURES (no cell: 40, cell
-	   without MIB: 60). */
-	if ((c->hits >= MIN_HITS && c->rbs) || c->captures >= ((c->pci >= 0) ? 60 : MAX_CAPTURES)) {
+	/* Done: cell and MIB found, or no cell (MAX_CAPTURES), or no MIB (MIB_CAPTURES). */
+	if ((c->hits >= MIN_HITS && c->rbs) ||
+		c->captures >= ((c->pci >= 0) ? MIB_CAPTURES : MAX_CAPTURES)) {
 		current++;
 		if (current >= ncarriers)
 			state = STATE_DONE;
