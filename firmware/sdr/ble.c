@@ -92,19 +92,8 @@ int ble_decode(const int8_t *iq, int samples, int offset_hz, int channel, struct
 {
 	int n = dsp_channelize(iq, samples, dsp_phase_step(-offset_hz, 16000000), &filter, b.y,
 		MAX_OUT);
-	/* FM discriminator: Im(y[i]*conj(y[i - 1])), summed over a bit. */
-	b.disc[0] = 0;
-	for (int i = 1; i < n; i++) {
-		const int32_t *y = &b.y[2*i];
-		b.disc[i] = ((int64_t)y[1]*y[-2] - (int64_t)y[0]*y[-1]) >> 12;
-	}
-	for (int i = 0; i + SPB <= n; i++) {
-		int32_t s = 0;
-		for (int k = 0; k < SPB; k++)
-			s += b.disc[i + k];
-		b.soft[i] = s;
-	}
-	n -= SPB;
+	/* FM discriminator summed over a bit. */
+	n = dsp_fm_soft(b.y, n, SPB, b.disc, b.soft) - 1;
 	/* Access address search on the 4 sample phases (bits LSB first). */
 	int count = 0, skip = 0;
 	for (int i = 32*SPB; i < n && count < max; i++) {

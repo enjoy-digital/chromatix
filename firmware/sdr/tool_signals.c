@@ -43,6 +43,7 @@ static int         floor_db4 = -1;
 static int         alarm;
 static int         paused;
 static uint32_t    alert_ms;
+static int         alert_cls;
 
 static const uint8_t colors[SIG_CLASSES] = {
 	COLOR_WIFI, COLOR_WIFI, COLOR_RED, COLOR_RED, COLOR_RED, COLOR_WHITE, COLOR_GREEN, COLOR_BLE,
@@ -91,6 +92,7 @@ static void process(int n)
 	for (int i = 0; i < n; i++) {
 		struct sig  *s = &sigs[i];
 		struct seen *e = &seen[s->cls];
+		uint32_t     last = e->last_ms;
 		e->count++;
 		e->khz       = s->khz;
 		e->bw_khz    = s->bw_khz;
@@ -101,10 +103,14 @@ static void process(int n)
 		for (int x = (x0 < 0) ? 0 : x0; x <= x1 && x < LCD_WIDTH; x++)
 			if (!marks[x] || sig_drone(s->cls))
 				marks[x] = s->cls + 1;
+		/* Drone alert: drone class seen again within 10s (single bursts ignored). */
 		if (sig_drone(s->cls)) {
-			alert_ms = app_ms();
-			if (alarm)
-				app_beep(1500, 120);
+			if (e->count > 1 && app_ms() - last < 10000) {
+				alert_ms  = app_ms();
+				alert_cls = s->cls;
+				if (alarm)
+					app_beep(1500, 120);
+			}
 		}
 	}
 }
@@ -169,11 +175,8 @@ static void draw(void)
 		lcd_text(1, LIST_Y + 8, COLOR_DIM, "LISTENING...");
 	/* Drone alert (10s). */
 	if (alert_ms && app_ms() - alert_ms < 10000) {
-		int c = SIG_OFDM10;
-		for (int k = 0; k < SIG_CLASSES; k++)
-			if (sig_drone(k) && seen[k].count && seen[k].last_ms == alert_ms)
-				c = k;
-		snprintf(line, sizeof(line), "DRONE LINK? %s %d MHZ", sig_name(c), seen[c].khz/1000);
+		snprintf(line, sizeof(line), "DRONE LINK? %s %d MHZ", sig_name(alert_cls),
+			seen[alert_cls].khz/1000);
 		lcd_rect(0, LCD_HEIGHT - 10, LCD_WIDTH, 10, COLOR_RED);
 		lcd_text(2, LCD_HEIGHT - 8, COLOR_WHITE, line);
 	}

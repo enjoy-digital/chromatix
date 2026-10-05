@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 //
 // 2.4GHz signal identification on 80MS/s captures (205us, +-22MHz used): spectrogram (128-point
-// FFTs: 625kHz x 1.6us cells, smoothed over 12.8us), cells above the per-bin noise floor + 6dB
+// FFTs, Hann window: 625kHz x 1.6us cells, smoothed over 12.8us), cells above the per-bin noise floor + 6dB
 // (persistent lines: receiver spurs, masked), bursts = connected cells, classified from their
 // bandwidth, duration, frequency (Wi-Fi/BLE/802.15.4/DJI DroneID channels) and drift: Wi-Fi 20/40,
 // 10MHz OFDM (drone links), DJI DroneID, continuous wideband (analog video), microwave oven,
@@ -24,12 +24,12 @@ enum {
 	SIG_WIFI40,
 	SIG_OFDM10,                        /* Non Wi-Fi 10MHz OFDM: drone video links (OcuSync...). */
 	SIG_DRONEID,                       /* 10MHz burst on a DJI DroneID frequency. */
-	SIG_VIDEO,                         /* Continuous wideband: analog video. */
+	SIG_VIDEO,                         /* Continuous wideband (>= 7MHz): analog video. */
 	SIG_MICROWAVE,                     /* Continuous wideband, drifting. */
 	SIG_ZIGBEE,                        /* 802.15.4 (Zigbee, Thread). */
 	SIG_BLE_ADV,                       /* Narrowband on a BLE advertising channel. */
 	SIG_NARROW,                        /* Narrowband burst: BLE, Bluetooth, RC links (hopping). */
-	SIG_CARRIER,                       /* Continuous narrowband. */
+	SIG_CARRIER,                       /* Continuous/persistent narrowband (carriers, interferers). */
 	SIG_BROADBAND,                     /* Whole band (impulse, AGC step). */
 	SIG_UNKNOWN,
 	SIG_CLASSES,

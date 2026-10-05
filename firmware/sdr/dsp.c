@@ -232,6 +232,27 @@ int dsp_channelize(const int8_t *iq, int samples, uint32_t phase_step, const str
 	return n;
 }
 
+/* FM demodulation ------------------------------------------------------------------------------ */
+
+int dsp_fm_soft(const int32_t *y, int n, int spb, int32_t *disc, int32_t *soft)
+{
+	/* FM discriminator: Im(y[i]*conj(y[i - 1])) (|y|^2*sin(dphi) >> 12), summed over a symbol. */
+	disc[0] = 0;
+	for (int i = 1; i < n; i++) {
+		const int32_t *x = &y[2*i];
+		disc[i] = ((int64_t)x[1]*x[-2] - (int64_t)x[0]*x[-1]) >> 12;
+	}
+	int32_t s = 0;
+	for (int i = 0; i < n; i++) {
+		s += disc[i];
+		if (i >= spb)
+			s -= disc[i - spb];
+		if (i >= spb - 1)
+			soft[i - spb + 1] = s;
+	}
+	return (n >= spb) ? n - spb + 1 : 0;
+}
+
 /* Helpers -------------------------------------------------------------------------------------- */
 
 uint32_t dsp_phase_step(int32_t freq_hz, int32_t rate_hz)

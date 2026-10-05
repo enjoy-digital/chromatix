@@ -309,8 +309,5 @@ int lte_search(const int8_t *iq, int samples, int offset_hz, int wide, struct lt
 	cell->pss      = best;
 	cell->sss      = sss;
 	cell->pos      = pos;
-	/* SNR from the PSS correlation (m/(1 - m), the channel filter keeps ~ the PSS band). */
-	int r = (best > 99) ? 99 : best;
-	cell->snr_db = (dsp_db4((uint64_t)r*1000/(100 - r)) - dsp_db4(1000))/4;
 	return 1;
 }

@@ -15,7 +15,7 @@
 // gain, reference level, waterfall, RSSI tone, scan range, help, info).
 //
 // Tools (menu, app.h): cell scanner (tool_cell.c), BLE scanner (tool_ble.c), signal identification
-// (tool_signals.c).
+// (tool_signals.c), DECT scanner (tool_dect.c), 802.15.4 sniffer (tool_zigbee.c).
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -221,6 +221,8 @@ static const struct tool *const tools[] = {
 	&tool_cell,
 	&tool_ble,
 	&tool_signals,
+	&tool_dect,
+	&tool_zigbee,
 };
 #define TOOLS (int)(sizeof(tools)/sizeof(tools[0]))
 
@@ -720,9 +722,22 @@ static void tone_fill(void)
 	}
 }
 
+/* Buttons pressed edges latched from the PCM interrupt (~every 45ms): short presses not missed
+   during slow updates. */
+static volatile uint32_t buttons_latched;
+static uint32_t          buttons_isr_last;
+
+static void buttons_poll(void)
+{
+	uint32_t buttons = demo_buttons_status_read();
+	buttons_latched |= buttons & ~buttons_isr_last;
+	buttons_isr_last = buttons;
+}
+
 static void tone_isr(void)
 {
 	tone_fill();
+	buttons_poll();
 }
 
 static void tone_init(void)
@@ -915,7 +930,10 @@ static uint32_t buttons_pressed(void)
 {
 	/* Pressed edges, Left/Right auto repeat (buttons_repeat: all the directions). */
 	uint32_t buttons = demo_buttons_status_read();
-	uint32_t pressed = buttons & ~buttons_last;
+	irq_setie(0);
+	uint32_t pressed = (buttons & ~buttons_last) | buttons_latched;
+	buttons_latched  = 0;
+	irq_setie(1);
 	uint32_t dirs    = (1 << BTN_LEFT) | (1 << BTN_RIGHT) | (1 << BTN_UP) | (1 << BTN_DOWN);
 	uint32_t t       = esp32sdr_ms();
 	buttons_repeat = 0;

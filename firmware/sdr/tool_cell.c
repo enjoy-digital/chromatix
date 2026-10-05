@@ -5,7 +5,8 @@
 //
 // Cell scanner tool: LTE carriers of a band found on its spectrum (sweep of 16MS/s captures, blocks
 // above the noise floor split on the carriers' guard dips), then decoded (lte.c, captures until
-// the PSS/SSS are found): physical cell ID, duplex, PSS SNR, frequency offset (receiver LO error).
+// the PSS/SSS are found): physical cell ID, duplex, PSS correlation, frequency offset (receiver LO
+// error).
 
 #include <stdio.h>
 #include <string.h>
@@ -57,7 +58,7 @@ struct carrier {
 	int hits;
 	int pci;           /* -1: not found. */
 	int tdd;
-	int snr_db;
+	int pss;           /* PSS correlation (%). */
 	int cfo_hz;
 };
 
@@ -86,8 +87,9 @@ static int lo_error_hz(int khz)
 static const char *const help[] = {
 	"LTE CELL SCANNER: CARRIERS OF",
 	"A BAND FOUND ON ITS SPECTRUM,",
-	"THEN DECODED (PSS/SSS):",
-	"PCI, FDD/TDD, SNR, LO ERROR.",
+	"THEN DECODED (PSS/SSS): PCI,",
+	"FDD/TDD, PSS CORRELATION (%),",
+	"EARFCN, RECEIVER LO ERROR.",
 	"",
 	"LEFT/RIGHT  BAND",
 	"A           SCAN (B: STOP)",
@@ -280,7 +282,7 @@ static int decode(void)
 			c->raster = 0;
 			c->pci    = cell.pci;
 			c->tdd    = cell.tdd;
-			c->snr_db = (c->hits*c->snr_db + cell.snr_db)/(c->hits + 1);
+			c->pss    = (cell.pss > c->pss) ? cell.pss : c->pss;
 			c->cfo_hz = (c->hits*c->cfo_hz + cfo)/(c->hits + 1);
 			c->hits++;
 			/* Receiver LO error: following searches around it (+-4kHz). */
@@ -349,18 +351,18 @@ static void draw(void)
 	}
 
 	/* Carriers. */
-	lcd_text(1, LIST_Y, COLOR_DIM, "MHZ      BW  PCI  MODE SNR EARFCN");
+	lcd_text(1, LIST_Y, COLOR_DIM, "MHZ      BW  PCI  MODE PSS EARFCN");
 	int rows = (LCD_HEIGHT - LIST_Y - 16)/8;
 	for (int r = 0; r < rows && scroll + r < ncarriers; r++) {
 		struct carrier *c = &carriers[scroll + r];
-		char f[16], pci[8], snr[8];
+		char f[16], pci[8], pss[8];
 		app_format_khz(f, sizeof(f), c->khz, 1);
 		int earfcn = bands[band].earfcn + (c->khz - bands[band].lo)/100;
 		snprintf(pci, sizeof(pci), (c->pci >= 0) ? "%d" : "-", c->pci);
-		snprintf(snr, sizeof(snr), (c->pci >= 0) ? "%d" : "", c->snr_db);
+		snprintf(pss, sizeof(pss), (c->pci >= 0) ? "%d%%" : "", c->pss);
 		snprintf(line, sizeof(line), "%-8s %2d %4s %4s %3s %d", f, (c->bw_khz + 500)/1000, pci,
 			(c->pci < 0) ? ((scroll + r == current && state == STATE_DECODE) ? "...." :
-			(c->captures ? "NONE" : "")) : c->tdd ? "TDD" : "FDD", snr, earfcn);
+			(c->captures ? "NONE" : "")) : c->tdd ? "TDD" : "FDD", pss, earfcn);
 		lcd_text(1, LIST_Y + 8 + 8*r, (c->pci >= 0) ? COLOR_WHITE : COLOR_DIM, line);
 	}
 	if (state == STATE_DONE && ncarriers == 0)

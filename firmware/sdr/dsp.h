@@ -52,6 +52,10 @@ struct dsp_filter {
 int  dsp_channelize(const int8_t *iq, int samples, uint32_t phase_step, const struct dsp_filter *f,
 	int32_t *out, int max);
 
+/* FM soft symbols: discriminator (disc[i]: Im(y[i]*conj(y[i - 1])), > 0: positive frequency)
+   summed over spb samples (soft[i]: samples i..i + spb - 1), returns the soft symbols count. */
+int  dsp_fm_soft(const int32_t *y, int n, int spb, int32_t *disc, int32_t *soft);
+
 /* Integer square root. */
 int  dsp_isqrt64(uint64_t x);
 

@@ -38,7 +38,7 @@ static uint16_t spur[SLOTS][NF];                 /* Bins occupancy average (Q8: 
 static uint16_t stack[FRAMES*NF];
 
 static const char *const names[SIG_CLASSES] = {
-	"WIFI", "WIFI 40MHZ", "10MHZ OFDM", "DJI DRONEID", "WIDE CONTINUOUS", "MICROWAVE OVEN", "802.15.4",
+	"WIFI", "WIFI 40MHZ", "10MHZ OFDM", "DJI DRONEID", "ANALOG VIDEO", "MICROWAVE OVEN", "802.15.4",
 	"BLE ADV", "NARROWBAND", "CARRIER", "BROADBAND", "UNKNOWN",
 };
 
@@ -85,29 +85,35 @@ static int near(int khz, int base, int step, int count, int tolerance)
 	return (d >= -tolerance && d <= tolerance) ? k : -1;
 }
 
-static int classify(int khz, int bw, int us, int truncated, int continuous, int drift_khz)
+static int classify(int khz, int bw, int us, int continuous, int edge, int drift_khz)
 {
+	/* Wideband first (Wi-Fi channel centers before drone/video/oven classes), bursts clipped at the
+	   band edge: unknown (signals outside of the band, LTE B40 TDD below 2400MHz). */
 	static const int droneid[] = {2399500, 2414500, 2429500, 2444500, 2459500, 2474500};
 	int wifi = near(khz, 2412000, 5000, 13, 2500) >= 0;
-	int long_burst = truncated || us >= 150; /* DroneID/drone links: >= ~0.5ms bursts. */
 	if (bw >= 41000)
 		return SIG_BROADBAND;
 	if (bw >= 30000)
 		return SIG_WIFI40;
-	if (bw >= 14000)
-		return continuous ? (drift_khz > 3000 ? SIG_MICROWAVE : SIG_VIDEO) : SIG_WIFI;
+	if (bw >= 14000) {
+		if (continuous && !wifi)
+			return (drift_khz > 3000) ? SIG_MICROWAVE : SIG_VIDEO;
+		return SIG_WIFI;
+	}
+	if (edge)
+		return SIG_UNKNOWN;
 	if (bw >= 7000) {
 		if (continuous)
-			return (drift_khz > 3000) ? SIG_MICROWAVE : SIG_VIDEO;
+			return wifi ? SIG_WIFI : (drift_khz > 3000) ? SIG_MICROWAVE : SIG_VIDEO;
 		for (int i = 0; i < 6; i++)
-			if (khz - droneid[i] >= -1000 && khz - droneid[i] <= 1000 && long_burst && bw <= 11500)
+			if (khz - droneid[i] >= -1000 && khz - droneid[i] <= 1000 && us >= 150 && bw <= 11500)
 				return SIG_DRONEID;
-		if (wifi || !long_burst)
+		if (wifi || us < 150)
 			return SIG_WIFI; /* Wi-Fi frame partially above the floor. */
 		return SIG_OFDM10;
 	}
 	if (bw >= 4000)
-		return continuous ? ((drift_khz > 3000) ? SIG_MICROWAVE : SIG_VIDEO) : SIG_UNKNOWN;
+		return SIG_UNKNOWN;
 	if (continuous && bw <= 1300)
 		return SIG_CARRIER;
 	if (bw >= 1800 && us >= 120 && near(khz, 2405000, 5000, 16, 700) >= 0)
@@ -135,8 +141,10 @@ int sig_detect(const int8_t *iq, int samples, int center_khz, int slot, struct s
 			dc_q += s[2*n + 1];
 		}
 		for (int n = 0; n < NF; n++) {
-			b.x[2*n + 0] =  ((s[2*n + 0] << 7) - (dc_i << 7)/NF) << 4;
-			b.x[2*n + 1] = -(((s[2*n + 1] << 7) - (dc_q << 7)/NF) << 4);
+			/* Hann window (spectrum table subsampled: leakage of strong narrowband bursts). */
+			int32_t w = hann[n*(FFT_SIZE/NF)];
+			b.x[2*n + 0] =  (((s[2*n + 0] << 7) - (dc_i << 7)/NF)*w) >> 11;
+			b.x[2*n + 1] = -((((s[2*n + 1] << 7) - (dc_q << 7)/NF)*w) >> 11);
 		}
 		dsp_fft(b.x, LOG2_NF, 0);
 		for (int k = 0; k < NF; k++) {
@@ -145,18 +153,14 @@ int sig_detect(const int8_t *iq, int samples, int center_khz, int slot, struct s
 			b.p[t][k] = (uint32_t)((r*r + q*q) >> 12);
 		}
 	}
-	/* Smoothed (SMOOTH frames, 3 bins), dB4; columns (max). */
+	/* Smoothed (SMOOTH frames), dB4; columns (max). */
 	for (int f = 0; f < NF; f++) {
 		uint32_t sum = 0;
 		int16_t  top = 0;
 		for (int t = 0; t < frames; t++) {
-			uint32_t v = 0;
-			for (int k = f - 1; k <= f + 1; k++)
-				v += (k >= 0 && k < NF) ? b.p[t][k] >> 2 : 0;
-			sum += v;
+			sum += b.p[t][f] >> 2;
 			if (t >= SMOOTH)
-				for (int k = f - 1; k <= f + 1; k++)
-					sum -= (k >= 0 && k < NF) ? b.p[t - SMOOTH][k] >> 2 : 0;
+				sum -= b.p[t - SMOOTH][f] >> 2;
 			int n = (t < SMOOTH) ? t + 1 : SMOOTH;
 			b.db[t][f] = dsp_db4(sum/n + 1);
 			top = (b.db[t][f] > top) ? b.db[t][f] : top;
@@ -166,15 +170,28 @@ int sig_detect(const int8_t *iq, int samples, int center_khz, int slot, struct s
 	}
 	/* Mask: above the bin floor, persistent lines (receiver spurs: runs of <= 2 persistent bins)
 	   excluded, gaps < 3 frames filled. */
+	/* Floor: per bin (filter shape), at most the band floor + 2dB (bins occupied most of the
+	   capture: long bursts). */
+	static int floors[NF], sorted[NF];
+	for (int f = B0; f < B1; f++) {
+		floors[f] = floor_db(f, frames);
+		int j = f - B0;
+		for (; j > 0 && sorted[j - 1] > floors[f]; j--)
+			sorted[j] = sorted[j - 1];
+		sorted[j] = floors[f];
+	}
+	int band = sorted[(B1 - B0)/2] + 2*4;
 	memset(b.mask, 0, sizeof(b.mask));
 	for (int f = B0; f < B1; f++) {
-		int threshold = floor_db(f, frames) + THRESHOLD, active = 0;
+		int threshold = ((floors[f] < band) ? floors[f] : band) + THRESHOLD;
 		for (int t = 0; t < frames; t++)
-			if (b.db[t][f] > threshold) {
-				b.mask[t][f] = 1;
-				active++;
-			}
-		spur[slot][f] = (spur[slot][f]*7 + ((active*10 > frames*7) ? 256 : 0))/8;
+			b.mask[t][f] = (b.db[t][f] > threshold);
+		/* Always on (floor 6dB above the band floor) over the captures: spur (fast rise, slow
+		   decay). */
+		if (floors[f] > band + 4*4)
+			spur[slot][f] += (256 - spur[slot][f])/2;
+		else
+			spur[slot][f] -= spur[slot][f]/16;
 	}
 	for (int f = B0; f < B1; ) {
 		int n = 0;
@@ -225,18 +242,26 @@ int sig_detect(const int8_t *iq, int samples, int center_khz, int slot, struct s
 				label++;
 				continue;
 			}
-			/* Bandwidth: bins active for >= 30% of the burst. Drift: power centroid at the start and
-			   the end. */
-			int g0 = -1, g1 = -1;
+			/* Bandwidth: bins active for >= 30% of the burst, mean level within 12dB of the
+			   strongest bin's (window leakage, GFSK sidelobes of strong bursts excluded). Drift: power centroid at the
+			   start and the end. */
+			static int level[NF];
+			int g0 = -1, g1 = -1, peak = 0;
 			for (int f = fmin; f <= fmax; f++) {
-				int n = 0;
+				int n = 0, s = 0;
 				for (int t = tmin; t <= tmax; t++)
-					n += (b.mask[t][f] == label);
-				if (n*10 >= dur*3) {
+					if (b.mask[t][f] == label) {
+						n++;
+						s += b.db[t][f];
+					}
+				level[f] = (n*10 >= dur*3) ? s/n : -1;
+				peak = (level[f] > peak) ? level[f] : peak;
+			}
+			for (int f = fmin; f <= fmax; f++)
+				if (level[f] >= 0 && level[f] >= peak - 12*4) {
 					g0 = (g0 < 0) ? f : g0;
 					g1 = f;
 				}
-			}
 			if (g0 < 0) {
 				label++;
 				continue;
@@ -258,7 +283,14 @@ int sig_detect(const int8_t *iq, int samples, int center_khz, int slot, struct s
 			s->us        = us;
 			s->level_db4 = top;
 			s->truncated = (tmin == 0) || (tmax == frames - 1);
-			s->cls       = classify(s->khz, s->bw_khz, us, s->truncated, dur*10 >= frames*9, drift);
+			s->cls       = classify(s->khz, s->bw_khz, us, dur*10 >= frames*9,
+				fmin == B0 || fmax == B1 - 1, drift);
+			/* Narrowband on bins occupied in most captures: carrier/interferer. */
+			int persistent = 0;
+			for (int f = g0; f <= g1; f++)
+				persistent += spur[slot][f];
+			if (s->bw_khz < 4000 && persistent > 128*(g1 - g0 + 1))
+				s->cls = SIG_CARRIER;
 			label++;
 		}
 	return count;

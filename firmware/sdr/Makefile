@@ -11,7 +11,8 @@ CFLAGS += -I../common
 # Libraries (compiled by chromatix.py --with-app --build: no BIOS).
 LIBS = libc libcompiler_rt libbase
 
-OBJECTS = crt0.o main.o esp32sdr.o lcd.o dsp.o usblink.o console.o lte.o ble.o classify.o tool_cell.o tool_ble.o tool_signals.o
+OBJECTS = crt0.o main.o esp32sdr.o lcd.o dsp.o usblink.o console.o lte.o ble.o classify.o dect.o zigbee.o \
+	tool_cell.o tool_ble.o tool_signals.o tool_dect.o tool_zigbee.o
 
 COMMA = ,
 REGULAR_LIBS = $(filter-out $(ALWAYS_LINK_LIBS),$(LIBS))
@@ -42,7 +43,7 @@ sdr.elf: $(OBJECTS)
 VPATH = $(BIOS_DIRECTORY):$(BIOS_DIRECTORY)/cmds:$(CPU_DIRECTORY):../common
 
 # DSP: optimized for speed (the default -Os stalls on the load/multiply latencies).
-DSP_OBJECTS = dsp.o lte.o ble.o classify.o
+DSP_OBJECTS = dsp.o lte.o ble.o classify.o dect.o zigbee.o
 $(DSP_OBJECTS): CFLAGS += -O3 -funroll-loops
 
 %.o: %.c
