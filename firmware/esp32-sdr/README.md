@@ -30,8 +30,13 @@ standard bitstream).
     MHz), `I2CR/I2CW/I2CD` (analog registers, RF PLL: block 98 host 1), `REGR/REGW` (registers),
     `FTAB <index>` (PLL table entry).
   - With `LPF 0` (ESP-SDR), 80MS/s captures show +-38MHz around the LO.
+- `chromatic_capture.c/h` (BSD-2-Clause): capture timing. Commands are handled on the FreeRTOS
+  tick (1ms), so the captures start on a 1ms grid of the ESP32 clock. Against a periodic signal,
+  a capture then always sees the same part of the period, drifting by the clocks' ppm only (LTE:
+  the PSS always ~0.8ms in, the PBCH never in the capture). Command:
+  - `CAPDLY <max_us>`/`CAPDLY?`: random delay 0..max_us (<= 10000) before each capture (0: none).
 - `esp-sdr-chromatic.patch` (GPL-3.0, ESP-SDR): hooks in the ESP32 receiver (`QSPI CTUNE FREQK
-  LO56` capabilities, LO selector after the RX setup).
+  LO56 CAPDLY` capabilities, LO selector after the RX setup, capture delay).
 - `build.sh`: fetches ESP-SDR (pinned), applies the patch, builds for the ESP32 (needs the ESP-IDF
   pinned by ESP-SDR in `firmware-targets.json`, sourced: `. export.sh`).
 

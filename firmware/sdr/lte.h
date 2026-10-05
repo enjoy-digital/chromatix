@@ -29,10 +29,24 @@ struct lte_cell {
 	int pos;      /* PSS position (1.92MS/s samples). */
 };
 
+struct lte_mib {
+	int ports;    /* Transmit antenna ports (1, 2: 4 not decoded). */
+	int rbs;      /* Downlink bandwidth (resource blocks: 6, 15, 25, 50, 75, 100). */
+	int sfn;      /* System frame number. */
+	int phich_extended;
+	int phich_ng; /* PHICH resource (0-3: 1/6, 1/2, 1, 2). */
+};
+
 void lte_init(void);
 /* Cell search in a 16MS/s capture, carrier at offset_hz from the tuned frequency (receiver LO
    error included if known), frequency offset searched over +-11.5kHz if wide (unknown LO error),
    else +-4kHz: returns 1 if a cell was found (PSS and SSS above their thresholds), 0 if not. */
 int  lte_search(const int8_t *iq, int samples, int offset_hz, int wide, struct lte_cell *cell);
+
+/* MIB of the cell found by the last lte_search (PBCH: subframe 0 slot 1, 4 symbols, in the
+   capture): CRS channel estimates (ports 0/1), transmit diversity (SFBC) or single port, PBCH
+   descrambling (4 frame hypotheses), rate dematching, tail-biting Viterbi, CRC (antenna ports
+   mask). Returns 1 if decoded. */
+int  lte_mib(const struct lte_cell *cell, struct lte_mib *mib);
 
 #endif

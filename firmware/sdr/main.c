@@ -1346,6 +1346,9 @@ int main(void)
 	set_freq_khz(freq_khz);
 	set_gain();
 	set_filter(0);
+	/* Random capture start (Chromatic ESP-SDR fork): captures spread over periodic signals (LTE
+	   PSS/PBCH), ignored by stock ESP-SDR. */
+	esp_cmd("CAPDLY 1000");
 	while (esp32sdr_ms() - splash_ms < 2000); /* Startup screen (credits) shown for 2s. */
 	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
 	app_toast("MENU: TOOLS/HELP  SELECT: VIEW");

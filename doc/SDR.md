@@ -338,7 +338,7 @@ inverted spectrum, noise, frequency offsets).
 
 | Tool | Band | What it does | Verified |
 |------|------|--------------|----------|
-| Cell scanner | LTE B1/B3/B7/B38/B40/B41/B2/B66 | Carriers found on the band spectrum, LTE cells decoded: PCI, FDD/TDD, PSS correlation, EARFCN, receiver LO error | On the air (B7 2680.0MHz: PCI 388, FDD, LO error +3.0ppm) |
+| Cell scanner | LTE B1/B3/B7/B38/B40/B41/B2/B66 | Carriers found on the band spectrum, LTE cells decoded: PCI, FDD/TDD, PSS correlation, EARFCN, MIB (bandwidth, TX ports, SFN), receiver LO error | On the air (B7 2680.0MHz: PCI 388, FDD, MIB 100 RB/2 TX, LO error +3.0ppm) |
 | BLE scanner | 2402/2426/2480MHz | Advertising packets: devices (name, vendor, Apple Continuity type, services), trackers (Find My, SmartTag, Tile, Chipolo, Find Hub), details, find mode (beep per packet) | On the air (HP, Apple Nearby/iBeacon/Find My) |
 | Signal ID | 2398-2485MHz | Bursts classified (Wi-Fi 20/40, BLE advertising, 802.15.4, narrowband BT/RC, carriers, 10MHz OFDM drone links, DJI DroneID, analog video, microwave oven), drone link alert, Wi-Fi channels airtime | On the air (Wi-Fi, BLE, narrowband, carriers); drone classes heuristic, no drone here |
 | DECT scanner | EU 1880-1900MHz, US 1920-1930MHz | Carriers activity, base stations (RFPI from the beacons), handset transmissions; A-field only (no voice) | Synthetic (no DECT base here) |
@@ -364,7 +364,16 @@ inverted spectrum, noise, frequency offsets).
     known).
   - Refined in the time domain: frequency offset in 500Hz steps, position.
   - SSS: decoded coherently (channel from the PSS), FDD and TDD positions.
-  - Raster offsets up to +-300kHz tried; 3 detections or 35 captures per carrier.
+  - MIB (PBCH, subframe 0 slot 1): CRS channel estimates of ports 0/1, single port or transmit
+    diversity (SFBC, Alamouti), descrambling (4 frame hypotheses), rate dematching (4 repetitions
+    per frame), wrap-around Viterbi (K=7, rate 1/3), CRC with the antenna ports mask. Real B7
+    captures: 16 MIBs from 47 cell detections, consistent SFNs.
+  - Capture timing: the ESP32 handles the commands on its 1ms FreeRTOS tick, so the captures
+    started on a 1ms grid of its clock. Against the LTE frame, the PSS was always ~0.8ms into the
+    capture and the PBCH (0.35ms after) never fit. The ESP32 fork's `CAPDLY` (random 0-1ms delay
+    before each capture, set by the application at start) spreads them.
+  - Raster offsets up to +-300kHz tried. Per carrier: 3 detections and the MIB, or 40 captures (60
+    once the cell is found).
 - **Speed:** 210ms per capture on the VexRiscv (400ms before the LO error is known).
 - **LO error:** the console's ESP32 measured at +3.0ppm (8kHz at 2.68GHz).
 - **Not decoded:** UMTS carriers (B1 2150MHz here), shown without a PCI.

@@ -63,6 +63,9 @@ class ZBFrame(ctypes.Structure):
         ("dst_mode", ctypes.c_int), ("src_mode", ctypes.c_int), ("pos", ctypes.c_int),
         ("level_db4", ctypes.c_int), ("errors", ctypes.c_int)]
 
+class LTEMIB(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_int) for n in "ports rbs sfn phich_extended phich_ng".split()]
+
 class Sig(ctypes.Structure):
     _fields_ = [(n, ctypes.c_int) for n in "cls khz bw_khz us level_db4 truncated".split()]
 
@@ -122,10 +125,49 @@ def lte_sss(nid1, nid2):
     d[1::2] = s[(n + m1) % 31]*c[(n + nid2 + 3) % 31]*z[(n + m0 % 8) % 31]
     return d
 
-def lte_signal(pci, seed=0):
+def gold(cinit, n):
+    x1 = [1] + [0]*30
+    x2 = [(cinit >> i) & 1 for i in range(31)]
+    for i in range(n + 1600):
+        x1.append(x1[i + 3] ^ x1[i])
+        x2.append(x2[i + 3] ^ x2[i + 2] ^ x2[i + 1] ^ x2[i])
+    return np.array([x1[i + 1600] ^ x2[i + 1600] for i in range(n)])
+
+def lte_pbch(pci, mib, frame):
+    """PBCH symbols (240 per frame, 2 ports: SFBC) of a MIB (24 bits): CRC (2 ports mask),
+    tail-biting convolutional code, rate matching, scrambling, QPSK."""
+    crc = 0
+    for b in mib:
+        fb  = ((crc >> 15) & 1) ^ b
+        crc = (crc << 1) & 0xffff
+        if fb:
+            crc ^= 0x1021
+    c = list(mib) + [((crc ^ 0xffff) >> (15 - i)) & 1 for i in range(16)]
+    state = sum(c[39 - j] << (5 - j) for j in range(6))
+    d = [[], [], []]
+    for k in range(40):
+        reg = (c[k] << 6) | state
+        for i, g in enumerate((0o133, 0o171, 0o165)):
+            d[i].append(bin(reg & g).count("1") & 1)
+        state = (state >> 1) | (c[k] << 5)
+    perm = [1, 17, 9, 25, 5, 21, 13, 29, 3, 19, 11, 27, 7, 23, 15, 31, 0, 16, 8, 24, 4, 20, 12, 28,
+        2, 18, 10, 26, 6, 22, 14, 30]
+    w = [d[s][r*32 + col - 24] for s in range(3) for col in perm for r in range(2) if r*32 + col >= 24]
+    e = np.array([w[j % 120] for j in range(1920)])[480*frame:480*(frame + 1)]
+    e ^= gold(pci, 1920)[480*frame:480*(frame + 1)]
+    x = ((1 - 2.0*e[0::2]) + 1j*(1 - 2.0*e[1::2]))/np.sqrt(2)
+    y0, y1 = x.copy(), np.zeros(240, complex)
+    y1[0::2], y1[1::2] = -np.conj(x[1::2]), np.conj(x[0::2])
+    return y0/np.sqrt(2), y1/np.sqrt(2)
+
+def lte_signal(pci, seed=0, mib=None, frame=0):
+    """2 subframes: PSS/SSS (subframe 0), PBCH (MIB, 2 ports: CRS/SFBC, port 1 channel: 0.5j)."""
     rng  = np.random.default_rng(seed)
     ks   = np.r_[np.arange(-36, 0), np.arange(1, 37)]
     syms = []
+    if mib is not None:
+        p0, p1 = lte_pbch(pci, mib, frame)
+        pbch = p0 + 0.5j*p1
     for subframe in range(2):
         for slot in range(2):
             for l in range(7):
@@ -134,6 +176,19 @@ def lte_signal(pci, seed=0):
                 if subframe == 0 and slot == 0 and l in (5, 6):
                     X[np.r_[np.arange(-31, 0), np.arange(1, 32)] % 128] = \
                         lte_sss(pci//3, pci % 3) if l == 5 else lte_pss(pci % 3)
+                if mib is not None and subframe == 0 and slot == 1 and l < 4:
+                    # PBCH REs (CRS positions of 4 ports excluded in symbols 0/1), CRS ports 0/1.
+                    v = pci % 6
+                    k = [k for k in range(72) if l >= 2 or (k - v) % 3]
+                    n = sum(48 if j < 2 else 72 for j in range(l))
+                    X[ks[k] % 128] = pbch[n:n + len(k)]
+                    if l < 2:
+                        X[ks[[k for k in range(72) if (k - v) % 3 == 0]] % 128] = 0
+                    if l == 0:
+                        cr = gold((1 << 10)*15*(2*pci + 1) + 2*pci + 1, 232)[208:]
+                        r  = ((1 - 2.0*cr[0::2]) + 1j*(1 - 2.0*cr[1::2]))/np.sqrt(2)
+                        X[ks[[6*m + v for m in range(12)]] % 128] = r
+                        X[ks[[6*m + (3 + v) % 6 for m in range(12)]] % 128] = 0.5j*r
                 x = np.fft.ifft(X)*np.sqrt(128)
                 cp = 10 if l == 0 else 9
                 syms.append(np.r_[x[-cp:], x])
@@ -229,6 +284,21 @@ class TestSDRDSP(unittest.TestCase):
             self.assertEqual(lib.lte_search(ptr(cap), 16380, -2000000, wide, ctypes.byref(cell)), 1)
             self.assertEqual((cell.pci, cell.tdd), (388, 0))
             self.assertLess(abs(cell.cfo_hz - cfo), 1500) # 500Hz steps, PSS: 66.7us.
+
+    def test_lte_mib(self):
+        lib = sdr_lib()
+        lib.lte_init()
+        # MIB: 50 RBs (10MHz), normal PHICH duration, Ng 1, SFN 4*0x5a + frame.
+        mib = [0, 1, 1, 0, 1, 0] + [int(b) for b in format(0x5a, "08b")] + [0]*10
+        for frame, snr in [(0, 20), (3, 10)]:
+            x    = lte_signal(pci=101, mib=mib, frame=frame)
+            cap  = capture(x[1500:], -2e6, snr_db=snr, amp=30)
+            cell = LTECell()
+            self.assertEqual(lib.lte_search(ptr(cap), 16380, -2000000, 1, ctypes.byref(cell)), 1)
+            self.assertEqual((cell.pci, cell.subframe), (101, 0))
+            m = LTEMIB()
+            self.assertEqual(lib.lte_mib(ctypes.byref(cell), ctypes.byref(m)), 1)
+            self.assertEqual((m.ports, m.rbs, m.phich_ng, m.sfn), (2, 50, 2, 4*0x5a + frame))
 
     def test_lte_noise(self):
         lib = sdr_lib()

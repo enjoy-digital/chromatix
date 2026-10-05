@@ -304,3 +304,216 @@ int lte_search(const int8_t *iq, int samples, int offset_hz, int wide, struct lt
 	cell->pos      = pos;
 	return 1;
 }
+
+/* MIB ------------------------------------------------------------------------------------------ */
+
+#define PBCH_RE   240                 /* PBCH resource elements per frame (normal CP). */
+#define PBCH_BITS 480
+#define MIB_BITS  24
+
+static void gold(uint32_t cinit, int n0, int n, uint8_t *c)
+{
+	/* Gold sequence c(n0..n0 + n - 1) (36.211 7.2): x1(0) = 1, x2 from cinit, Nc = 1600. */
+	uint32_t x1 = 1, x2 = cinit;
+	for (int i = 0; i < 1600 + n0 + n; i++) {
+		if (i >= 1600 + n0)
+			c[i - 1600 - n0] = (x1 ^ x2) & 1;
+		uint32_t f1 = ((x1 >> 3) ^ x1) & 1;
+		uint32_t f2 = ((x2 >> 3) ^ (x2 >> 2) ^ (x2 >> 1) ^ x2) & 1;
+		x1 = (x1 >> 1) | (f1 << 30);
+		x2 = (x2 >> 1) | (f2 << 30);
+	}
+}
+
+static int pbch_subcarrier(int k)
+{
+	/* Central 72 subcarriers (k = 0..71) -> FFT index (DC skipped). */
+	return (k < 36) ? SYM - 36 + k : k - 35;
+}
+
+static uint8_t rm[120];               /* Rate matching: coded bit (stream*40 + k) of w (no nulls). */
+
+static void rm_init(void)
+{
+	/* Sub-block interleaver (convolutional codes, 36.212 5.1.4.2): 2 rows x 32 columns, 24 nulls
+	   first, columns permuted, read column by column; streams one after the other. */
+	static const uint8_t perm[32] = {
+		1, 17, 9, 25, 5, 21, 13, 29, 3, 19, 11, 27, 7, 23, 15, 31,
+		0, 16, 8, 24, 4, 20, 12, 28, 2, 18, 10, 26, 6, 22, 14, 30,
+	};
+	int n = 0;
+	for (int s = 0; s < 3; s++)
+		for (int col = 0; col < 32; col++)
+			for (int row = 0; row < 2; row++) {
+				int i = row*32 + perm[col] - 24;
+				if (i >= 0)
+					rm[n++] = s*40 + i;
+			}
+}
+
+static int conv_parity(int reg, int g)
+{
+	/* Output bit of generator g for the 7-bit register (bit 6: current input). */
+	int v = reg & g;
+	v ^= v >> 4;
+	v ^= v >> 2;
+	v ^= v >> 1;
+	return v & 1;
+}
+
+static void viterbi(const int32_t *llr, uint8_t *bits)
+{
+	/* Tail-biting K=7 rate 1/3 (133, 171, 165 octal) decoder: wrap-around Viterbi (2 passes over the
+	   40 bits, all states equally likely at the start, traceback from the best end state).
+	   llr[3*k + i] > 0: coded bit 0. */
+	static const int g[3] = {0133, 0171, 0165};
+	static int32_t metric[64], next[64];
+	static uint8_t from[80][64];
+	memset(metric, 0, sizeof(metric));
+	for (int t = 0; t < 80; t++) {
+		const int32_t *l = &llr[3*(t % 40)];
+		for (int s = 0; s < 64; s++)
+			next[s] = INT32_MIN;
+		for (int s = 0; s < 64; s++)
+			for (int b = 0; b < 2; b++) {
+				int reg = (b << 6) | s, ns = (s >> 1) | (b << 5);
+				int32_t m = metric[s];
+				for (int i = 0; i < 3; i++)
+					m += conv_parity(reg, g[i]) ? -l[i] : l[i];
+				if (m > next[ns]) {
+					next[ns]     = m;
+					from[t][ns]  = s;
+				}
+			}
+		memcpy(metric, next, sizeof(metric));
+	}
+	int s = 0;
+	for (int i = 1; i < 64; i++)
+		s = (metric[i] > metric[s]) ? i : s;
+	for (int t = 79; t >= 0; t--) {
+		if (t < 40 + 40 && t >= 40)
+			bits[t - 40] = (s >> 5) & 1;
+		s = from[t][s];
+	}
+}
+
+int lte_mib(const struct lte_cell *cell, struct lte_mib *mib)
+{
+	static uint8_t c[1920];
+	static int32_t sym[4][2*SYM];
+	static int32_t h[2][2*72];
+	static int32_t re[2*PBCH_RE], hre[2][2*PBCH_RE];
+	static int32_t soft[PBCH_BITS], llr[120];
+	if (!rm[1])
+		rm_init();
+	/* PBCH symbols (subframe 0 slot 1, 0-3): FDD after the PSS (end of slot 0), TDD before it
+	   (subframe 1 slot 2 symbol 2). */
+	if (cell->subframe != 0)
+		return 0;
+	int slot1 = cell->tdd ? cell->pos - 9 - 275 - 960 : cell->pos + SYM;
+	if (slot1 < 0 || slot1 + 10 + 3*137 + SYM > FFT_N)
+		return 0;
+	uint32_t step = dsp_phase_step(cell->cfo_hz, LTE_RATE);
+	for (int l = 0; l < 4; l++) {
+		symbol(slot1 + 10 + l*137, step, sym[l], 6);
+		dsp_fft(sym[l], 7, 0);
+	}
+	/* Channel (ports 0/1): CRS of symbol 0 (every 6 subcarriers, shift PCI mod 6), linear
+	   interpolation; CRS: QPSK from c(2m), c(2m + 1), m = 104..115 (central 6 RBs). */
+	int vshift = cell->pci % 6;
+	gold((1 << 10)*(7*(1 + 1) + 0 + 1)*(2*cell->pci + 1) + 2*cell->pci + 1, 2*104, 24, c);
+	for (int p = 0; p < 2; p++) {
+		int32_t pr[12], pi[12];
+		for (int n = 0; n < 12; n++) {
+			int k = 6*n + (3*p + vshift) % 6, f = pbch_subcarrier(k);
+			int32_t yr = sym[0][2*f] >> 4, yi = sym[0][2*f + 1] >> 4;
+			int32_t rr = c[2*n] ? -1 : 1, ri = c[2*n + 1] ? -1 : 1;
+			/* h = y*conj(r). */
+			pr[n] = yr*rr + yi*ri;
+			pi[n] = yi*rr - yr*ri;
+		}
+		for (int k = 0; k < 72; k++) {
+			int k0 = (3*p + vshift) % 6, n = (k - k0)/6;
+			n = (k < k0) ? 0 : (n > 10) ? 10 : n;
+			int f = k - (6*n + k0);
+			f = (f < 0) ? 0 : (f > 6) ? 6 : f;
+			h[p][2*k + 0] = (pr[n]*(6 - f) + pr[n + 1]*f)/6;
+			h[p][2*k + 1] = (pi[n]*(6 - f) + pi[n + 1]*f)/6;
+		}
+	}
+	/* PBCH resource elements: k then l, CRS positions (4 ports) of symbols 0/1 excluded. */
+	int n = 0;
+	for (int l = 0; l < 4; l++)
+		for (int k = 0; k < 72; k++) {
+			if (l < 2 && (k - vshift + 6) % 3 == 0)
+				continue;
+			int f = pbch_subcarrier(k);
+			re[2*n + 0] = sym[l][2*f + 0] >> 4;
+			re[2*n + 1] = sym[l][2*f + 1] >> 4;
+			for (int p = 0; p < 2; p++) {
+				hre[p][2*n + 0] = h[p][2*k + 0] >> 4;
+				hre[p][2*n + 1] = h[p][2*k + 1] >> 4;
+			}
+			n++;
+		}
+	for (int ports = 1; ports <= 2; ports++) {
+		/* Equalization: single port (x = r*conj(h0)) or SFBC pairs (Alamouti). */
+		for (int i = 0; i < PBCH_RE; i += (ports == 1) ? 1 : 2) {
+			const int32_t *r0 = &re[2*i], *h0 = &hre[0][2*i], *h1 = &hre[1][2*i];
+			if (ports == 1) {
+				soft[2*i + 0] = (r0[0]*h0[0] + r0[1]*h0[1]) >> 8;
+				soft[2*i + 1] = (r0[1]*h0[0] - r0[0]*h0[1]) >> 8;
+				continue;
+			}
+			const int32_t *r1 = &re[2*i + 2];
+			/* x0 = conj(h0)*r0 + h1*conj(r1), x1 = -h1*conj(r0) + conj(h0)*r1. */
+			soft[2*i + 0] = ((h0[0]*r0[0] + h0[1]*r0[1]) + (h1[0]*r1[0] + h1[1]*r1[1])) >> 8;
+			soft[2*i + 1] = ((h0[0]*r0[1] - h0[1]*r0[0]) + (h1[1]*r1[0] - h1[0]*r1[1])) >> 8;
+			soft[2*i + 2] = ((h0[0]*r1[0] + h0[1]*r1[1]) - (h1[0]*r0[0] + h1[1]*r0[1])) >> 8;
+			soft[2*i + 3] = ((h0[0]*r1[1] - h0[1]*r1[0]) - (h1[1]*r0[0] - h1[0]*r0[1])) >> 8;
+		}
+		/* Descrambling (c_init = PCI) for each frame of the 4 (40ms PBCH TTI), rate dematching
+		   (4 repetitions per frame), Viterbi, CRC (masks: 1/2/4 ports). */
+		gold(cell->pci, 0, 1920, c);
+		for (int f = 0; f < 4; f++) {
+			memset(llr, 0, sizeof(llr));
+			for (int j = 0; j < PBCH_BITS; j++) {
+				int     k = rm[j % 120];
+				int32_t v = c[PBCH_BITS*f + j] ? -soft[j] : soft[j];
+				/* llr order for the decoder: [k][stream]. */
+				llr[3*(k % 40) + k/40] += v;
+			}
+			/* Normalized (|llr| < 2^12: path metrics in 32 bits). */
+			int32_t top = 1;
+			for (int i = 0; i < 120; i++)
+				top = (llr[i] > top) ? llr[i] : (-llr[i] > top) ? -llr[i] : top;
+			for (int i = 0; i < 120; i++)
+				llr[i] = (int32_t)(((int64_t)llr[i] << 12)/top);
+			uint8_t bits[40];
+			viterbi(llr, bits);
+			uint16_t crc = 0, rx = 0;
+			for (int i = 0; i < MIB_BITS; i++) {
+				int fb = ((crc >> 15) & 1) ^ bits[i];
+				crc <<= 1;
+				if (fb)
+					crc ^= 0x1021;
+			}
+			for (int i = 0; i < 16; i++)
+				rx = (rx << 1) | bits[MIB_BITS + i];
+			int mask_ports = (rx ^ crc) == 0 ? 1 : (rx ^ crc) == 0xffff ? 2 : (rx ^ crc) == 0x5555 ? 4 : 0;
+			if (mask_ports != ports)
+				continue;
+			static const int rbs[8] = {6, 15, 25, 50, 75, 100, 0, 0};
+			int a = 0;
+			for (int i = 0; i < MIB_BITS; i++)
+				a = (a << 1) | bits[i];
+			mib->ports          = ports;
+			mib->rbs            = rbs[(a >> 21) & 7];
+			mib->phich_extended = (a >> 20) & 1;
+			mib->phich_ng       = (a >> 18) & 3;
+			mib->sfn            = 4*((a >> 10) & 0xff) + f;
+			return mib->rbs != 0;
+		}
+	}
+	return 0;
+}

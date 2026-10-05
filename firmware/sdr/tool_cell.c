@@ -3,10 +3,10 @@
 // Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 // SPDX-License-Identifier: BSD-2-Clause
 //
-// Cell scanner tool: LTE carriers of a band found on its spectrum (sweep of 16MS/s captures, blocks
-// above the noise floor split on the carriers' guard dips), then decoded (lte.c, captures until
-// the PSS/SSS are found): physical cell ID, duplex, PSS correlation, frequency offset (receiver LO
-// error).
+// Cell scanner tool: LTE carriers of a band found on its spectrum (sweep of wide captures, clusters
+// tiled with the LTE bandwidths), then decoded (lte.c, 16MS/s captures until the PSS/SSS/PBCH are
+// found): physical cell ID, duplex, PSS correlation, MIB (bandwidth, transmit ports, frame number),
+// frequency offset (receiver LO error).
 
 #include <stdio.h>
 #include <string.h>
@@ -37,7 +37,7 @@ static const struct {
 #define MAX_BINS    1300                 /* 200MHz. */
 #define OFFSET_KHZ  2000                 /* Carrier offset from the tuned frequency (DC away). */
 #define MAX_CARRIERS 16
-#define MAX_CAPTURES 35                  /* Per carrier (PSS: ~1 capture out of 5). */
+#define MAX_CAPTURES 40                  /* Per carrier (PSS: ~1 capture out of 5). */
 #define MIN_HITS     3
 #define SWEEP_GAIN   50                  /* Sweep: manual gain (comparable steps). */
 
@@ -59,6 +59,9 @@ struct carrier {
 	int tdd;
 	int pss;           /* PSS correlation (%). */
 	int cfo_hz;
+	int rbs;           /* MIB: bandwidth (resource blocks), 0: not decoded. */
+	int ports;
+	int sfn;
 };
 
 static int            band;
@@ -86,9 +89,10 @@ static int lo_error_hz(int khz)
 static const char *const help[] = {
 	"LTE CELL SCANNER: CARRIERS OF",
 	"A BAND FOUND ON ITS SPECTRUM,",
-	"THEN DECODED (PSS/SSS): PCI,",
-	"FDD/TDD, PSS CORRELATION (%),",
-	"EARFCN, RECEIVER LO ERROR.",
+	"THEN DECODED (PSS/SSS/PBCH):",
+	"PCI, FDD/TDD, PSS CORRELATION,",
+	"EARFCN, MIB (BANDWIDTH, TX",
+	"PORTS, SFN), RECEIVER LO ERROR.",
 	"",
 	"LEFT/RIGHT  BAND",
 	"A           SCAN (B: STOP)",
@@ -285,6 +289,13 @@ static int decode(void)
 			c->pss    = (cell.pss > c->pss) ? cell.pss : c->pss;
 			c->cfo_hz = (c->hits*c->cfo_hz + cfo)/(c->hits + 1);
 			c->hits++;
+			/* MIB (PBCH after the PSS of subframe 0, in ~2/3 of these captures). */
+			struct lte_mib mib;
+			if (lte_mib(&cell, &mib)) {
+				c->rbs   = mib.rbs;
+				c->ports = mib.ports;
+				c->sfn   = mib.sfn;
+			}
 			/* Receiver LO error: following searches around it (+-4kHz). */
 			int ppb  = (int)((int64_t)cfo*1000000/c->khz);
 			lo_ppb   = (lo_hits*lo_ppb + ppb)/(lo_hits + 1);
@@ -293,7 +304,9 @@ static int decode(void)
 		}
 	} else if (c->pci < 0 && c->captures % 4 == 0)
 		c->raster = (c->raster + 1) % 7;
-	if (c->hits >= MIN_HITS || c->captures >= MAX_CAPTURES) {
+	/* Done: cell and MIB found (MIB: ~1 capture out of 20), or MAX_CAPTURES (no cell: 40, cell
+	   without MIB: 60). */
+	if ((c->hits >= MIN_HITS && c->rbs) || c->captures >= ((c->pci >= 0) ? 60 : MAX_CAPTURES)) {
 		current++;
 		if (current >= ncarriers)
 			state = STATE_DONE;
@@ -360,7 +373,15 @@ static void draw(void)
 		int earfcn = bands[band].earfcn + (c->khz - bands[band].lo)/100;
 		snprintf(pci, sizeof(pci), (c->pci >= 0) ? "%d" : "-", c->pci);
 		snprintf(pss, sizeof(pss), (c->pci >= 0) ? "%d%%" : "", c->pss);
-		snprintf(line, sizeof(line), "%-8s %2d %4s %4s %3s %d", f, (c->bw_khz + 500)/1000, pci,
+		static const struct { int rbs; const char *mhz; } bws[6] = {
+			{6, "1.4"}, {15, "3"}, {25, "5"}, {50, "10"}, {75, "15"}, {100, "20"},
+		};
+		char bw[8];
+		snprintf(bw, sizeof(bw), "%d", (c->bw_khz + 500)/1000);
+		for (int i = 0; i < 6; i++)
+			if (c->rbs == bws[i].rbs)
+				snprintf(bw, sizeof(bw), "%s", bws[i].mhz);
+		snprintf(line, sizeof(line), "%-8s %3s %4s %4s %3s %d", f, bw, pci,
 			(c->pci < 0) ? ((scroll + r == current && state == STATE_DECODE) ? "...." :
 			(c->captures ? "NONE" : "")) : c->tdd ? "TDD" : "FDD", pss, earfcn);
 		lcd_text(1, LIST_Y + 8 + 8*r, (c->pci >= 0) ? COLOR_WHITE : COLOR_DIM, line);
@@ -368,6 +389,14 @@ static void draw(void)
 	if (state == STATE_DONE && ncarriers == 0)
 		lcd_text(1, LIST_Y + 8, COLOR_DIM, "NO CARRIER FOUND");
 
+	/* MIB of the first decoded cell from the scroll position. */
+	for (int i = scroll; i < ncarriers; i++)
+		if (carriers[i].rbs) {
+			snprintf(line, sizeof(line), "MIB PCI %d: %d RB, %d TX, SFN %d", carriers[i].pci,
+				carriers[i].rbs, carriers[i].ports, carriers[i].sfn);
+			lcd_text(1, LCD_HEIGHT - 15, COLOR_GREEN, line);
+			break;
+		}
 	/* Receiver LO error (mean frequency offset of the cells). */
 	int n = 0, ppb = 0;
 	for (int i = 0; i < ncarriers; i++)
