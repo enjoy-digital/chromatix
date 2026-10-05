@@ -24,7 +24,7 @@ FFT_MAX_LOG2 = 11   # Largest FFT (twiddles).
 # Channel filters: (name, up, down, input rate (Hz), cutoff (Hz), taps per phase).
 FILTERS = [
     ("lte",    3,  25, 16e6, 0.65e6, 96), # 16MS/s -> 1.92MS/s (LTE PSS/SSS: 128-point symbols).
-    ("ble",    1,   4, 16e6, 0.75e6, 96), # 16MS/s -> 4MS/s     (BLE 1Mb/s: 4 samples/bit).
+    ("ble",    1,   4, 16e6, 0.75e6, 48), # 16MS/s -> 4MS/s     (BLE 1Mb/s: 4 samples/bit).
     ("dect",  36, 125, 16e6, 0.70e6, 64), # 16MS/s -> 4.608MS/s (DECT 1.152Mb/s: 4 samples/bit).
     ("zigbee", 1,   2, 16e6, 1.30e6, 48), # 16MS/s -> 8MS/s     (802.15.4 2Mchip/s: 4 samples/chip).
 ]

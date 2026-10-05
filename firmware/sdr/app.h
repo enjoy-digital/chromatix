@@ -73,6 +73,9 @@ void app_toast(const char *fmt, ...);
 void app_format_khz(char *s, int len, int khz, int decimals);
 void app_heat_line(int y, const int *db4, int floor_db4, int range_db); /* Heat map line. */
 
+/* Sound: beep (Hz, ms). */
+void app_beep(int hz, int ms);
+
 /* Shared capture buffer (16380 I/Q samples). */
 extern int8_t app_iq[];
 #define APP_SAMPLES 16380

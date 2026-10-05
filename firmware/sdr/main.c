@@ -14,7 +14,7 @@
 // (cursor: tune to the cursor), B: cursor on/off, Start: peak hold, Menu: menu (tool, band presets,
 // gain, reference level, waterfall, RSSI tone, scan range, help, info).
 //
-// Tools (menu, app.h): cell scanner (tool_cell.c).
+// Tools (menu, app.h): cell scanner (tool_cell.c), BLE scanner (tool_ble.c).
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -218,6 +218,7 @@ int app_freq_max = 2504000;
 static const struct tool *const tools[] = {
 	NULL,
 	&tool_cell,
+	&tool_ble,
 };
 #define TOOLS (int)(sizeof(tools)/sizeof(tools[0]))
 
@@ -729,6 +730,22 @@ static void tone_init(void)
 	irq_setmask(irq_getmask() | (1 << PCM_INTERRUPT));
 }
 
+static uint32_t beep_until;
+
+void app_beep(int hz, int ms)
+{
+	tone_freq  = (hz < 100) ? 100 : (hz > 4000) ? 4000 : hz;
+	beep_until = esp32sdr_ms() + ms;
+}
+
+static void beep_update(void)
+{
+	if (beep_until && (int32_t)(esp32sdr_ms() - beep_until) >= 0) {
+		tone_freq  = 0;
+		beep_until = 0;
+	}
+}
+
 static void tone_update(void)
 {
 	/* Pitch: 200Hz + 40Hz/dB of the peak above the noise floor around the cursor (or the center
@@ -936,6 +953,7 @@ static void set_tool(int t)
 	tool      = t;
 	tool_sel  = t;
 	menu_open = 0;
+	tone_freq = 0;
 	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
 	if (tool)
 		tools[tool]->enter();
@@ -1351,8 +1369,10 @@ int main(void)
 		/* Capture/display. */
 		uint32_t t_capture = esp32sdr_ms();
 		int r, peak_x = 0;
-		if (tool)
+		if (tool) {
+			beep_update();
 			r = tools[tool]->update();
+		}
 		else if (mode == MODE_SCAN)
 			r = scan_update();
 		else {

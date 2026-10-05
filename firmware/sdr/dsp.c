@@ -181,15 +181,35 @@ int dsp_channelize(const int8_t *iq, int samples, uint32_t phase_step, const str
 	}
 	dc_i = (dc_i << 7)/samples;
 	dc_q = (dc_q << 7)/samples;
-	uint32_t phase = 0;
-	for (int i = 0; i < samples; i++) {
+	/* NCO: periodic table when the shift is a multiple of fs/64 (common offsets), else computed. */
+	static int16_t nco[2*64];
+	int period = 0;
+	for (int k = 1; k <= 64; k++)
+		if ((uint32_t)(phase_step*k) == 0) {
+			period = k;
+			break;
+		}
+	for (int k = 0; k < period; k++) {
 		int32_t c, s;
-		dsp_nco(phase, &c, &s);
+		dsp_nco(phase_step*k, &c, &s);
+		nco[2*k + 0] = (c > 32767) ? 32767 : c;
+		nco[2*k + 1] = s;
+	}
+	uint32_t phase = 0;
+	for (int i = 0, k = 0; i < samples; i++) {
+		int32_t c, s;
+		if (period) {
+			c = nco[2*k + 0];
+			s = nco[2*k + 1];
+			k = (k + 1 == period) ? 0 : k + 1;
+		} else {
+			dsp_nco(phase, &c, &s);
+			phase += phase_step;
+		}
 		int32_t r =  (iq[2*i + 0] << 7) - dc_i;
 		int32_t q = -((iq[2*i + 1] << 7) - dc_q);
 		mix[2*i + 0] = (r*c - q*s) >> 15;
 		mix[2*i + 1] = (r*s + q*c) >> 15;
-		phase += phase_step;
 	}
 	/* Polyphase resampler: output m at m*down/up input samples (taps[p*K + k] = h[p + k*up]). */
 	int n = 0, base = f->taps, p = 0;
