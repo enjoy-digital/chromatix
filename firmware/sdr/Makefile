@@ -12,7 +12,7 @@ CFLAGS += -I../common
 LIBS = libc libcompiler_rt libbase
 
 OBJECTS = crt0.o main.o esp32sdr.o lcd.o dsp.o usblink.o console.o lte.o ble.o classify.o dect.o zigbee.o \
-	tool_cell.o tool_ble.o tool_signals.o tool_dect.o tool_zigbee.o
+	tool_cell.o tool_ble.o tool_signals.o tool_dect.o tool_zigbee.o tool_hunt.o
 
 COMMA = ,
 REGULAR_LIBS = $(filter-out $(ALWAYS_LINK_LIBS),$(LIBS))

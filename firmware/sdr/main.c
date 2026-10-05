@@ -15,7 +15,8 @@
 // gain, reference level, waterfall, RSSI tone, scan range, help, info).
 //
 // Tools (menu, app.h): cell scanner (tool_cell.c), BLE scanner (tool_ble.c), signal identification
-// (tool_signals.c), DECT scanner (tool_dect.c), 802.15.4 sniffer (tool_zigbee.c).
+// (tool_signals.c), DECT scanner (tool_dect.c), 802.15.4 sniffer (tool_zigbee.c), hunt
+// (tool_hunt.c).
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -223,6 +224,7 @@ static const struct tool *const tools[] = {
 	&tool_signals,
 	&tool_dect,
 	&tool_zigbee,
+	&tool_hunt,
 };
 #define TOOLS (int)(sizeof(tools)/sizeof(tools[0]))
 
@@ -920,7 +922,6 @@ static int scan_update(void)
 #define REPEAT_DELAY_MS  400
 #define REPEAT_PERIOD_MS 80
 
-static uint32_t buttons_last;
 static uint32_t buttons_repeat; /* Held directions repeated (after 400ms, every 80ms). */
 static uint32_t buttons_t0;     /* Directions pressed time. */
 static uint32_t buttons_t1;     /* Last repeat time. */
@@ -929,9 +930,11 @@ static uint32_t buttons_held;   /* Directions held time (ms). */
 static uint32_t buttons_pressed(void)
 {
 	/* Pressed edges, Left/Right auto repeat (buttons_repeat: all the directions). */
-	uint32_t buttons = demo_buttons_status_read();
+	/* Edges from the interrupt and this poll (same latch: each edge counted once). */
 	irq_setie(0);
-	uint32_t pressed = (buttons & ~buttons_last) | buttons_latched;
+	buttons_poll();
+	uint32_t buttons = buttons_isr_last;
+	uint32_t pressed = buttons_latched;
 	buttons_latched  = 0;
 	irq_setie(1);
 	uint32_t dirs    = (1 << BTN_LEFT) | (1 << BTN_RIGHT) | (1 << BTN_UP) | (1 << BTN_DOWN);
@@ -947,7 +950,6 @@ static uint32_t buttons_pressed(void)
 		}
 	} else
 		buttons_held = 0;
-	buttons_last = buttons;
 	return pressed | (buttons_repeat & ((1 << BTN_LEFT) | (1 << BTN_RIGHT)));
 }
 
@@ -1357,8 +1359,12 @@ int main(void)
 		   closed). */
 		if (usb && !usblink_touched()) {
 			relay_poll();
-			int active = host_len || relay_captures ||
-				(esp32sdr_ms() - host_last_ms < HOST_TIMEOUT_MS && host_last_ms);
+			/* Host active: recent bytes or pending captures (a partial line from a link switch
+			   dropped after the timeout). */
+			int recent = host_last_ms && esp32sdr_ms() - host_last_ms < HOST_TIMEOUT_MS;
+			if (!recent)
+				host_len = 0;
+			int active = recent || relay_captures;
 			if (active && !host) {
 				host      = 1;
 				menu_open = 0;
