@@ -11,8 +11,10 @@ Credits: [ESP-SDR](https://espargos.net/espsdr/) is the work of [ESPARGOS](https
 ChromatiX adds the Chromatic transport/tuning (`firmware/esp32-sdr`, a patch of ESP-SDR) and the
 console/PC side.
 
-What to expect: a **2.4 GHz** receiver (Wi-Fi, Bluetooth/BLE, ISM: spectrum, waterfall, bursts), not
-a wideband SDR (no broadcast FM/AM). Captures are bursts (low duty cycle), not continuous.
+What to expect: a **1.78-2.89 GHz** receiver (2.4GHz ISM, LTE/DECT bands: spectrum, waterfall,
+band scan, and decoding tools: LTE cell scanner, BLE scanner, signal identification/drone alert,
+DECT, 802.15.4, hunt), not a wideband SDR (no broadcast FM/AM). Captures are bursts (low duty
+cycle), not continuous.
 
 ## Phase 0: feasibility (done)
 
@@ -326,6 +328,93 @@ LO ratio measured as the baseband shift of the comb lines for a PLL step, wide 8
 
 <img src="images/sdr_ui_scan_ism.png" width="320" alt="Band scan, 2.4GHz ISM"> <img src="images/sdr_ui_lte_b7.png" width="320" alt="LTE B7 DL preset (80MHz span)">
 
+## Tools: cell scanner, BLE, signal identification, DECT, 802.15.4, hunt
+
+Menu > TOOL selects a tool in place of the spectrum views. The tools share the radio, display and
+controls services of the application (`app.h`), each has its help page (Menu > HELP). Their DSP
+(`dsp.c`, `lte.c`, `ble.c`, `dect.c`, `zigbee.c`, `classify.c`) is hardware independent:
+`test/test_sdr_dsp.py` builds it on the host and checks it on synthetic ESP32 captures (8-bit I/Q,
+inverted spectrum, noise, frequency offsets).
+
+| Tool | Band | What it does | Verified |
+|------|------|--------------|----------|
+| Cell scanner | LTE B1/B3/B7/B38/B40/B41/B2/B66 | Carriers found on the band spectrum, LTE cells decoded: PCI, FDD/TDD, PSS correlation, EARFCN, receiver LO error | On the air (B7 2680.0MHz: PCI 388, FDD, LO error +3.0ppm) |
+| BLE scanner | 2402/2426/2480MHz | Advertising packets: devices (name, vendor, Apple Continuity type, services), trackers (Find My, SmartTag, Tile, Chipolo, Find Hub), details, find mode (beep per packet) | On the air (HP, Apple Nearby/iBeacon/Find My) |
+| Signal ID | 2398-2485MHz | Bursts classified (Wi-Fi 20/40, BLE advertising, 802.15.4, narrowband BT/RC, carriers, 10MHz OFDM drone links, DJI DroneID, analog video, microwave oven), drone link alert, Wi-Fi channels airtime | On the air (Wi-Fi, BLE, narrowband, carriers); drone classes heuristic, no drone here |
+| DECT scanner | EU 1880-1900MHz, US 1920-1930MHz | Carriers activity, base stations (RFPI from the beacons), handset transmissions; A-field only (no voice) | Synthetic (no DECT base here) |
+| 802.15.4 sniffer | Channels 11-26 | Short frames (1ms captures: ACKs, short data/commands): networks (PAN IDs), Zigbee/6LoWPAN, addresses | Synthetic (no traffic here) |
+| Hunt | 1775-2890MHz | Channel power (100kHz-10MHz) gain corrected (auto-ranged manual gain), peak hold, history, tone: interference hunting, direction finding | On the air |
+
+<img src="images/sdr_ui_menu.png" width="320" alt="Menu: tool"> <img src="images/sdr_tool_cell.png" width="320" alt="Cell scanner, B7">
+
+<img src="images/sdr_tool_ble.png" width="320" alt="BLE scanner"> <img src="images/sdr_tool_signals.png" width="320" alt="Signal identification">
+
+<img src="images/sdr_tool_wifi.png" width="320" alt="Wi-Fi channels airtime"> <img src="images/sdr_tool_hunt.png" width="320" alt="Hunt">
+
+<img src="images/sdr_tool_dect.png" width="320" alt="DECT scanner"> <img src="images/sdr_tool_zigbee.png" width="320" alt="802.15.4 sniffer">
+
+**Cell scanner** (`lte.c`, `tool_cell.c`):
+- **Sweep:** wide captures (80MS/s, RX filter opened, flat +-25MHz), 4 averaged per 50MHz step.
+- **Carriers:** bins above the floor + 4dB are clustered, bridging gaps < 2MHz. Lightly loaded
+  carriers are not flat: only their reference signals fill the unused resource blocks. A cluster
+  is centered if it matches an LTE bandwidth, else tiled with the LTE bandwidths.
+- **Decode:** 16MS/s captures (1ms) with the carrier 2MHz from DC, channelized to 1.92MS/s
+  (polyphase x3/25). The PSS is sent every 5ms: about 1 capture out of 5 contains it.
+  - PSS: FFT correlation (2048 points, 3 frequency hypotheses of +-7.5kHz until the LO error is
+    known).
+  - Refined in the time domain: frequency offset in 500Hz steps, position.
+  - SSS: decoded coherently (channel from the PSS), FDD and TDD positions.
+  - Raster offsets up to +-300kHz tried; 3 detections or 35 captures per carrier.
+- **Speed:** 210ms per capture on the VexRiscv (400ms before the LO error is known).
+- **LO error:** the console's ESP32 measured at +3.0ppm (8kHz at 2.68GHz).
+- **Not decoded:** UMTS carriers (B1 2150MHz here), shown without a PCI.
+
+**BLE scanner** (`ble.c`, `tool_ble.c`):
+- **Capture:** channels 37/38/39 in turn, 16MS/s captures (1ms: whole advertising packets,
+  <= 376us), channel 2MHz from DC.
+- **Demodulation:** channelized to 4MS/s, FM discriminator, access address search (4 sample
+  phases, <= 2 bit errors), dewhitening, CRC.
+- **Speed:** 71ms per capture, ~10 captures/s. A capture covers ~1% of the air time, so the
+  devices appear over tens of seconds.
+
+**Signal ID** (`classify.c`, `tool_signals.c`):
+- **Capture:** the ISM band in two 80MS/s halves (2420/2463MHz, +-22MHz used).
+- **Spectrogram:** 128-point FFTs with a Hann window (625kHz x 1.6us cells), smoothed over
+  12.8us.
+- **Bursts:** cells above the per-bin floor + 6dB (capped by the band floor), connected.
+  Persistent bins over the captures are receiver spurs/interferers: masked (<= 2 bins) or
+  classified as carriers.
+- **Classification:** from bandwidth (bins within 12dB of the strongest), duration, channel (Wi-Fi
+  centers first, BLE advertising, 802.15.4, DJI DroneID frequencies), continuity and drift.
+  Bursts clipped at the band edge are unknown (the LTE B40 TDD carrier below 2400MHz).
+- **Drone alert:** needs long bursts (>= 150us) seen twice within 10s (no false alert over the
+  tests here).
+- **Wi-Fi view:** airtime per channel, least busy of channels 1/6/11.
+
+**DECT** (`dect.c`) and **802.15.4** (`zigbee.c`):
+- **DECT:** 4.608MS/s (4 samples/bit) GFSK, S-field sync (RFP/PP, both polarities), A-field
+  R-CRC, RFPI from the N_T tails.
+- **802.15.4:** 8MS/s (4 samples/chip). O-QPSK half-sine is MSK: the frequency sign of each chip
+  interval is `!(c[k] ^ c[k + 1] ^ k odd)`, derived in simulation. Symbols are matched against
+  the 16 chip sequences, then preamble/SFD, PHR, PSDU, FCS and the MAC header.
+
+**Performance notes** (VexRiscv, 67MHz, 8KB direct mapped data cache):
+- **Interleaved samples:** separate re/im arrays a multiple of 8KB apart evicted each other on
+  each access (10x slower). The DSP uses interleaved complex samples, and the buffers accessed
+  together are offset in the cache.
+- **Optimization:** the DSP is compiled with `-O3 -funroll-loops`. `-Os` stalled on the
+  load/multiply latencies: BLE decode 192ms -> 71ms.
+- **No 64-bit products:** the FFT uses 32x16-bit products built from 32-bit multiplies, and the
+  NCO uses a periodic table for offsets that are multiples of fs/64.
+
+**Limits:**
+- **Burst captures:** 1ms at 16MS/s, 205us at 80MS/s, a few per second, so the tools sample the
+  air.
+- **Short frames:** long 802.15.4 frames (up to 4ms) and complete DECT frames (10ms) don't fit
+  in a capture.
+- **Decoded layers:** only the unscrambled, unencrypted headers are decoded (LTE sync, BLE
+  advertising, DECT A-field, 802.15.4 MAC header).
+
 ## Next steps
 
 1. **USB link**: one 512-byte USB packet was lost once in a capture payload in ~13000 relayed
@@ -336,4 +425,5 @@ LO ratio measured as the baseband shift of the comb lines for a PLL step, wide 8
    duty cycle.
 3. **ESP32 duties**: the SDR ESP32 firmware has no menu/OSD/power management: merging the
    transport into the ModRetro MCU firmware (GPL) would keep them (SDR as a mode).
-4. **App extras**: channel occupancy view, recording to the PC from the console buttons.
+4. **App extras**: recording to the PC from the console buttons; UMTS (P-SCH/CPICH) and 5G NR
+   (SSB) detection in the cell scanner; LTE MIB (PBCH: bandwidth, frame number).
