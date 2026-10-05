@@ -14,7 +14,7 @@
 // (frequency, gain, rate) are dropped.
 //
 // Tuning: with the Chromatic ESP-SDR fork (firmware/esp32-sdr: FREQK), the ESP32 tunes
-// 2150-2880MHz in kHz steps (and 80MS/s with its RX filter opened: +-38MHz); with stock ESP-SDR,
+// 1792-2880MHz in kHz steps (and 80MS/s with its RX filter opened: +-38MHz); with stock ESP-SDR,
 // only the Wi-Fi channel frequencies (2412-2472MHz/5MHz, 2484MHz) move its LO (measured on the
 // console crystal harmonics): the nearest channel is used. The remaining offset is applied by a
 // digital mixer (NCO). The ESP32 I/Q spectrum is inverted: the

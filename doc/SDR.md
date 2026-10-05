@@ -238,6 +238,34 @@ console crystal harmonics, verified with 2-4 lines at 80MS/s against wrong-LO hy
 
 <img src="images/sdr_console_lte2680.png" width="320" alt="Console: LTE carrier at 2680MHz"> <img src="images/sdr_console_umts2150.png" width="320" alt="Console: band 1 carriers at 2152.5MHz">
 
+## 5/6 LO mode: down to 1792MHz (eSpDR/ESP-SDR finding)
+
+[h0m3us3r](https://github.com/h0m3us3r)'s [eSpDR](https://github.com/h0m3us3r/eSpDR)
+([LO extension](https://github.com/h0m3us3r/eSpDR/blob/main/docs/LO-EXTENSION.md)) found that a
+CKGEN selector (analog block 0x65, register 0, bit 4) makes the receive LO **5/6 of the PLL
+frequency**; [ESP-SDR](https://github.com/ESPARGOS/esp-sdr) (commit 9cfc5e0, 2026-10-02) qualified
+it on the original ESP32 (CKGEN host 4, libphy patched `ram_chip_i2c_*` functions) with an
+external signal generator, for 1842-2209MHz with its tuning.
+
+`firmware/esp32-sdr` applies it on top of the table tuning: below 2150MHz, the PLL is tuned to 6/5
+of the requested frequency (2150-2580MHz, calibration in normal mode) and the selector is set after
+the RX setup (3ms settling): **1792-2880MHz** in total (`RANGEK 1792000 2880000`, `LO56`
+capability).
+
+- **Accuracy** (console crystal harmonics, interpolated peaks): LO within -1..-4kHz at 1793.5,
+  1812.25, 1838, 1866.7, 1897.3, 1931, 1965.4, 2003.1, 2047.7, 2081.25 and 2146.5MHz.
+- **Real signal**: a 15MHz LTE band 3 downlink carrier at 1845-1860MHz (at LO 1842MHz, also seen
+  at LO 1890MHz: same absolute frequency).
+- **Console**: presets LTE B3 DL, DECT, LTE B1 DL (2110-2170MHz now fully covered), overlays B3
+  DL/DECT, scan ranges clipped to the tuning range (full: 1792-2880MHz in 17 steps, 1.8G, B3/DECT,
+  LTE B1); SoapyChromatic/`chromatic_sdr.py` follow `RANGEK?`.
+- Our ESP-SDR base stays pinned (550fade): the newer upstream ESP32 changes (5/6 mode and the PLL
+  capacitor release for its own direct tuning) are superseded by the fork's tuning.
+
+<img src="images/sdr_host_1842_80msps.png" width="800" alt="LTE band 3 downlink carrier at 1845-1860MHz">
+
+<img src="images/sdr_ui_lte_b3.png" width="320" alt="Console: LTE B3 DL preset"> <img src="images/sdr_ui_scan_full.png" width="320" alt="Console: full scan 1792-2880MHz">
+
 ## Handheld UI
 
 `firmware/sdr` user interface (160x144 LCD, console buttons):
@@ -247,13 +275,14 @@ console crystal harmonics, verified with 2-4 lines at 80MS/s against wrong-LO hy
 - **Spectrum**: frequency axis labels (adapted to the span), known bands (B1 DL, B40, ISM, B7
   UL/B38/B7 DL), Wi-Fi channel numbers, BLE advertising channels, peak hold, cursor.
 - **Views** (Select): spectrum + waterfall, waterfall, **band scan** (sweep of a range in 64MHz
-  steps with the 80MS/s wide captures: full 2150-2880MHz in 12 steps, 2.4G ISM, LTE B40/B7,
-  low/high; Up/Down: range, cursor + A: open in the spectrum view).
+  steps with the 80MS/s wide captures: full 1792-2880MHz in 17 steps, 2.4G ISM, 1.8G, B3/DECT,
+  LTE B1/B40/B7, low/high; Up/Down: range, cursor + A: open in the spectrum view).
 - **Controls**: Left/Right: tune (held: x5 after ~1s), Up/Down: tuning step (10kHz-20MHz), A:
   span 16/40/80MHz, B: cursor (Left/Right: move, A: tune to), Start: peak hold, Menu: menu.
-- **Menu**: band presets (Wi-Fi 2.4GHz/channels 1/6/11, Bluetooth/BLE, LTE B1 DL, B40, B7 UL,
-  B38, B7 DL), gain, reference level (auto/manual), waterfall speed/range, RSSI tone (follows the
-  cursor), scan range, help and info pages. Short notifications confirm the changes.
+- **Menu**: band presets (Wi-Fi 2.4GHz/channels 1/6/11, Bluetooth/BLE, LTE B3 DL, DECT, LTE B1
+  DL, B40, B7 UL, B38, B7 DL), gain, reference level (auto/manual), waterfall speed/range, RSSI
+  tone (follows the cursor), scan range, help and info pages. Short notifications confirm the
+  changes.
 - **FFT**: on the CPU (VexRiscv, 67MHz): 512-point int16 radix-2 FFT, Hann window, 8 segments
   averaged per 4096-sample capture (~21ms of the ~37ms update, ~26 updates/s); scan: 4 segments
   per 2048-sample capture and step.

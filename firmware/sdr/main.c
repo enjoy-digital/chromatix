@@ -154,7 +154,9 @@ static const struct {
 	{"WIFI CH 6",     2437000, 1},
 	{"WIFI CH 11",    2462000, 1},
 	{"BLUETOOTH/BLE", 2441000, 2},
-	{"LTE B1 DL",     2152000, 2},
+	{"LTE B3 DL",     1842500, 2},
+	{"DECT",          1890000, 1},
+	{"LTE B1 DL",     2140000, 2},
 	{"LTE B40",       2350000, 2},
 	{"LTE B7 UL",     2535000, 2},
 	{"LTE B38",       2595000, 1},
@@ -162,18 +164,21 @@ static const struct {
 };
 #define PRESETS (int)(sizeof(presets)/sizeof(presets[0]))
 
-/* Band scan ranges (kHz). */
+/* Band scan ranges (kHz, clipped to the tuning range). */
 static const struct {
 	const char *name;
 	int         lo;
 	int         hi;
 } scans[] = {
-	{"FULL",     2150000, 2880000},
-	{"2.4G ISM", 2400000, 2500000},
-	{"LTE B40",  2300000, 2400000},
-	{"LTE B7",   2500000, 2690000},
-	{"LOW",      2150000, 2400000},
-	{"HIGH",     2500000, 2880000},
+	{"FULL",      1000000, 3000000},
+	{"2.4G ISM",  2400000, 2500000},
+	{"1.8G",      1792000, 2150000},
+	{"B3/DECT",   1800000, 1910000},
+	{"LTE B1",    2100000, 2180000},
+	{"LTE B40",   2300000, 2400000},
+	{"LTE B7",    2500000, 2690000},
+	{"LOW",       1792000, 2400000},
+	{"HIGH",      2400000, 2880000},
 };
 #define SCANS (int)(sizeof(scans)/sizeof(scans[0]))
 
@@ -183,6 +188,8 @@ static const struct {
 	uint8_t     color;
 	const char *name;
 } bands[] = {
+	{1805000, 1880000, COLOR_CELL, "B3 DL"},
+	{1880000, 1900000, COLOR_BLE,  "DECT"},
 	{2110000, 2170000, COLOR_CELL, "B1 DL"},
 	{2300000, 2400000, COLOR_CELL, "B40"},
 	{2400000, 2483500, COLOR_ISM,  "ISM"},
@@ -224,7 +231,7 @@ static char esp_info[48];
 
 /* Stock ESP-SDR: the ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz,
    2484MHz): its out of channel frequencies don't move the LO (measured on the console crystal
-   harmonics). The Chromatic ESP-SDR fork tunes 2150-2880MHz in kHz steps (FREQK). */
+   harmonics). The Chromatic ESP-SDR fork tunes 1792-2880MHz in kHz steps (FREQK). */
 static int next_channel(int mhz, int dir)
 {
 	static const int channels[] = {
@@ -579,7 +586,7 @@ static void draw_page(void)
 		"SCAN: LEFT/RIGHT CURSOR,",
 		"      A: OPEN AT CURSOR",
 	};
-	char info[8][40];
+	char info[9][40];
 	const char **lines = help;
 	int n = sizeof(help)/sizeof(help[0]);
 	if (page == 2) {
@@ -591,11 +598,12 @@ static void draw_page(void)
 		snprintf(info[5], 40, "UPDATE RATE: %d.%d/S", fps10/10, fps10 % 10);
 		snprintf(info[6], 40, "FFT: 512 PTS, CPU (VEXRISCV)");
 		snprintf(info[7], 40, "ESP-SDR: ESPARGOS.NET/ESPSDR");
-		static const char *ptr[8];
-		for (int i = 0; i < 8; i++)
+		snprintf(info[8], 40, "<2.15GHZ: 5/6 LO (H0M3US3R ESPDR)");
+		static const char *ptr[9];
+		for (int i = 0; i < 9; i++)
 			ptr[i] = info[i];
 		lines = ptr;
-		n = 8;
+		n = 9;
 	}
 	int x = 4, y = 16, w = LCD_WIDTH - 8, h = 14 + 8*n;
 	lcd_rect(x, y, w, h, COLOR_MENU);
@@ -742,16 +750,26 @@ static int show_spectrum(const int8_t *data, int samples)
 
 static int scan_new[LCD_WIDTH]; /* Columns of the current sweep. */
 
+static int scan_lo(void)
+{
+	return (scans[scan].lo > freq_min) ? scans[scan].lo : freq_min;
+}
+
+static int scan_hi(void)
+{
+	return (scans[scan].hi < freq_max) ? scans[scan].hi : freq_max;
+}
+
 static int scan_steps(void)
 {
-	return (scans[scan].hi - scans[scan].lo + SCAN_STEP - 1)/SCAN_STEP;
+	return (scan_hi() - scan_lo() + SCAN_STEP - 1)/SCAN_STEP;
 }
 
 static void scan_start(void)
 {
 	scan_step = 0;
-	view_lo   = scans[scan].lo;
-	view_hi   = scans[scan].hi;
+	view_lo   = scan_lo();
+	view_hi   = scan_hi();
 	for (int x = 0; x < LCD_WIDTH; x++)
 		scan_new[x] = 0;
 	reset_levels();
@@ -761,6 +779,7 @@ static int scan_update(void)
 {
 	/* One sweep step: tune, 80MS/s capture, bins within +-32MHz -> columns (max). */
 	int center = view_lo + SCAN_STEP/2 + scan_step*SCAN_STEP;
+	center = (center > freq_max) ? freq_max : center; /* Last step: within the tuning range. */
 	set_freq_khz(center);
 	if (esp32sdr_capture(SCAN_SAMPLES, ESP32SDR_RATE_80MSPS, iq, NULL) != 0) {
 		esp32sdr_flush();
@@ -1006,7 +1025,7 @@ static void handle_buttons(void)
 	if (mode == MODE_SCAN && (p & ((1 << BTN_UP) | (1 << BTN_DOWN)))) {
 		scan = (scan + SCANS + ((p & (1 << BTN_UP)) ? 1 : -1)) % SCANS;
 		scan_start();
-		toast("SCAN %s %d-%d MHZ", scans[scan].name, scans[scan].lo/1000, scans[scan].hi/1000);
+		toast("SCAN %s %d-%d MHZ", scans[scan].name, scan_lo()/1000, scan_hi()/1000);
 	}
 }
 

@@ -200,6 +200,8 @@ sound live (only meaningful near realtime), `--wav` records it in simulation tim
   [esp-sdr](https://github.com/ESPARGOS/esp-sdr), GPL-3.0): raw I/Q captures from the ESP32
   radio, the base of the Chromatic SDR (`sdr` branch: its ESP32 firmware is ESP-SDR with a
   Chromatic transport and tuning, the console/PC tools speak its protocol).
+- [h0m3us3r](https://github.com/h0m3us3r)'s [eSpDR](https://github.com/h0m3us3r/eSpDR): the 5/6 LO
+  conversion mode (qualified on the original ESP32 by ESP-SDR) extending the SDR down to 1.79 GHz.
 - [germaneguise](https://github.com/germaneguise): the 320x288 USB capture idea
   ([#10](https://github.com/ModRetro/oss-chromatic-console-fpga/pull/10)).
 

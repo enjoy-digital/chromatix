@@ -32,7 +32,7 @@ RATES = {16: 6, 40: 1, 80: 0} # MS/s -> ESP-SDR rate index.
 
 # Stock ESP-SDR: the ESP32 only tunes reliably on the Wi-Fi channel frequencies (its out of channel
 # frequencies don't move the LO, measured on the console crystal harmonics). The Chromatic ESP-SDR
-# fork (firmware/esp32-sdr) tunes 2150-2880MHz in kHz steps (FREQK).
+# fork (firmware/esp32-sdr) tunes 1792-2880MHz in kHz steps (FREQK).
 CHANNELS = list(range(2412, 2473, 5)) + [2484]
 
 # Helpers ------------------------------------------------------------------------------------------

@@ -19,6 +19,12 @@
 // lines verified at 80MS/s; below, the calibration fails from any starting code; above, the
 // capacitor bank ends).
 //
+// 5/6 LO mode (mode 1 below 2150MHz): the CKGEN selector (analog block 0x65, host 4, register 0,
+// bit 4: libphy patched ram_chip_i2c_* functions) makes the receive LO 5/6 of the PLL frequency
+// (found by h0m3us3r's eSpDR, https://github.com/h0m3us3r/eSpDR, and qualified on the ESP32 by
+// ESP-SDR): the PLL is tuned to 6/5 of the requested frequency (calibration in normal mode), the
+// selector set after the RX setup: 1792-2150MHz (PLL 2150-2580MHz).
+//
 // Offset tuning (mode 2), measured on the Chromatic (console 24MHz crystal harmonics as
 // references, interpolated peaks, ~1kHz, the 2400MHz line excluded: another source ~16kHz above
 // it): the LO moves by 1.0546*c MHz for an offset of c MHz (1024*c units), with a -0.243MHz step
@@ -31,6 +37,7 @@
 #include <string.h>
 
 #include "soc/dport_access.h"
+#include "esp_rom_sys.h"
 
 #include "burst_serial.h"
 #include "chromatic_tune.h"
@@ -40,9 +47,9 @@ extern void    set_chan_freq_sw_start(uint8_t index, int16_t offset, uint8_t ctr
 extern void    set_chanfreq(unsigned mhz, unsigned mode);
 extern uint8_t chip7_phy_init_ctrl[];
 extern int16_t phy_freq_offset;
-/* ROM: analog (regi2c) registers. */
-extern unsigned rom_chip_i2c_readReg(unsigned block, unsigned host, unsigned reg);
-extern void     rom_chip_i2c_writeReg(unsigned block, unsigned host, unsigned reg, unsigned data);
+/* libphy patched analog (regi2c) register functions (all blocks/hosts, ex: CKGEN host 4). */
+extern unsigned ram_chip_i2c_readReg(unsigned block, unsigned host, unsigned reg);
+extern void     ram_chip_i2c_writeReg(unsigned block, unsigned host, unsigned reg, unsigned data);
 
 /* RF PLL frequency table: 85 entries (2400-2484MHz) of 3 words (write_wifi_chan_data,
    bt_opt_write_mem): word 0: VCO capacitor bank code (bits 7:0, analog block 0x62 reg 1), word 1:
@@ -53,14 +60,23 @@ extern void     rom_chip_i2c_writeReg(unsigned block, unsigned host, unsigned re
 #define FTAB_DATA_W  0x3ff4e148 /* Write data. */
 #define FTAB_WRITE   (1 << 9)
 
+/* CKGEN receive LO selector: 5/6 of the PLL frequency when set. */
+#define LO56_BLOCK 0x65
+#define LO56_HOST  4
+#define LO56_REG   0
+#define LO56_MASK  0x10
+
 /* Tuning ranges (kHz). */
-#define TABLE_MIN_KHZ 2150000 /* Mode 1: table tuning. */
+#define TABLE_MIN_KHZ 2150000 /* Mode 1: table tuning (PLL range). */
 #define TABLE_MAX_KHZ 2880000
+#define LO56_MIN_KHZ  1792000 /* Mode 1: 5/6 LO below TABLE_MIN_KHZ (PLL >= 2150.4MHz). */
 #define TUNE_MIN_KHZ  2386000 /* Mode 2: calibration + offset. */
 #define TUNE_MAX_KHZ  2504000
 #define OFFSET_SCALE  1.0546  /* Mode 2: LO move (MHz) per offset MHz. */
 
 int chromatic_tune_mode = 1;
+
+static bool lo56; /* 5/6 LO selected by the last tuning (applied by chromatic_tune_apply_lo). */
 
 static void reply(const char *text)
 {
@@ -106,11 +122,10 @@ static unsigned vco_dcap(double mhz)
     return (d < 0) ? 0 : (d > 255) ? 255 : (unsigned)(d + 0.5);
 }
 
-static bool tune_table(unsigned khz)
+static bool tune_table(double mhz)
 {
     /* Borrowed entry (nearest MHz), loaded with the divider of the requested frequency (and the
        capacitor code: calibrated one around its MHz, else from the fit), calibrated, restored. */
-    double   mhz   = khz/1000.0;
     int      index = (int)(mhz + 0.5) - 2400;
     index = (index < 0) ? 0 : (index > FTAB_ENTRIES - 1) ? FTAB_ENTRIES - 1 : index;
     uint32_t w0 = ftab_read(3*index + 0);
@@ -119,7 +134,7 @@ static bool tune_table(unsigned khz)
         vco_dcap(mhz);
     ftab_write(3*index + 0, (w0 & ~0xffu) | dcap);
     ftab_write(3*index + 1, (uint32_t)((mhz/480.0 - 2.0)*1048576.0 + 0.5));
-    set_chanfreq(nearest_channel(khz/1000), 0);
+    set_chanfreq(nearest_channel((unsigned)mhz), 0);
     tune_sw(index, phy_freq_offset);
     ftab_write(3*index + 0, w0);
     ftab_write(3*index + 1, w1);
@@ -131,10 +146,30 @@ static int offset_units(double mhz)
     return (int)(mhz*1024 + ((mhz >= 0) ? 0.5 : -0.5));
 }
 
+void chromatic_tune_apply_lo(void)
+{
+    /* Receive LO selector (after the RX setup, calibration done in normal mode). */
+    unsigned old   = ram_chip_i2c_readReg(LO56_BLOCK, LO56_HOST, LO56_REG);
+    unsigned value = (old & ~LO56_MASK) | (lo56 ? LO56_MASK : 0);
+    if (value != old) {
+        ram_chip_i2c_writeReg(LO56_BLOCK, LO56_HOST, LO56_REG, value);
+        esp_rom_delay_us(3000);
+    }
+}
+
 bool chromatic_tune_khz(unsigned khz)
 {
-    if (chromatic_tune_mode == 1)
-        return (khz >= TABLE_MIN_KHZ && khz <= TABLE_MAX_KHZ) ? tune_table(khz) : false;
+    lo56 = false;
+    chromatic_tune_apply_lo(); /* Calibrations in normal mode. */
+    if (chromatic_tune_mode == 1) {
+        if (khz >= TABLE_MIN_KHZ && khz <= TABLE_MAX_KHZ)
+            return tune_table(khz/1000.0);
+        if (khz >= LO56_MIN_KHZ && khz < TABLE_MIN_KHZ) {
+            lo56 = true;
+            return tune_table(khz/1000.0*6/5);
+        }
+        return false;
+    }
     if (chromatic_tune_mode != 2 || khz < TUNE_MIN_KHZ || khz > TUNE_MAX_KHZ)
         return false;
     unsigned index;
@@ -188,7 +223,7 @@ bool chromatic_tune_command(const char *line, void (*prepare)(void))
     }
     if (!strcmp(line, "RANGEK?")) {
         if (chromatic_tune_mode == 1)
-            snprintf(text, sizeof(text), "RANGEK %u %u\n", TABLE_MIN_KHZ, TABLE_MAX_KHZ);
+            snprintf(text, sizeof(text), "RANGEK %u %u\n", LO56_MIN_KHZ, TABLE_MAX_KHZ);
         else
             snprintf(text, sizeof(text), "RANGEK %u %u\n", TUNE_MIN_KHZ, TUNE_MAX_KHZ);
         reply(text);
@@ -198,12 +233,12 @@ bool chromatic_tune_command(const char *line, void (*prepare)(void))
     unsigned block, host, reg, value, n, addr;
     char     dump[400];
     if (sscanf(line, "I2CR %u %u %u %c", &block, &host, &reg, &extra) == 3) {
-        snprintf(text, sizeof(text), "I2C %u\n", rom_chip_i2c_readReg(block, host, reg));
+        snprintf(text, sizeof(text), "I2C %u\n", ram_chip_i2c_readReg(block, host, reg));
         reply(text);
         return true;
     }
     if (sscanf(line, "I2CW %u %u %u %u %c", &block, &host, &reg, &value, &extra) == 4) {
-        rom_chip_i2c_writeReg(block, host, reg, value);
+        ram_chip_i2c_writeReg(block, host, reg, value);
         reply("OK\n");
         return true;
     }
@@ -211,7 +246,7 @@ bool chromatic_tune_command(const char *line, void (*prepare)(void))
         int len = snprintf(dump, sizeof(dump), "I2CD");
         for (unsigned r = 0; r < n; r++)
             len += snprintf(dump + len, sizeof(dump) - len, " %02x",
-                rom_chip_i2c_readReg(block, host, r));
+                ram_chip_i2c_readReg(block, host, r));
         snprintf(dump + len, sizeof(dump) - len, "\n");
         reply(dump);
         return true;

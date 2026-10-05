@@ -18,17 +18,19 @@ standard bitstream).
   2412MHz and the LO doesn't move (measured on the Chromatic). The fork loads an entry of the PHY
   PLL frequency table (85 entries: 2400-2484MHz) with the requested divider and a VCO capacitor
   code close to the result, then runs the PHY software calibration (`set_chan_freq_sw_start`):
-  **2150-2880MHz in 1kHz steps, LO within ~2kHz** (console crystal harmonics as references, see
-  doc/SDR.md). Commands:
-  - `FREQK <kHz>` (and `FREQ <MHz>`), `RANGEK?` (`RANGEK 2150000 2880000`).
+  2150-2880MHz; below, the 5/6 LO mode (CKGEN 0x65 host 4 reg 0 bit 4, found by
+  [h0m3us3r's eSpDR](https://github.com/h0m3us3r/eSpDR), qualified on the ESP32 by ESP-SDR): PLL at
+  6/5 of the frequency, selector set after the RX setup: **1792-2880MHz in 1kHz steps, LO within
+  ~2-4kHz** (console crystal harmonics as references, see doc/SDR.md). Commands:
+  - `FREQK <kHz>` (and `FREQ <MHz>`), `RANGEK?` (`RANGEK 1792000 2880000`).
   - `TUNEMODE <0|1|2>`/`TUNEMODE?`: 0: ESP-SDR tuning, 1: table tuning (default), 2: calibration
     + offset (2386-2504MHz).
   - Experiments: `TUNESW <index> <offset>` (raw calibration, index = MHz - 2400, offset in 1/1024
     MHz), `I2CR/I2CW/I2CD` (analog registers, RF PLL: block 98 host 1), `REGR/REGW` (registers),
     `FTAB <index>` (PLL table entry).
   - With `LPF 0` (ESP-SDR), 80MS/s captures show +-38MHz around the LO.
-- `esp-sdr-chromatic.patch` (GPL-3.0, ESP-SDR): hooks in the ESP32 receiver (`QSPI CTUNE FREQK`
-  capabilities).
+- `esp-sdr-chromatic.patch` (GPL-3.0, ESP-SDR): hooks in the ESP32 receiver (`QSPI CTUNE FREQK
+  LO56` capabilities, LO selector after the RX setup).
 - `build.sh`: fetches ESP-SDR (pinned), applies the patch, builds for the ESP32 (needs the ESP-IDF
   pinned by ESP-SDR in `firmware-targets.json`, sourced: `. export.sh`).
 
