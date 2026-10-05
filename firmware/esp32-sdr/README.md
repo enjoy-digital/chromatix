@@ -35,8 +35,17 @@ standard bitstream).
   a capture then always sees the same part of the period, drifting by the clocks' ppm only (LTE:
   the PSS always ~0.8ms in, the PBCH never in the capture). Command:
   - `CAPDLY <max_us>`/`CAPDLY?`: random delay 0..max_us (<= 10000) before each capture (0: none).
+- `chromatic_wifi.c/h` (BSD-2-Clause): Wi-Fi scanner on the ESP32's own radio (promiscuous mode).
+  - `WSNIFF <channel 1-14> <ms>`: summarizes the frames (access points, stations, deauthentication),
+    then restores the SDR receive setup.
+- `chromatic_tx.c/h` (BSD-2-Clause): bounded, legitimate transmit (ESP-SDR is receive only by
+  design: an arbitrary-waveform transmitter is a jamming risk). Both on documented ESP-IDF paths,
+  duration capped, auto-stopped, then the receive setup is restored:
+  - `WTONE <channel 1-14> <ms> [backoff]` / `WTONEB <channel 0-39> <ms> [backoff]`: single-carrier CW
+    test tone (RF certification-test path, `esp_phy_wifi_tx_tone`/`esp_phy_bt_tx_tone`).
+  - `WTX <channel 1-14> <ms>`: self-identifying open SoftAP beacon "ChromatiX-TX".
 - `esp-sdr-chromatic.patch` (GPL-3.0, ESP-SDR): hooks in the ESP32 receiver (`QSPI CTUNE FREQK
-  LO56 CAPDLY` capabilities, LO selector after the RX setup, capture delay).
+  LO56 CAPDLY WSNIFF WTONE WTX` capabilities, LO selector after the RX setup, capture delay).
 - `build.sh`: fetches ESP-SDR (pinned), applies the patch, builds for the ESP32 (needs the ESP-IDF
   pinned by ESP-SDR in `firmware-targets.json`, sourced: `. export.sh`).
 

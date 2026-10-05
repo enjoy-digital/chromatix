@@ -328,7 +328,7 @@ LO ratio measured as the baseband shift of the comb lines for a PLL step, wide 8
 
 <img src="images/sdr_ui_scan_ism.png" width="320" alt="Band scan, 2.4GHz ISM"> <img src="images/sdr_ui_lte_b7.png" width="320" alt="LTE B7 DL preset (80MHz span)">
 
-## Tools: cell scanner, BLE, signal identification, DECT, 802.15.4, hunt
+## Tools: cell scanner, BLE, signal identification, DECT, 802.15.4, hunt, Wi-Fi, transmit
 
 Menu > TOOL selects a tool in place of the spectrum views. The tools share the radio, display and
 controls services of the application (`app.h`), each has its help page (Menu > HELP). Their DSP
@@ -345,6 +345,7 @@ inverted spectrum, noise, frequency offsets).
 | 802.15.4 sniffer | Channels 11-26 | Short frames (1ms captures: ACKs, short data/commands): networks (PAN IDs), Zigbee/6LoWPAN, addresses | Synthetic (no traffic here) |
 | Hunt | 1775-2890MHz | Channel power (100kHz-10MHz) gain corrected (auto-ranged manual gain), peak hold, history, tone: interference hunting, direction finding | On the air |
 | Wi-Fi scanner | Channels 1-13 | ESP32 Wi-Fi radio (not SDR): access points (SSID, security, signal, clients), stations (associated/probing), channel occupancy (best of 1/6/11), deauth alert | On the air (home/neighbour APs, clients, hidden SSIDs) |
+| Transmit | Channels 1-14 / BLE 0-39 | ESP32 radio (not SDR): bounded CW test tone (Wi-Fi/BLE band, certification-test carrier) or a self-identifying open SoftAP beacon ("ChromatiX-TX"), each duration capped and auto-stopped; a known emitter for Hunt/Signal ID and LO-error calibration | On the air (beacon seen on the host, CH 1/6; RX restored after) |
 
 <img src="images/sdr_ui_menu.png" width="320" alt="Menu: tool"> <img src="images/sdr_tool_cell.png" width="320" alt="Cell scanner, B7">
 
@@ -355,6 +356,8 @@ inverted spectrum, noise, frequency offsets).
 <img src="images/sdr_tool_dect.png" width="320" alt="DECT scanner"> <img src="images/sdr_tool_zigbee.png" width="320" alt="802.15.4 sniffer">
 
 <img src="images/sdr_tool_wifi_aps.png" width="320" alt="Wi-Fi access points"> <img src="images/sdr_tool_wifi_channels.png" width="320" alt="Wi-Fi channel occupancy">
+
+<img src="images/sdr_tool_tx.png" width="320" alt="Transmit tool: CW tone"> <img src="images/sdr_tool_tx_air.png" width="320" alt="Transmit tool: on air">
 
 **Cell scanner** (`lte.c`, `tool_cell.c`):
 - **Sweep:** wide captures (80MS/s, RX filter opened, flat +-25MHz), 4 averaged per 50MHz step.
@@ -410,6 +413,27 @@ points, stations, deauthentication frames); the SDR receive setup is restored af
 scans channels 1-13 in turn. It decodes complete frames (SSIDs, security from the RSN/WPA elements,
 associated stations, beacon/traffic counts) that the raw 1ms captures cannot. Station addresses in
 probe requests are often randomized, so they show presence, not a device identity over time.
+
+**Transmit** (`tool_tx.c`, ESP32 `chromatic_tx.c`): ESP-SDR is receive only, deliberately — an
+arbitrary-waveform transmitter on the ESP32 modem path is a jamming risk, which is why upstream left
+it out ("could be abused for jamming or other malicious purposes"). This adds only two bounded,
+legitimate transmitters, both on documented ESP-IDF paths, each duration capped and auto-stopped, as
+a known emitter to close the loop with the receive tools (find it with Hunt/Signal ID, calibrate the
+LO error against it):
+- **CW test tone:** `WTONE <channel 1-14> <ms> [backoff]` (Wi-Fi band) and `WTONEB <channel 0-39>
+  <ms> [backoff]` (BLE band) key a single carrier through the RF certification-test path
+  (`esp_phy_wifi_tx_tone` / `esp_phy_bt_tx_tone`) — one controllable carrier for RF-path
+  characterization, not an arbitrary waveform. `backoff` attenuates the power (0.25dB units, larger =
+  lower); a floor keeps the tone off full power.
+- **SoftAP beacon:** `WTX <channel 1-14> <ms>` beacons an open access point "ChromatiX-TX" through
+  the normal radio stack for the window, then stops — the standard, reliably discoverable way for the
+  ESP32 to transmit a Wi-Fi beacon, and clearly a test network, not an impersonation.
+
+Nothing is emitted on its own: a transmission is explicit (A), the ESP32 brings the station/AP
+interface up only for the window and restores the null + promiscuous receive state after, so the SDR
+captures and the Wi-Fi scanner work again immediately. Verified on the air: the beacon appears on the
+host Wi-Fi scan (SSID "ChromatiX-TX", on the tool's channel), and a capture after a transmission
+returns live I/Q. 2.4GHz emission is regulated; this is for your own hardware on the ISM band.
 
 **DECT** (`dect.c`) and **802.15.4** (`zigbee.c`):
 - **DECT:** 4.608MS/s (4 samples/bit) GFSK, S-field sync (RFP/PP, both polarities), A-field
