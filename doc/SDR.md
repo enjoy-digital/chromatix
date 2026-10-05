@@ -289,6 +289,17 @@ LO ratio measured as the baseband shift of the comb lines for a PLL step, wide 8
   ESP32-C5 (dual band, supported by ESP-SDR: 5150-5895MHz) on a cartridge PCB streaming I/Q to the
   FPGA (eSpDR-like parallel link through the cartridge port), or an external downconverter
   (5.8GHz -> 2.4GHz block converter in front of the ESP32 antenna).
+- **LO doubler search: none.** The 5GHz ESP32 FPV/SDR projects ([ESPsoup](https://github.com/pit711/ESPsoup):
+  2.13-2.73GHz and 4.79-5.99GHz, analog FPV video including 5.8GHz Raceband/Fatshark/Boscam;
+  [C5VRX](https://github.com/KonradIT/C5VRX): 5.8GHz analog FPV receiver) run on the **ESP32-C5**,
+  a dual-band chip (its 4.79-5.99GHz range is twice a 2.4-3.0GHz synthesizer: 5GHz LO path and
+  front-end). On the console ESP32 (ESP32-U4WDH rev 3.1, 2.4GHz-only), the analog blocks were
+  mapped (0x62 RF PLL, 0x63 SDM word, 0x64, 0x65 CKGEN, 0x66 BBPLL, 0x67 RX filter, 0x68, 0x6a
+  bias, 0x6b) and every bit of 0x62 (except the capacitor code), 0x64 and 0x65 flipped with the LO
+  ratio measured: no x2 mode (0x62:2[3]/0x62:3[3] only detune the PLL, 0x62:3[5] stops it); a
+  0x68 bit stops the ESP32 itself (clock: recovered by an ESP32 reset through the standard
+  bitstream). The 2.4GHz analog FPV channels (2414-2468MHz) are in range, but video needs
+  continuous capture (ESP32 bursts: 410us at 40MS/s, a frame is 20ms).
 
 ## Handheld UI
 
