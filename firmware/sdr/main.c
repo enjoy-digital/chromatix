@@ -231,7 +231,7 @@ static char esp_info[48];
 
 /* Stock ESP-SDR: the ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz,
    2484MHz): its out of channel frequencies don't move the LO (measured on the console crystal
-   harmonics). The Chromatic ESP-SDR fork tunes 1792-2880MHz in kHz steps (FREQK). */
+   harmonics). The Chromatic ESP-SDR fork tunes 1775-2890MHz in kHz steps (FREQK). */
 static int next_channel(int mhz, int dir)
 {
 	static const int channels[] = {

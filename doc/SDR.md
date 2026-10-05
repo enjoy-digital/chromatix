@@ -249,15 +249,15 @@ external signal generator, for 1842-2209MHz with its tuning.
 
 `firmware/esp32-sdr` applies it on top of the table tuning: below 2150MHz, the PLL is tuned to 6/5
 of the requested frequency (2150-2580MHz, calibration in normal mode) and the selector is set after
-the RX setup (3ms settling): **1792-2880MHz** in total (`RANGEK 1792000 2880000`, `LO56`
-capability).
+the RX setup (3ms settling): **1792-2880MHz** in total (`LO56` capability), then 1775-2890MHz with
+the VCO edges (see below).
 
 - **Accuracy** (console crystal harmonics, interpolated peaks): LO within -1..-4kHz at 1793.5,
   1812.25, 1838, 1866.7, 1897.3, 1931, 1965.4, 2003.1, 2047.7, 2081.25 and 2146.5MHz.
 - **Real signal**: a 15MHz LTE band 3 downlink carrier at 1845-1860MHz (at LO 1842MHz, also seen
   at LO 1890MHz: same absolute frequency).
 - **Console**: presets LTE B3 DL, DECT, LTE B1 DL (2110-2170MHz now fully covered), overlays B3
-  DL/DECT, scan ranges clipped to the tuning range (full: 1792-2880MHz in 17 steps, 1.8G, B3/DECT,
+  DL/DECT, scan ranges clipped to the tuning range (full: 1775-2890MHz in 18 steps, 1.8G, B3/DECT,
   LTE B1); SoapyChromatic/`chromatic_sdr.py` follow `RANGEK?`.
 - Our ESP-SDR base stays pinned (550fade): the newer upstream ESP32 changes (5/6 mode and the PLL
   capacitor release for its own direct tuning) are superseded by the fork's tuning.
@@ -265,6 +265,30 @@ capability).
 <img src="images/sdr_host_1842_80msps.png" width="800" alt="LTE band 3 downlink carrier at 1845-1860MHz">
 
 <img src="images/sdr_ui_lte_b3.png" width="320" alt="Console: LTE B3 DL preset"> <img src="images/sdr_ui_scan_full.png" width="320" alt="Console: full scan 1792-2880MHz">
+
+## Range search: VCO edges, LO dividers, 5.8GHz (2026-10-05)
+
+Further range extension attempts on the console ESP32 (references: console crystal harmonics,
+LO ratio measured as the baseband shift of the comb lines for a PLL step, wide 80MS/s captures):
+
+- **VCO edges: 1775-2890MHz.** The VCO capacitor word (RF PLL block 0x62 reg 1) has coarse/fine
+  nibbles; forcing codes shows the lock window per frequency (~3-5 codes: at 2147MHz low nibble
+  10-12, at 2140MHz 12-15, at 2130MHz 15 only with the coarse bits saturated). The VCO locks from
+  **2130MHz (code 255)** to **2890MHz (code 0)**: the capacitor bank ends (no 9th bit: reg 2 bit 4
+  has no effect). The calibration started from the fitted code finds a locking code up to both
+  edges: table tuning **2130-2890MHz**, with the 5/6 LO **1775-2890MHz** (`RANGEK 1775000 2890000`).
+  Measured: LO within -0.5..-2.8kHz at 2131.5-2152.6MHz and 2876.8-2888.6MHz.
+- **Other LO dividers: none.** Every bit of the CKGEN block (0x65 host 4, registers 0/1/3/4) was
+  flipped and the LO ratio measured: only reg 0 bit 4 changes it (5/6); reg 0 bits 2/5/6 stop the
+  receive path (all 16 combinations tried: only 0x63/0x73 receive), the other bits have no effect.
+- **5.8GHz: not with the ESP32 radio.** With 5GHz access points nearby (channel 36 at 5180MHz,
+  channel 108 at 5540MHz), no LO harmonic response was found: burst activity at LO 2768/2773MHz
+  (2xLO = 5536-5546MHz) and 1844/1849MHz (3xLO = 5532-5547MHz) only moves 1:1 with the LO (real
+  2.75GHz/DECT signals), the comb lines show no 2x/3x response either. The ESP32 front-end (LNA,
+  matching, antenna for 2.4GHz) and mixer don't receive 5GHz. 5.8GHz needs other hardware: an
+  ESP32-C5 (dual band, supported by ESP-SDR: 5150-5895MHz) on a cartridge PCB streaming I/Q to the
+  FPGA (eSpDR-like parallel link through the cartridge port), or an external downconverter
+  (5.8GHz -> 2.4GHz block converter in front of the ESP32 antenna).
 
 ## Handheld UI
 
@@ -275,7 +299,7 @@ capability).
 - **Spectrum**: frequency axis labels (adapted to the span), known bands (B1 DL, B40, ISM, B7
   UL/B38/B7 DL), Wi-Fi channel numbers, BLE advertising channels, peak hold, cursor.
 - **Views** (Select): spectrum + waterfall, waterfall, **band scan** (sweep of a range in 64MHz
-  steps with the 80MS/s wide captures: full 1792-2880MHz in 17 steps, 2.4G ISM, 1.8G, B3/DECT,
+  steps with the 80MS/s wide captures: full 1775-2890MHz in 18 steps, 2.4G ISM, 1.8G, B3/DECT,
   LTE B1/B40/B7, low/high; Up/Down: range, cursor + A: open in the spectrum view).
 - **Controls**: Left/Right: tune (held: x5 after ~1s), Up/Down: tuning step (10kHz-20MHz), A:
   span 16/40/80MHz, B: cursor (Left/Right: move, A: tune to), Start: peak hold, Menu: menu.

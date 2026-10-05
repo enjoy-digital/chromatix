@@ -15,15 +15,18 @@
 //
 // Table tuning (mode 1, default): the 85-entry frequency table read by the calibration holds the
 // PLL divider and the VCO capacitor code: loading a borrowed entry with the requested divider and
-// a capacitor code close to the result makes the calibration lock from 2150 to 2880MHz (2-4 comb
-// lines verified at 80MS/s; below, the calibration fails from any starting code; above, the
-// capacitor bank ends).
+// a capacitor code close to the result makes the calibration lock from 2130 to 2890MHz (2-4 comb
+// lines verified at 80MS/s): the ends of the VCO capacitor bank.
 //
 // 5/6 LO mode (mode 1 below 2150MHz): the CKGEN selector (analog block 0x65, host 4, register 0,
 // bit 4: libphy patched ram_chip_i2c_* functions) makes the receive LO 5/6 of the PLL frequency
 // (found by h0m3us3r's eSpDR, https://github.com/h0m3us3r/eSpDR, and qualified on the ESP32 by
 // ESP-SDR): the PLL is tuned to 6/5 of the requested frequency (calibration in normal mode), the
-// selector set after the RX setup: 1792-2150MHz (PLL 2150-2580MHz).
+// selector set after the RX setup: 1775-2150MHz (PLL 2130-2580MHz).
+//
+// VCO edges, measured with forced capacitor codes (RF PLL block 0x62 reg 1, coarse/fine nibbles):
+// the VCO locks from 2130 (code 255) to 2890MHz (code 0), the calibration started from the fitted
+// code finds a locking code up to these edges.
 //
 // Offset tuning (mode 2), measured on the Chromatic (console 24MHz crystal harmonics as
 // references, interpolated peaks, ~1kHz, the 2400MHz line excluded: another source ~16kHz above
@@ -67,9 +70,10 @@ extern void     ram_chip_i2c_writeReg(unsigned block, unsigned host, unsigned re
 #define LO56_MASK  0x10
 
 /* Tuning ranges (kHz). */
-#define TABLE_MIN_KHZ 2150000 /* Mode 1: table tuning (PLL range). */
-#define TABLE_MAX_KHZ 2880000
-#define LO56_MIN_KHZ  1792000 /* Mode 1: 5/6 LO below TABLE_MIN_KHZ (PLL >= 2150.4MHz). */
+#define TABLE_MIN_KHZ 2130000 /* Mode 1: table tuning (PLL range: VCO capacitor bank ends). */
+#define TABLE_MAX_KHZ 2890000
+#define LO56_MIN_KHZ  1775000 /* Mode 1: 5/6 LO below 2150MHz (PLL >= 2130MHz). */
+#define LO56_MAX_KHZ  2150000
 #define TUNE_MIN_KHZ  2386000 /* Mode 2: calibration + offset. */
 #define TUNE_MAX_KHZ  2504000
 #define OFFSET_SCALE  1.0546  /* Mode 2: LO move (MHz) per offset MHz. */
@@ -114,7 +118,7 @@ static void ftab_write(unsigned addr, uint32_t value)
 }
 
 /* VCO capacitor code (calibration starting point) measured from the calibrations results over
-   2150-2880MHz (quadratic fit, +-1.6). */
+   2150-2880MHz (quadratic fit, +-1.6, used from 2130 to 2890MHz). */
 static unsigned vco_dcap(double mhz)
 {
     double x = mhz - 2500;
@@ -162,9 +166,9 @@ bool chromatic_tune_khz(unsigned khz)
     lo56 = false;
     chromatic_tune_apply_lo(); /* Calibrations in normal mode. */
     if (chromatic_tune_mode == 1) {
-        if (khz >= TABLE_MIN_KHZ && khz <= TABLE_MAX_KHZ)
+        if (khz >= LO56_MAX_KHZ && khz <= TABLE_MAX_KHZ)
             return tune_table(khz/1000.0);
-        if (khz >= LO56_MIN_KHZ && khz < TABLE_MIN_KHZ) {
+        if (khz >= LO56_MIN_KHZ && khz < LO56_MAX_KHZ) {
             lo56 = true;
             return tune_table(khz/1000.0*6/5);
         }

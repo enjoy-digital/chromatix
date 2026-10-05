@@ -18,11 +18,12 @@ standard bitstream).
   2412MHz and the LO doesn't move (measured on the Chromatic). The fork loads an entry of the PHY
   PLL frequency table (85 entries: 2400-2484MHz) with the requested divider and a VCO capacitor
   code close to the result, then runs the PHY software calibration (`set_chan_freq_sw_start`):
-  2150-2880MHz; below, the 5/6 LO mode (CKGEN 0x65 host 4 reg 0 bit 4, found by
-  [h0m3us3r's eSpDR](https://github.com/h0m3us3r/eSpDR), qualified on the ESP32 by ESP-SDR): PLL at
-  6/5 of the frequency, selector set after the RX setup: **1792-2880MHz in 1kHz steps, LO within
+  2130-2890MHz (VCO capacitor bank ends); below, the 5/6 LO mode (CKGEN 0x65 host 4 reg 0 bit 4,
+  found by [h0m3us3r's eSpDR](https://github.com/h0m3us3r/eSpDR), qualified on the ESP32 by
+  ESP-SDR): PLL at 6/5 of the frequency, selector set after the RX setup: **1775-2890MHz in 1kHz
+  steps, LO within
   ~2-4kHz** (console crystal harmonics as references, see doc/SDR.md). Commands:
-  - `FREQK <kHz>` (and `FREQ <MHz>`), `RANGEK?` (`RANGEK 1792000 2880000`).
+  - `FREQK <kHz>` (and `FREQ <MHz>`), `RANGEK?` (`RANGEK 1775000 2890000`).
   - `TUNEMODE <0|1|2>`/`TUNEMODE?`: 0: ESP-SDR tuning, 1: table tuning (default), 2: calibration
     + offset (2386-2504MHz).
   - Experiments: `TUNESW <index> <offset>` (raw calibration, index = MHz - 2400, offset in 1/1024
