@@ -11,7 +11,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_wifi.h"
-#include "soc/soc.h"
 
 #include "burst_serial.h"
 #include "chromatic_tune.h"
@@ -21,7 +20,6 @@
 #define MAX_STAS 48
 #define MAX_DAS  8
 
-extern void set_chanfreq(unsigned mhz, unsigned mode);
 
 enum {
     SEC_OPEN = 0, SEC_WEP, SEC_WPA, SEC_WPA2, SEC_WPA3, SEC_WPA23, SEC_ENT,

@@ -60,7 +60,6 @@ static int        ch_frames[14];     /* Frames seen per channel (occupancy). */
 static int        deauth;            /* Deauth/disassoc frames in the last scan. */
 static char       deauth_src[18];
 static uint32_t   deauth_ms;
-static uint32_t   scans;
 
 static const char *const help[] = {
 	"WIFI SCANNER (ESP32 RADIO):",
@@ -88,9 +87,16 @@ static struct ap *ap_get(const char *bssid)
 	for (int i = 0; i < naps; i++)
 		if (!strcmp(aps[i].bssid, bssid))
 			return &aps[i];
-	if (naps >= MAX_APS)
-		return NULL;
-	struct ap *a = &aps[naps++];
+	struct ap *a;
+	if (naps < MAX_APS)
+		a = &aps[naps++];
+	else {
+		/* Full: reuse the oldest entry. */
+		a = &aps[0];
+		for (int i = 1; i < naps; i++)
+			if ((int32_t)(aps[i].last_ms - a->last_ms) < 0)
+				a = &aps[i];
+	}
 	memset(a, 0, sizeof(*a));
 	snprintf(a->bssid, sizeof(a->bssid), "%s", bssid);
 	return a;
@@ -101,9 +107,16 @@ static struct sta *sta_get(const char *mac)
 	for (int i = 0; i < nstas; i++)
 		if (!strcmp(stas[i].mac, mac))
 			return &stas[i];
-	if (nstas >= MAX_STAS)
-		return NULL;
-	struct sta *s = &stas[nstas++];
+	struct sta *s;
+	if (nstas < MAX_STAS)
+		s = &stas[nstas++];
+	else {
+		/* Full (MAC-randomized probe requests): reuse the oldest entry. */
+		s = &stas[0];
+		for (int i = 1; i < nstas; i++)
+			if ((int32_t)(stas[i].last_ms - s->last_ms) < 0)
+				s = &stas[i];
+	}
 	memset(s, 0, sizeof(*s));
 	snprintf(s->mac, sizeof(s->mac), "%s", mac);
 	return s;
@@ -153,6 +166,8 @@ static void parse_sta(char *line)
 
 static void count_clients(void)
 {
+	/* Per sweep: client counts, and APs per home channel (recent APs: adjacent-channel leakage
+	   would otherwise inflate neighbouring channels). */
 	for (int i = 0; i < naps; i++)
 		aps[i].clients = 0;
 	for (int i = 0; i < nstas; i++)
@@ -162,6 +177,10 @@ static void count_clients(void)
 					aps[j].clients++;
 					break;
 				}
+	memset(ch_aps, 0, sizeof(ch_aps));
+	for (int i = 0; i < naps; i++)
+		if (aps[i].channel >= 1 && aps[i].channel <= 13 && app_ms() - aps[i].last_ms < 30000)
+			ch_aps[aps[i].channel]++;
 }
 
 static int scan_channel(void)
@@ -170,14 +189,12 @@ static int scan_channel(void)
 	char cmd[32], line[128];
 	snprintf(cmd, sizeof(cmd), "WSNIFF %d %d", channel, DWELL_MS);
 	esp32sdr_send(cmd);
-	ch_aps[channel] = 0;
 	for (;;) {
 		int n = esp32sdr_read_line(line, sizeof(line), DWELL_MS + REPLY_MS);
 		if (n < 0)
 			return -1;
 		if (!strncmp(line, "WAP ", 4)) {
 			parse_ap(line + 4);
-			ch_aps[channel]++;
 		} else if (!strncmp(line, "WST ", 4)) {
 			parse_sta(line + 4);
 		} else if (!strncmp(line, "WDA ", 4)) {
@@ -309,7 +326,6 @@ static int update(void)
 	channel++;
 	if (channel > 13) {
 		channel = 1;
-		scans++;
 		count_clients();
 	}
 
