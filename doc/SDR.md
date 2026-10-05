@@ -289,8 +289,8 @@ LO ratio measured as the baseband shift of the comb lines for a PLL step, wide 8
   ESP32-C5 (dual band, supported by ESP-SDR: 5150-5895MHz) on a cartridge PCB streaming I/Q to the
   FPGA (eSpDR-like parallel link through the cartridge port), or an external downconverter
   (5.8GHz -> 2.4GHz block converter in front of the ESP32 antenna).
-- **LO doubler search: none.** The 5GHz ESP32 FPV/SDR projects ([ESPsoup](https://github.com/pit711/ESPsoup):
-  2.13-2.73GHz and 4.79-5.99GHz, analog FPV video including 5.8GHz Raceband/Fatshark/Boscam;
+- **LO doubler search: none.** The 5GHz ESP32 FPV/SDR projects
+  ([ESPsoup](https://github.com/pit711/ESPsoup): 2.13-2.73GHz and 4.79-5.99GHz, analog FPV video including 5.8GHz Raceband/Fatshark/Boscam;
   [C5VRX](https://github.com/KonradIT/C5VRX): 5.8GHz analog FPV receiver) run on the **ESP32-C5**,
   a dual-band chip (its 4.79-5.99GHz range is twice a 2.4-3.0GHz synthesizer: 5GHz LO path and
   front-end). On the console ESP32 (ESP32-U4WDH rev 3.1, 2.4GHz-only), the analog blocks were
