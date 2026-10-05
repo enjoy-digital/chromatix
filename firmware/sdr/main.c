@@ -16,7 +16,7 @@
 //
 // Tools (menu, app.h): cell scanner (tool_cell.c), BLE scanner (tool_ble.c), signal identification
 // (tool_signals.c), DECT scanner (tool_dect.c), 802.15.4 sniffer (tool_zigbee.c), hunt
-// (tool_hunt.c).
+// (tool_hunt.c), Wi-Fi scanner (tool_wifi.c).
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -225,6 +225,7 @@ static const struct tool *const tools[] = {
 	&tool_dect,
 	&tool_zigbee,
 	&tool_hunt,
+	&tool_wifi,
 };
 #define TOOLS (int)(sizeof(tools)/sizeof(tools[0]))
 

@@ -31,6 +31,8 @@ int      esp32sdr_rx(void);
 void     esp32sdr_send(const char *cmd);
 /* Command: reply line (without newline) in reply, returns its length or -1 (timeout). */
 int      esp32sdr_cmd(const char *cmd, char *reply, int len, uint32_t timeout_ms);
+/* Read one reply line (multi-line replies, ex: WSNIFF): returns its length or -1 (timeout). */
+int      esp32sdr_read_line(char *line, int len, uint32_t timeout_ms);
 /* QSPI transport (firmware/esp32-sdr): payloads written to buf (main RAM, at psram_address in the
    PSRAM, 1KB aligned, readable/writable up to the next 1KB after the payload), 0: UART. Returns -1
    if not supported (stock ESP-SDR: UART). */

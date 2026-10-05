@@ -29,6 +29,8 @@ bool chromatic_tune(unsigned mhz);
 bool chromatic_tune_khz(unsigned khz);
 /* Receive LO selector of the last tuning (5/6 mode), to apply after the RX setup. */
 void chromatic_tune_apply_lo(void);
+/* Normal receive LO (5/6 mode off: Wi-Fi reception). */
+void chromatic_tune_normal_lo(void);
 /* Tuning commands (replies on the burst serial), prepare: RX path setup after a tuning. */
 bool chromatic_tune_command(const char *line, void (*prepare)(void));
 

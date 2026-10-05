@@ -122,6 +122,11 @@ int esp32sdr_cmd(const char *cmd, char *reply, int len, uint32_t timeout_ms)
 	return read_line(reply, len, esp32sdr_ms() + timeout_ms);
 }
 
+int esp32sdr_read_line(char *line, int len, uint32_t timeout_ms)
+{
+	return read_line(line, len, esp32sdr_ms() + timeout_ms);
+}
+
 uint32_t esp32sdr_crc32(const uint8_t *data, int len)
 {
 	static uint32_t table[256];

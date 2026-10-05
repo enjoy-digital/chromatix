@@ -56,6 +56,7 @@ extern const struct tool tool_signals;
 extern const struct tool tool_dect;
 extern const struct tool tool_zigbee;
 extern const struct tool tool_hunt;
+extern const struct tool tool_wifi;
 
 /* Radio. */
 extern int app_freq_min; /* Tuning range (kHz). */

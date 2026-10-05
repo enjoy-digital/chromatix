@@ -161,6 +161,12 @@ void chromatic_tune_apply_lo(void)
     }
 }
 
+void chromatic_tune_normal_lo(void)
+{
+    lo56 = false;
+    chromatic_tune_apply_lo();
+}
+
 bool chromatic_tune_khz(unsigned khz)
 {
     lo56 = false;

@@ -1,15 +1,15 @@
 diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
-index 8a543a9..6b7363b 100644
+index 8a543a9..c42b83c 100644
 --- a/main/CMakeLists.txt
 +++ b/main/CMakeLists.txt
 @@ -15,6 +15,12 @@ if(IDF_TARGET STREQUAL "esp32c61" OR IDF_TARGET STREQUAL "esp32c6" OR IDF_TARGET
  endif()
  set(probes RING_PROBE)
  set(fragments)
-+# ChromatiX: Chromatic QSPI transport, tuning and capture timing (original ESP32).
++# ChromatiX: Chromatic QSPI transport, tuning, capture timing and Wi-Fi scanner (original ESP32).
 +if(IDF_TARGET STREQUAL "esp32")
 +    list(APPEND sources "chromatic/chromatic_qspi.c" "chromatic/chromatic_tune.c"
-+        "chromatic/chromatic_capture.c")
++        "chromatic/chromatic_capture.c" "chromatic/chromatic_wifi.c")
 +    list(APPEND dependencies esp_driver_spi)
 +endif()
  if(NOT IDF_TARGET STREQUAL "esp32s3")
@@ -25,20 +25,21 @@ index 8a543a9..6b7363b 100644
  
  # Keep the linker guard beside the backend whose SRAM aperture it protects.
 diff --git a/main/targets/esp32/receiver.c b/main/targets/esp32/receiver.c
-index f1a7786..2f2e714 100644
+index f1a7786..83a2666 100644
 --- a/main/targets/esp32/receiver.c
 +++ b/main/targets/esp32/receiver.c
-@@ -24,6 +24,9 @@
+@@ -24,6 +24,10 @@
  #include "soc/dport_reg.h"
  #include "soc/dport_access.h"
  #include "heap_memory_layout.h"
 +#include "chromatic_qspi.h"
 +#include "chromatic_tune.h"
 +#include "chromatic_capture.h"
++#include "chromatic_wifi.h"
  
  /* Reserve both SRAM banks, including their instruction aliases. Mode 2 only
   * exposes 32 KiB to MAC; mode 3 exposes the entire 64 KiB capture aperture. */
-@@ -75,6 +78,8 @@ static void prepare_rx(void) {
+@@ -75,6 +79,8 @@ static void prepare_rx(void) {
      rom_pbus_xpd_tx_off();
      rom_pbus_xpd_rx_on(1);
      rom_set_rxclk_en(1);
@@ -47,7 +48,7 @@ index f1a7786..2f2e714 100644
  }
  
  /* Clock selectors: 0=16 MS/s, 1=80 MS/s, 2=40 MS/s. Hardware sampling,
-@@ -86,6 +91,8 @@ static bool acquire_iq(unsigned n, unsigned source, unsigned clock, unsigned *ca
+@@ -86,6 +92,8 @@ static bool acquire_iq(unsigned n, unsigned source, unsigned clock, unsigned *ca
      }
      REG_WRITE(DUMP_CTRL, 0);
      for (unsigned j = 0; j < CAPACITY; j++) samples[j] = SENTINEL;
@@ -56,7 +57,7 @@ index f1a7786..2f2e714 100644
      filter_apply();
      uint32_t owner = DPORT_REG_READ(DPORT_IRAM_DRAM_AHB_SEL_REG);
      uint32_t byte_select = REG_READ(DUMP_BYTES);
-@@ -152,6 +159,11 @@ static bool capture(unsigned n, unsigned source, unsigned clock, unsigned bits)
+@@ -152,6 +160,11 @@ static bool capture(unsigned n, unsigned source, unsigned clock, unsigned bits)
      uint32_t crc = esp_rom_crc32_le(0, (const uint8_t *)samples, bytes);
      char header[96];
      int length = snprintf(header, sizeof(header), "DATA %u %08"PRIx32" %u\n", n, crc, elapsed);
@@ -68,7 +69,7 @@ index f1a7786..2f2e714 100644
      return burst_serial_send(header, length) && burst_serial_send(samples, bytes);
  }
  
-@@ -165,6 +177,8 @@ extern void set_chanfreq(unsigned mhz, unsigned mode);
+@@ -165,6 +178,8 @@ extern void set_chanfreq(unsigned mhz, unsigned mode);
  extern void rom_set_rf_freq_offset(unsigned crystal, unsigned mhz, int offset);
  
  static void tune_rx(unsigned mhz) {
@@ -77,7 +78,7 @@ index f1a7786..2f2e714 100644
      bool channel = (mhz >= 2412 && mhz <= 2472 && (mhz-2412)%5 == 0) || mhz == 2484;
      /* Calibrate on a real channel before bypassing the channel-number mapping.
       * Use the PHY entry point even for repeated requests: the Wi-Fi API can
-@@ -185,16 +199,23 @@ static bool capture_rate(unsigned n, unsigned rate, unsigned format) {
+@@ -185,16 +200,24 @@ static bool capture_rate(unsigned n, unsigned rate, unsigned format) {
  }
  
  
@@ -93,12 +94,13 @@ index f1a7786..2f2e714 100644
 +    if (chromatic_qspi_command(line)) return;
 +    if (chromatic_tune_command(line, tune_prepare)) return;
 +    if (chromatic_capture_command(line)) return;
++    if (chromatic_wifi_command(line, tune_prepare)) return;
      unsigned n, rate, repeats, format;
      uint64_t nonce;
      char extra;
      if (!strcmp(line, "INFO")) reply("ESP32SDR 6 burst 16380\n");
 -    else if (!strcmp(line, "CAPS")) reply("CAPS SPEC SPECN SPECCAPS SPECSTAT DCT UARTBAUD RXLIMITS SERIALLEASE TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8\n");
-+    else if (!strcmp(line, "CAPS")) reply("CAPS SPEC SPECN SPECCAPS SPECSTAT DCT UARTBAUD RXLIMITS SERIALLEASE TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8 QSPI CTUNE FREQK LO56 CAPDLY\n");
++    else if (!strcmp(line, "CAPS")) reply("CAPS SPEC SPECN SPECCAPS SPECSTAT DCT UARTBAUD RXLIMITS SERIALLEASE TUNEEXT RX40 RX16 LPFANA GAIN HWAGC IQ8 QSPI CTUNE FREQK LO56 CAPDLY WSNIFF\n");
      else if (sscanf(line, "BANDWIDTH %u %c", &n, &extra)==1 &&
               (!n || (n>=RX_BANDWIDTH_MIN && n<=RX_BANDWIDTH_MAX))) {
          rx_filter=rx_bandwidth_dcap(n); reply("OK\n");

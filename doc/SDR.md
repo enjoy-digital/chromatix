@@ -344,6 +344,7 @@ inverted spectrum, noise, frequency offsets).
 | DECT scanner | EU 1880-1900MHz, US 1920-1930MHz | Carriers activity, base stations (RFPI from the beacons), handset transmissions; A-field only (no voice) | Synthetic (no DECT base here) |
 | 802.15.4 sniffer | Channels 11-26 | Short frames (1ms captures: ACKs, short data/commands): networks (PAN IDs), Zigbee/6LoWPAN, addresses | Synthetic (no traffic here) |
 | Hunt | 1775-2890MHz | Channel power (100kHz-10MHz) gain corrected (auto-ranged manual gain), peak hold, history, tone: interference hunting, direction finding | On the air |
+| Wi-Fi scanner | Channels 1-13 | ESP32 Wi-Fi radio (not SDR): access points (SSID, security, signal, clients), stations (associated/probing), channel occupancy (best of 1/6/11), deauth alert | On the air (home/neighbour APs, clients, hidden SSIDs) |
 
 <img src="images/sdr_ui_menu.png" width="320" alt="Menu: tool"> <img src="images/sdr_tool_cell.png" width="320" alt="Cell scanner, B7">
 
@@ -352,6 +353,8 @@ inverted spectrum, noise, frequency offsets).
 <img src="images/sdr_tool_wifi.png" width="320" alt="Wi-Fi channels airtime"> <img src="images/sdr_tool_hunt.png" width="320" alt="Hunt">
 
 <img src="images/sdr_tool_dect.png" width="320" alt="DECT scanner"> <img src="images/sdr_tool_zigbee.png" width="320" alt="802.15.4 sniffer">
+
+<img src="images/sdr_tool_wifi_aps.png" width="320" alt="Wi-Fi access points"> <img src="images/sdr_tool_wifi_channels.png" width="320" alt="Wi-Fi channel occupancy">
 
 **Cell scanner** (`lte.c`, `tool_cell.c`):
 - **Sweep:** wide captures (80MS/s, RX filter opened, flat +-25MHz), 4 averaged per 50MHz step.
@@ -399,6 +402,14 @@ inverted spectrum, noise, frequency offsets).
 - **Drone alert:** needs long bursts (>= 150us) seen twice within 10s (no false alert over the
   tests here).
 - **Wi-Fi view:** airtime per channel, least busy of channels 1/6/11.
+
+**Wi-Fi scanner** (`tool_wifi.c`, ESP32 `chromatic_wifi.c`): the one tool that uses the ESP32's own
+Wi-Fi demodulator instead of the raw I/Q captures. `WSNIFF <channel> <ms>` puts the ESP32 in
+promiscuous mode on a channel for a time, parses the frames and replies with summary lines (access
+points, stations, deauthentication frames); the SDR receive setup is restored after. The console
+scans channels 1-13 in turn. It decodes complete frames (SSIDs, security from the RSN/WPA elements,
+associated stations, beacon/traffic counts) that the raw 1ms captures cannot. Station addresses in
+probe requests are often randomized, so they show presence, not a device identity over time.
 
 **DECT** (`dect.c`) and **802.15.4** (`zigbee.c`):
 - **DECT:** 4.608MS/s (4 samples/bit) GFSK, S-field sync (RFP/PP, both polarities), A-field
