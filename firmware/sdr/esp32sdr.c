@@ -53,8 +53,15 @@ void esp32sdr_flush(void)
 
 uint32_t esp32sdr_ms(void)
 {
+	/* 32-bit timer extended to 64 bits (wraps every ~64s at 67MHz: called more often). */
+	static uint32_t last;
+	static uint64_t high;
 	timer0_update_value_write(1);
-	return (0xffffffff - timer0_value_read())/(CONFIG_CLOCK_FREQUENCY/1000);
+	uint32_t now = 0xffffffff - timer0_value_read();
+	if (now < last)
+		high += (uint64_t)1 << 32;
+	last = now;
+	return (high + now)/(CONFIG_CLOCK_FREQUENCY/1000);
 }
 
 /* Lines ---------------------------------------------------------------------------------------- */

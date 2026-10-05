@@ -88,8 +88,45 @@ void lcd_present(void)
 		}
 }
 
+static uint32_t fb_busy(void)
+{
+	return (fb_status() >> CSR_FRAMEBUFFER_STATUS_BUSY_OFFSET) & ((1 << FB_SLOTS) - 1);
+}
+
+static int fb_copy(int slot, int buffer)
+{
+	/* Line 0 copy of a slot, returns 1 if no copy pending after it (polled ~1ms). */
+	framebuffer_line_write((buffer << CSR_FRAMEBUFFER_LINE_BUFFER_OFFSET) |
+		(slot << CSR_FRAMEBUFFER_LINE_SLOT_OFFSET));
+	for (int i = 0; i < 10000; i++)
+		if (!fb_busy())
+			return 1;
+	return 0;
+}
+
+static void fb_resync(void)
+{
+	/* The hardware copies the line buffers in order: after a CPU reset during an lcd_present, it
+	   waits for the next slot of the interrupted screen. All the slots requested (copied in the
+	   hardware's order, back to its expected slot), then slot 0 alone (copied if expected), else
+	   slots 3, 2, 1 until all copied: the hardware then expects slot 1. Copies to a hidden buffer
+	   line. */
+	int displayed = (fb_status() >> CSR_FRAMEBUFFER_STATUS_FRONT_OFFSET) & 0x3;
+	int buffer    = (displayed + 1) % FB_BUFFERS;
+	for (int s = 0; s < FB_SLOTS; s++)
+		if (!(fb_busy() & (1 << s)))
+			fb_copy(s, buffer);
+	if (!fb_copy(0, buffer))
+		for (int s = FB_SLOTS - 1; s > 0; s--)
+			if (fb_copy(s, buffer))
+				break;
+	fb_slot = 1;
+	fb_back = buffer;
+}
+
 void lcd_init(void)
 {
+	fb_resync();
 	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, 0);
 	for (int b = 0; b < FB_BUFFERS; b++)
 		lcd_present();
