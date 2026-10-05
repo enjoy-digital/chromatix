@@ -6,7 +6,8 @@
 // Signal identification tool: the 2.4GHz ISM band (2398-2485MHz) captured in two halves (80MS/s
 // wide captures), bursts classified (classify.c): waterfall with the bursts marked (class colors),
 // classes seen (count, last frequency/bandwidth/duration, age), drone alert (10MHz OFDM links, DJI
-// DroneID, continuous wideband video) with an optional alarm.
+// DroneID, continuous wideband video) with an optional alarm, Wi-Fi channels airtime (bursts time
+// per channel) and the least busy of channels 1/6/11.
 
 #include <stdio.h>
 #include <string.h>
@@ -42,6 +43,9 @@ static int         half;
 static int         floor_db4 = -1;
 static int         alarm;
 static int         paused;
+static int         view;                  /* 0: classes, 1: Wi-Fi channels airtime. */
+static uint32_t    busy_us[14];           /* Wi-Fi bursts time per channel (1-13). */
+static uint32_t    seen_us[14];           /* Observed time per channel. */
 static uint32_t    alert_ms;
 static int         alert_cls;
 
@@ -58,6 +62,7 @@ static const char *const help[] = {
 	"DRONE LINKS (10MHZ OFDM, DJI",
 	"DRONEID, WIDEBAND VIDEO).",
 	"",
+	"SELECT      VIEW: CLASSES/WIFI",
 	"START       DRONE ALARM ON/OFF",
 	"A           PAUSE",
 	"B           CLEAR",
@@ -80,6 +85,13 @@ static int khz_to_x(int khz)
 
 static void process(int n)
 {
+	/* Observed time of the channels in this half (centers within +-22MHz). */
+	for (int ch = 1; ch <= 13; ch++) {
+		int d = 2407000 + 5000*ch - centers[half];
+		if (d >= -SIG_USABLE_KHZ && d < SIG_USABLE_KHZ && (half == 1 || 2407000 + 5000*ch <
+			centers[1] - SIG_USABLE_KHZ))
+			seen_us[ch] += APP_SAMPLES*10/800; /* 80MS/s: 204.75us. */
+	}
 	/* Columns of this half (spectrum max) to the waterfall line, bursts to the stats/marks. */
 	for (int x = 0; x < LCD_WIDTH; x++) {
 		int khz = BAND_LO + (int)((int64_t)(2*x + 1)*(BAND_HI - BAND_LO)/(2*LCD_WIDTH));
@@ -103,6 +115,12 @@ static void process(int n)
 		for (int x = (x0 < 0) ? 0 : x0; x <= x1 && x < LCD_WIDTH; x++)
 			if (!marks[x] || sig_drone(s->cls))
 				marks[x] = s->cls + 1;
+		/* Wi-Fi airtime (nearest channel). */
+		if (s->cls == SIG_WIFI || s->cls == SIG_WIFI40) {
+			int ch = (s->khz - 2412000 + 2500)/5000 + 1;
+			if (ch >= 1 && ch <= 13)
+				busy_us[ch] += s->us;
+		}
 		/* Drone alert: drone class seen again within 10s (single bursts ignored). */
 		if (sig_drone(s->cls)) {
 			if (e->count > 1 && app_ms() - last < 10000) {
@@ -135,6 +153,40 @@ static void draw_line(void)
 	memset(marks, 0, sizeof(marks));
 }
 
+static int airtime(int ch)
+{
+	/* Wi-Fi bursts time / observed time (0.1%). */
+	return seen_us[ch] ? (int)((uint64_t)busy_us[ch]*1000/seen_us[ch]) : 0;
+}
+
+static void draw_wifi(void)
+{
+	/* Airtime bars (0-50%), least busy of channels 1/6/11 (overlapping channels weighted). */
+	char line[48];
+	int  y0 = LIST_Y + 8, h = LCD_HEIGHT - y0 - 18, best = 1, best_score = -1;
+	for (int c = 1; c <= 11; c += 5) {
+		int score = 0;
+		for (int k = c - 4; k <= c + 4; k++)
+			if (k >= 1 && k <= 13)
+				score += airtime(k)*(5 - ((k > c) ? k - c : c - k));
+		if (best_score < 0 || score < best_score) {
+			best_score = score;
+			best       = c;
+		}
+	}
+	lcd_text(1, LIST_Y, COLOR_DIM, "WIFI CHANNELS AIRTIME (0-50%)");
+	for (int ch = 1; ch <= 13; ch++) {
+		int x = 4 + (ch - 1)*12, a = airtime(ch), v = a*h/500;
+		v = (v < 1) ? 1 : (v > h) ? h : v;
+		lcd_rect(x, y0 + h - v, 9, v, (ch == best) ? COLOR_GREEN : COLOR_WIFI);
+		snprintf(line, sizeof(line), "%d", ch);
+		lcd_text(x + 5 - 2*(int)strlen(line), y0 + h + 2, COLOR_DIM, line);
+	}
+	snprintf(line, sizeof(line), "BEST OF 1/6/11: CH %d (%d.%d%%)", best, airtime(best)/10,
+		airtime(best) % 10);
+	lcd_text(1, LCD_HEIGHT - 7, COLOR_GREEN, line);
+}
+
 static void draw(void)
 {
 	char line[48];
@@ -149,6 +201,10 @@ static void draw(void)
 		snprintf(line, sizeof(line), "%d", f);
 		lcd_text((x < 8) ? 0 : x - 7, AXIS_Y + 2, COLOR_DIM, line);
 		lcd_rect(x, AXIS_Y, 1, 2, COLOR_DIM);
+	}
+	if (view == 1) {
+		draw_wifi();
+		return;
 	}
 	/* Classes seen (most recent first). */
 	int order[SIG_CLASSES], n = 0;
@@ -207,8 +263,14 @@ static void buttons(uint32_t p)
 		paused = !paused;
 		app_toast(paused ? "PAUSED" : "RUNNING");
 	}
+	if (p & (1 << BTN_SEL)) {
+		view = !view;
+		app_toast(view ? "WIFI CHANNELS AIRTIME" : "SIGNAL CLASSES");
+	}
 	if (p & (1 << BTN_B)) {
 		memset(seen, 0, sizeof(seen));
+		memset(busy_us, 0, sizeof(busy_us));
+		memset(seen_us, 0, sizeof(seen_us));
 		alert_ms = 0;
 		app_toast("CLEARED");
 	}
