@@ -11,7 +11,7 @@ CFLAGS += -I../common
 # Libraries (compiled by chromatix.py --with-app --build: no BIOS).
 LIBS = libc libcompiler_rt libbase
 
-OBJECTS = crt0.o main.o esp32sdr.o lcd.o dsp.o usblink.o console.o
+OBJECTS = crt0.o main.o esp32sdr.o lcd.o dsp.o usblink.o console.o lte.o tool_cell.o
 
 COMMA = ,
 REGULAR_LIBS = $(filter-out $(ALWAYS_LINK_LIBS),$(LIBS))

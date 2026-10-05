@@ -6,7 +6,10 @@
 # Copyright (c) 2026 Florent Kermarrec <florent@enjoy-digital.fr>
 # SPDX-License-Identifier: BSD-2-Clause
 
-"""SDR firmware tables (tables.h): FFT twiddles, Hann window, 4x6 font (from the LCD terminal)."""
+"""
+SDR firmware tables (tables.h): FFT twiddles, Hann window, channel filters (polyphase), 4x6 font
+(from the LCD terminal).
+"""
 
 import os
 import sys
@@ -15,7 +18,16 @@ import math
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from chromatix.gateware.terminal import FONT_4X6
 
-FFT_SIZE = 512
+FFT_SIZE     = 512  # Spectrum FFT.
+FFT_MAX_LOG2 = 11   # Largest FFT (twiddles).
+
+# Channel filters: (name, up, down, input rate (Hz), cutoff (Hz), taps per phase).
+FILTERS = [
+    ("lte",    3,  25, 16e6, 0.65e6, 96), # 16MS/s -> 1.92MS/s (LTE PSS/SSS: 128-point symbols).
+    ("ble",    1,   4, 16e6, 0.75e6, 96), # 16MS/s -> 4MS/s     (BLE 1Mb/s: 4 samples/bit).
+    ("dect",  36, 125, 16e6, 0.70e6, 64), # 16MS/s -> 4.608MS/s (DECT 1.152Mb/s: 4 samples/bit).
+    ("zigbee", 1,   2, 16e6, 1.30e6, 48), # 16MS/s -> 8MS/s     (802.15.4 2Mchip/s: 4 samples/chip).
+]
 
 def c_array(ctype, name, values, per_line=12):
     lines = [f"static const {ctype} {name}[{len(values)}] = {{"]
@@ -24,9 +36,24 @@ def c_array(ctype, name, values, per_line=12):
     lines.append("};")
     return "\n".join(lines)
 
+def lowpass(up, rate, cutoff, taps):
+    """Blackman windowed sinc at the upsampled rate, polyphase ordered (taps[p*K + k] = h[p + k*up]),
+    Q15 with a unity DC gain per phase."""
+    n  = up*taps
+    fc = cutoff/(rate*up)
+    h  = []
+    for i in range(n):
+        t = i - (n - 1)/2
+        s = 2*fc if t == 0 else math.sin(2*math.pi*fc*t)/(math.pi*t)
+        w = 0.42 - 0.5*math.cos(2*math.pi*i/(n - 1)) + 0.08*math.cos(4*math.pi*i/(n - 1))
+        h.append(s*w)
+    g = sum(h)/up
+    return [round(32767*h[p + k*up]/g) for p in range(up) for k in range(taps)]
+
 def main():
-    twiddle_cos = [round(32767*math.cos(2*math.pi*k/FFT_SIZE)) for k in range(FFT_SIZE//2)]
-    twiddle_sin = [round(32767*math.sin(2*math.pi*k/FFT_SIZE)) for k in range(FFT_SIZE//2)]
+    fft_max     = 1 << FFT_MAX_LOG2
+    twiddle_cos = [round(32767*math.cos(2*math.pi*k/fft_max)) for k in range(fft_max//2)]
+    twiddle_sin = [round(32767*math.sin(2*math.pi*k/fft_max)) for k in range(fft_max//2)]
     hann        = [round(32767*0.5*(1 - math.cos(2*math.pi*n/FFT_SIZE))) for n in range(FFT_SIZE)]
     font        = [sum(row << (3*(5 - r)) for r, row in enumerate(glyph)) for glyph in FONT_4X6]
     out = [
@@ -37,15 +64,27 @@ def main():
         "",
         "#include <stdint.h>",
         "",
-        f"#define FFT_SIZE {FFT_SIZE}",
+        f"#define FFT_SIZE     {FFT_SIZE}",
+        f"#define FFT_MAX_LOG2 {FFT_MAX_LOG2}",
         "",
-        "/* FFT twiddles (Q15): cos/sin(2*pi*k/FFT_SIZE), k < FFT_SIZE/2. */",
+        "/* FFT twiddles (Q15): cos/sin(2*pi*k/2^FFT_MAX_LOG2), k < 2^FFT_MAX_LOG2/2 (also the NCO table). */",
         c_array("int16_t", "twiddle_cos", twiddle_cos),
         c_array("int16_t", "twiddle_sin", twiddle_sin),
         "",
         "/* Hann window (Q15). */",
         c_array("int16_t", "hann", hann),
         "",
+    ]
+    for name, up, down, rate, cutoff, taps in FILTERS:
+        out += [
+            f"/* {name.upper()} channel filter: {rate/1e6:g}MS/s x{up}/{down}, {cutoff/1e6:g}MHz cutoff, polyphase (Q15). */",
+            f"#define FILTER_{name.upper()}_UP   {up}",
+            f"#define FILTER_{name.upper()}_DOWN {down}",
+            f"#define FILTER_{name.upper()}_TAPS {taps}",
+            c_array("int16_t", f"filter_{name}", lowpass(up, rate, cutoff, taps)),
+            "",
+        ]
+    out += [
         "/* 4x6 font (\"Tom Thumb\", Robey Pointer, MIT license), ASCII 0x20-0x7e: 6 rows of 3 pixels,",
         "   row 0 in bits 17:15, MSB left. */",
         c_array("uint32_t", "font4x6", font, per_line=8),

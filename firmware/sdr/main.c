@@ -11,8 +11,10 @@
 // Views (Select): spectrum + waterfall, waterfall, band scan (sweep of a frequency range in 64MHz
 // steps with the 80MS/s wide captures).
 // Controls: Left/Right: tune (held: accelerated) or move the cursor, Up/Down: tuning step, A: span
-// (cursor: tune to the cursor), B: cursor on/off, Start: peak hold, Menu: menu (band presets,
+// (cursor: tune to the cursor), B: cursor on/off, Start: peak hold, Menu: menu (tool, band presets,
 // gain, reference level, waterfall, RSSI tone, scan range, help, info).
+//
+// Tools (menu, app.h): cell scanner (tool_cell.c).
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -31,6 +33,7 @@
 #include <generated/soc.h>
 
 #include "layout.h"
+#include "app.h"
 #include "esp32sdr.h"
 #include "lcd.h"
 #include "dsp.h"
@@ -55,31 +58,11 @@ static void log_status(const char *fmt, ...)
 
 /* Layout/Colors -------------------------------------------------------------------------------- */
 
-#define HEADER_H   14
+#define HEADER_H   APP_HEADER_H
 #define SPEC_Y     HEADER_H
 #define SPEC_H     56
 #define AXIS_H     8
 #define RANGE_DB4  (60*4) /* Spectrum: displayed range below the reference level (1/4 dB). */
-
-enum {
-	COLOR_BLACK = 0,
-	COLOR_WHITE,
-	COLOR_GRID,
-	COLOR_TRACE,
-	COLOR_FILL,
-	COLOR_PEAK,
-	COLOR_WIFI,
-	COLOR_BLE,
-	COLOR_RED,
-	COLOR_CURSOR,
-	COLOR_DIM,
-	COLOR_CELL,
-	COLOR_ISM,
-	COLOR_MENU,
-	COLOR_SELECT,
-	COLOR_HEAT  = 64, /* 64-255: waterfall heat map. */
-	HEAT_COLORS = 192,
-};
 
 static void palette_init(void)
 {
@@ -99,6 +82,7 @@ static void palette_init(void)
 		{120, 120, 255}, /* ISM band.       */
 		{ 16,  24,  64}, /* Menu.           */
 		{ 40,  90, 200}, /* Menu selection. */
+		{ 64, 255,  64}, /* Green.          */
 	};
 	for (int i = 0; i < (int)(sizeof(colors)/sizeof(colors[0])); i++)
 		lcd_palette(i, colors[i][0], colors[i][1], colors[i][2]);
@@ -207,8 +191,6 @@ enum {
 
 static int freq_khz  = 2437000;
 static int freqk     = 0; /* ESP32 kHz tuning (FREQK, Chromatic ESP-SDR fork). */
-static int freq_min  = 2386000; /* FREQK range (kHz). */
-static int freq_max  = 2504000;
 static int span      = 1;
 static int gain      = 0;
 static int step      = 3;
@@ -228,6 +210,19 @@ static int host      = 0; /* USB host relay active. */
 static int gain_db   = -1; /* Displayed gain (-1: AGC). */
 static int fps10;
 static char esp_info[48];
+
+int app_freq_min = 2386000; /* FREQK range (kHz). */
+int app_freq_max = 2504000;
+
+/* Tools (menu): 0: spectrum (views above). */
+static const struct tool *const tools[] = {
+	NULL,
+	&tool_cell,
+};
+#define TOOLS (int)(sizeof(tools)/sizeof(tools[0]))
+
+static int tool     = 0;
+static int tool_sel = 0; /* Menu selection. */
 
 /* Stock ESP-SDR: the ESP32 only tunes reliably on the Wi-Fi channel frequencies (2412-2472MHz/5MHz,
    2484MHz): its out of channel frequencies don't move the LO (measured on the console crystal
@@ -282,6 +277,48 @@ static void set_gain(void)
 	esp_cmd(cmd);
 }
 
+/* App Services (tools) ------------------------------------------------------------------------- */
+
+int8_t app_iq[2*APP_SAMPLES + 1024] __attribute__((aligned(4))); /* + QSPI padding. */
+
+void app_tune(int khz)
+{
+	khz = (khz < app_freq_min) ? app_freq_min : (khz > app_freq_max) ? app_freq_max : khz;
+	set_freq_khz(khz);
+}
+
+void app_filter(int wide)
+{
+	set_filter(wide);
+}
+
+void app_gain(int db)
+{
+	char cmd[32];
+	if (db < 0)
+		snprintf(cmd, sizeof(cmd), "GAIN HARDWARE");
+	else
+		snprintf(cmd, sizeof(cmd), "GAIN MANUAL %d", db);
+	esp_cmd(cmd);
+}
+
+int app_capture(int samples, int rate, int8_t *iq)
+{
+	int r = esp32sdr_capture(samples, rate, iq, NULL);
+	if (r != 0)
+		esp32sdr_flush();
+	return r;
+}
+
+void app_heat_line(int y, const int *db4, int floor_db4, int range_db)
+{
+	for (int x = 0; x < LCD_WIDTH; x++) {
+		int v = (db4[x] - floor_db4)*HEAT_COLORS/(range_db*4);
+		v = (v < 0) ? 0 : (v > HEAT_COLORS - 1) ? HEAT_COLORS - 1 : v;
+		lcd_screen[y][x] = COLOR_HEAT + v;
+	}
+}
+
 /* Display State -------------------------------------------------------------------------------- */
 
 static int col_db4[LCD_WIDTH];
@@ -300,7 +337,7 @@ static void reset_levels(void)
 static void tune(int khz)
 {
 	if (freqk)
-		khz = (khz < freq_min) ? freq_min : (khz > freq_max) ? freq_max : khz;
+		khz = (khz < app_freq_min) ? app_freq_min : (khz > app_freq_max) ? app_freq_max : khz;
 	freq_khz = khz;
 	set_freq_khz(freq_khz);
 	reset_levels();
@@ -346,7 +383,7 @@ static int db4_to_y(int db4)
 	return (y < 0) ? 0 : (y > SPEC_H - 1) ? SPEC_H - 1 : y;
 }
 
-static void format_khz(char *s, int len, int khz, int decimals)
+void app_format_khz(char *s, int len, int khz, int decimals)
 {
 	/* MHz with 0-3 decimals. */
 	static const int div[] = {1000, 100, 10, 1};
@@ -365,7 +402,7 @@ static int scan_steps(void);
 static char     toast_text[40];
 static uint32_t toast_until;
 
-static void toast(const char *fmt, ...)
+void app_toast(const char *fmt, ...)
 {
 	va_list ap;
 	va_start(ap, fmt);
@@ -387,7 +424,7 @@ static void draw_header(int peak_x)
 		/* Sweep progress. */
 		lcd_rect(0, HEADER_H - 1, (scan_step + 1)*LCD_WIDTH/scan_steps(), 1, COLOR_CURSOR);
 	} else {
-		format_khz(f, sizeof(f), freq_khz, 3);
+		app_format_khz(f, sizeof(f), freq_khz, 3);
 		lcd_text_scaled(1, 1, COLOR_WHITE, f, 2);
 		lcd_text(67, 7, COLOR_DIM, "MHZ");
 		snprintf(line, sizeof(line), "SPAN%d STEP%s", spans[span].mhz, steps[step].name);
@@ -395,7 +432,7 @@ static void draw_header(int peak_x)
 	}
 	/* Cursor or peak readout. */
 	int x = cursor ? cursor_x : peak_x;
-	format_khz(f, sizeof(f), x_to_khz(x), (view_hi - view_lo) > 100000 ? 1 : 2);
+	app_format_khz(f, sizeof(f), x_to_khz(x), (view_hi - view_lo) > 100000 ? 1 : 2);
 	snprintf(line, sizeof(line), "%s %s %d", cursor ? "CUR" : "PK", f, col_db4[x]/4);
 	lcd_text((mode == MODE_SCAN) ? 36 : 81, 8, cursor ? COLOR_CURSOR : COLOR_PEAK, line);
 }
@@ -509,7 +546,8 @@ static void draw_message(const char *msg, uint8_t color)
 /* Menu/Pages ----------------------------------------------------------------------------------- */
 
 enum {
-	MENU_BAND = 0,
+	MENU_TOOL = 0,
+	MENU_BAND,
 	MENU_GAIN,
 	MENU_REF,
 	MENU_WF_SPEED,
@@ -528,6 +566,7 @@ static int page      = 0; /* 0: none, 1: help, 2: info. */
 static void menu_value(int item, char *s, int len)
 {
 	switch (item) {
+	case MENU_TOOL:     snprintf(s, len, "%s", tool_sel ? tools[tool_sel]->name : "SPECTRUM"); break;
 	case MENU_BAND:     snprintf(s, len, "%s", presets[preset].name); break;
 	case MENU_GAIN:
 		if (gains[gain] < 0)
@@ -552,10 +591,10 @@ static void menu_value(int item, char *s, int len)
 static void draw_menu(void)
 {
 	static const char *names[MENU_ITEMS] = {
-		"BAND", "GAIN", "REF LEVEL", "WATERFALL", "WF RANGE", "RSSI TONE", "SCAN RANGE", "HELP",
+		"TOOL", "BAND", "GAIN", "REF LEVEL", "WATERFALL", "WF RANGE", "RSSI TONE", "SCAN RANGE", "HELP",
 		"INFO",
 	};
-	int x = 12, y = 18, w = LCD_WIDTH - 24, h = 14 + 9*MENU_ITEMS;
+	int x = 12, y = 14, w = LCD_WIDTH - 24, h = 14 + 9*MENU_ITEMS;
 	lcd_rect(x, y, w, h, COLOR_MENU);
 	lcd_rect(x, y, w, 1, COLOR_SELECT);
 	lcd_text(x + 4, y + 3, COLOR_WHITE, "MENU");
@@ -581,18 +620,22 @@ static void draw_page(void)
 		"START       PEAK HOLD",
 		"SELECT      VIEW: SPECTRUM,",
 		"            WATERFALL, SCAN",
-		"MENU        BANDS, GAIN, REF,",
-		"            WATERFALL, TONE...",
+		"MENU        TOOLS, BANDS, GAIN,",
+		"            REF, WATERFALL...",
 		"SCAN: LEFT/RIGHT CURSOR,",
 		"      A: OPEN AT CURSOR",
 	};
 	char info[9][40];
 	const char **lines = help;
 	int n = sizeof(help)/sizeof(help[0]);
+	if (page == 1 && tool) {
+		lines = (const char **)tools[tool]->help;
+		for (n = 0; lines[n]; n++);
+	}
 	if (page == 2) {
 		snprintf(info[0], 40, "ESP32: %s", esp_info);
 		snprintf(info[1], 40, "CAPTURES: %s", qspi ? "QSPI (FAST)" : "UART");
-		snprintf(info[2], 40, "TUNING: %d-%d MHZ", freq_min/1000, freq_max/1000);
+		snprintf(info[2], 40, "TUNING: %d-%d MHZ", app_freq_min/1000, app_freq_max/1000);
 		snprintf(info[3], 40, "%s", freqk ? "(CHROMATIX ESP-SDR FORK)" : "(STOCK ESP-SDR)");
 		snprintf(info[4], 40, "USB HOST: %s", host ? "ACTIVE" : "IDLE");
 		snprintf(info[5], 40, "UPDATE RATE: %d.%d/S", fps10/10, fps10 % 10);
@@ -608,7 +651,7 @@ static void draw_page(void)
 	int x = 4, y = 16, w = LCD_WIDTH - 8, h = 14 + 8*n;
 	lcd_rect(x, y, w, h, COLOR_MENU);
 	lcd_rect(x, y, w, 1, COLOR_SELECT);
-	lcd_text(x + 3, y + 3, COLOR_WHITE, (page == 1) ? "HELP" : "INFO");
+	lcd_text(x + 3, y + 3, COLOR_WHITE, (page == 2) ? "INFO" : tool ? tools[tool]->name : "HELP");
 	for (int i = 0; i < n; i++)
 		lcd_text(x + 3, y + 12 + 8*i, COLOR_WHITE, lines[i]);
 }
@@ -636,6 +679,21 @@ static void restore_overlays(int saved)
 {
 	if (saved)
 		memcpy(lcd_screen, overlay_saved, sizeof(overlay_saved));
+}
+
+void app_present(void)
+{
+	int saved = draw_overlays();
+	lcd_present();
+	restore_overlays(saved);
+}
+
+void app_header(const char *title, const char *status)
+{
+	lcd_rect(0, 0, LCD_WIDTH, HEADER_H, COLOR_BLACK);
+	lcd_text_scaled(1, 1, COLOR_WHITE, title, 2);
+	lcd_text(LCD_WIDTH - 4*(int)strlen(status), 1, COLOR_DIM, status);
+	lcd_rect(0, HEADER_H - 1, LCD_WIDTH, 1, COLOR_GRID);
 }
 
 /* RSSI Tone ------------------------------------------------------------------------------------ */
@@ -752,12 +810,12 @@ static int scan_new[LCD_WIDTH]; /* Columns of the current sweep. */
 
 static int scan_lo(void)
 {
-	return (scans[scan].lo > freq_min) ? scans[scan].lo : freq_min;
+	return (scans[scan].lo > app_freq_min) ? scans[scan].lo : app_freq_min;
 }
 
 static int scan_hi(void)
 {
-	return (scans[scan].hi < freq_max) ? scans[scan].hi : freq_max;
+	return (scans[scan].hi < app_freq_max) ? scans[scan].hi : app_freq_max;
 }
 
 static int scan_steps(void)
@@ -779,7 +837,7 @@ static int scan_update(void)
 {
 	/* One sweep step: tune, 80MS/s capture, bins within +-32MHz -> columns (max). */
 	int center = view_lo + SCAN_STEP/2 + scan_step*SCAN_STEP;
-	center = (center > freq_max) ? freq_max : center; /* Last step: within the tuning range. */
+	center = (center > app_freq_max) ? app_freq_max : center; /* Last step: within the tuning range. */
 	set_freq_khz(center);
 	if (esp32sdr_capture(SCAN_SAMPLES, ESP32SDR_RATE_80MSPS, iq, NULL) != 0) {
 		esp32sdr_flush();
@@ -825,13 +883,14 @@ static int scan_update(void)
 
 /* Buttons -------------------------------------------------------------------------------------- */
 
-enum {
-	BTN_A = 0, BTN_B, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_UP, BTN_SEL, BTN_START, BTN_MENU,
-};
+#define REPEAT_DELAY_MS  400
+#define REPEAT_PERIOD_MS 80
 
 static uint32_t buttons_last;
-static uint32_t buttons_repeat; /* Held directions repeated (held over 6 updates). */
-static int      buttons_held;
+static uint32_t buttons_repeat; /* Held directions repeated (after 400ms, every 80ms). */
+static uint32_t buttons_t0;     /* Directions pressed time. */
+static uint32_t buttons_t1;     /* Last repeat time. */
+static uint32_t buttons_held;   /* Directions held time (ms). */
 
 static uint32_t buttons_pressed(void)
 {
@@ -839,10 +898,16 @@ static uint32_t buttons_pressed(void)
 	uint32_t buttons = demo_buttons_status_read();
 	uint32_t pressed = buttons & ~buttons_last;
 	uint32_t dirs    = (1 << BTN_LEFT) | (1 << BTN_RIGHT) | (1 << BTN_UP) | (1 << BTN_DOWN);
+	uint32_t t       = esp32sdr_ms();
 	buttons_repeat = 0;
 	if (buttons & dirs) {
-		if (++buttons_held > 6)
+		if (pressed & dirs)
+			buttons_t0 = t;
+		buttons_held = t - buttons_t0;
+		if (buttons_held > REPEAT_DELAY_MS && t - buttons_t1 >= REPEAT_PERIOD_MS) {
 			buttons_repeat = buttons & dirs;
+			buttons_t1     = t;
+		}
 	} else
 		buttons_held = 0;
 	buttons_last = buttons;
@@ -859,16 +924,39 @@ static void set_mode(int m)
 	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
 	if (mode == MODE_SCAN) {
 		scan_start();
-		toast("SCAN %s: A OPENS CURSOR", scans[scan].name);
+		app_toast("SCAN %s: A OPENS CURSOR", scans[scan].name);
 	} else {
 		tune(freq_khz);
-		toast((mode == MODE_SPECTRUM) ? "SPECTRUM + WATERFALL" : "WATERFALL");
+		app_toast((mode == MODE_SPECTRUM) ? "SPECTRUM + WATERFALL" : "WATERFALL");
 	}
+}
+
+static void set_tool(int t)
+{
+	tool      = t;
+	tool_sel  = t;
+	menu_open = 0;
+	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
+	if (tool)
+		tools[tool]->enter();
+	else {
+		/* Spectrum: its radio settings back. */
+		set_filter((mode == MODE_SCAN) || (spans[span].mhz == 80));
+		set_gain();
+		if (mode == MODE_SCAN)
+			scan_start();
+		else
+			tune(freq_khz);
+	}
+	app_toast("%s: MENU > HELP", tool ? tools[tool]->name : "SPECTRUM");
 }
 
 static void menu_change(int dir)
 {
 	switch (menu_item) {
+	case MENU_TOOL:
+		tool_sel = (tool_sel + TOOLS + dir) % TOOLS;
+		break;
 	case MENU_BAND:
 		preset = (preset + PRESETS + dir) % PRESETS;
 		break;
@@ -906,14 +994,19 @@ static void menu_change(int dir)
 static void menu_select(void)
 {
 	switch (menu_item) {
+	case MENU_TOOL:
+		set_tool(tool_sel);
+		break;
 	case MENU_BAND:
 		/* Apply the preset: spectrum view. */
+		if (tool)
+			set_tool(0);
 		span = presets[preset].span;
 		menu_open = 0;
 		set_mode(MODE_SPECTRUM);
 		set_filter(spans[span].mhz == 80);
 		tune(presets[preset].khz);
-		toast("%s", presets[preset].name);
+		app_toast("%s", presets[preset].name);
 		break;
 	case MENU_REF:
 		ref_auto = 1;
@@ -936,7 +1029,7 @@ static void menu_select(void)
 static void handle_buttons(void)
 {
 	uint32_t p = buttons_pressed();
-	if (menu_open)
+	if (menu_open || tool)
 		p |= buttons_repeat & ((1 << BTN_UP) | (1 << BTN_DOWN));
 	if (!p)
 		return;
@@ -963,6 +1056,11 @@ static void handle_buttons(void)
 	}
 	if (p & (1 << BTN_MENU)) {
 		menu_open = 1;
+		tool_sel  = tool;
+		return;
+	}
+	if (tool) {
+		tools[tool]->buttons(p);
 		return;
 	}
 	if (p & (1 << BTN_SEL)) {
@@ -973,18 +1071,18 @@ static void handle_buttons(void)
 	if (p & (1 << BTN_START)) {
 		peak_hold = !peak_hold;
 		memset(peak_db4, 0, sizeof(peak_db4));
-		toast("PEAK HOLD %s", peak_hold ? "ON" : "OFF");
+		app_toast("PEAK HOLD %s", peak_hold ? "ON" : "OFF");
 	}
 	if (p & (1 << BTN_B)) {
 		cursor = !cursor;
-		toast(cursor ? "CURSOR: <> MOVE, A: TUNE" : "CURSOR OFF");
+		app_toast(cursor ? "CURSOR: <> MOVE, A: TUNE" : "CURSOR OFF");
 	}
 	int dir = (p & (1 << BTN_RIGHT)) ? 1 : (p & (1 << BTN_LEFT)) ? -1 : 0;
 	if (mode == MODE_SCAN || cursor) {
 		/* Cursor: 1 column (held: 4). */
 		if (dir) {
 			cursor   = 1;
-			cursor_x += dir*((buttons_held > 30) ? 4 : 1);
+			cursor_x += dir*((buttons_held > 2000) ? 4 : 1);
 			cursor_x  = (cursor_x < 0) ? 0 : (cursor_x > LCD_WIDTH - 1) ? LCD_WIDTH - 1 : cursor_x;
 		}
 		if (p & (1 << BTN_A)) {
@@ -996,14 +1094,14 @@ static void handle_buttons(void)
 			tune(freqk ? khz/10*10 : 1000*next_channel(khz/1000, 0));
 			cursor_x = LCD_WIDTH/2;
 			char f[16];
-			format_khz(f, sizeof(f), freq_khz, 3);
-			toast("TUNED %s MHZ", f);
+			app_format_khz(f, sizeof(f), freq_khz, 3);
+			app_toast("TUNED %s MHZ", f);
 		}
 	} else {
 		if (dir) {
 			/* Tuning step (held: x5 after ~1s). */
 			if (freqk) {
-				int s = steps[step].khz*((buttons_held > 30) ? 5 : 1);
+				int s = steps[step].khz*((buttons_held > 2000) ? 5 : 1);
 				tune(freq_khz + dir*s);
 			} else
 				tune(1000*next_channel(freq_khz/1000, dir));
@@ -1014,18 +1112,18 @@ static void handle_buttons(void)
 			if ((spans[span].mhz == 80) != wide_before)
 				set_filter(spans[span].mhz == 80);
 			reset_levels();
-			toast("SPAN %d MHZ%s", spans[span].mhz, (spans[span].mhz == 80) ? " (WIDE)" : "");
+			app_toast("SPAN %d MHZ%s", spans[span].mhz, (spans[span].mhz == 80) ? " (WIDE)" : "");
 		}
 	}
 	if (mode != MODE_SCAN && (p & ((1 << BTN_UP) | (1 << BTN_DOWN)))) {
 		step += (p & (1 << BTN_UP)) ? 1 : -1;
 		step  = (step < 0) ? 0 : (step > STEPS - 1) ? STEPS - 1 : step;
-		toast("STEP %sHZ", steps[step].name);
+		app_toast("STEP %sHZ", steps[step].name);
 	}
 	if (mode == MODE_SCAN && (p & ((1 << BTN_UP) | (1 << BTN_DOWN)))) {
 		scan = (scan + SCANS + ((p & (1 << BTN_UP)) ? 1 : -1)) % SCANS;
 		scan_start();
-		toast("SCAN %s %d-%d MHZ", scans[scan].name, scan_lo()/1000, scan_hi()/1000);
+		app_toast("SCAN %s %d-%d MHZ", scans[scan].name, scan_lo()/1000, scan_hi()/1000);
 	}
 }
 
@@ -1199,8 +1297,8 @@ int main(void)
 	if (esp32sdr_cmd("RANGEK?", reply, sizeof(reply), 200) > 0 &&
 		sscanf(reply, "RANGEK %u %u", &kmin, &kmax) == 2) {
 		freqk    = 1;
-		freq_min = kmin;
-		freq_max = kmax;
+		app_freq_min = kmin;
+		app_freq_max = kmax;
 	}
 	/* Captures over QSPI (Chromatic ESP-SDR fork) if supported, else over the UART. */
 	qspi = (esp32sdr_qspi((void *)(MAIN_RAM_BASE + LAYOUT_DATA_OFFSET),
@@ -1210,7 +1308,7 @@ int main(void)
 	set_filter(0);
 	while (esp32sdr_ms() - splash_ms < 2000); /* Startup screen (credits) shown for 2s. */
 	lcd_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
-	toast("MENU: BANDS/HELP  SELECT: VIEW");
+	app_toast("MENU: TOOLS/HELP  SELECT: VIEW");
 	/* USB link: ESP-SDR protocol relay for the host. */
 	int usb = (usblink_init() == 0);
 
@@ -1227,6 +1325,8 @@ int main(void)
 				host      = 1;
 				menu_open = 0;
 				page      = 0;
+				tool      = 0;
+				tool_sel  = 0;
 				if (mode == MODE_SCAN)
 					mode = MODE_SPECTRUM;
 				reset_levels();
@@ -1241,7 +1341,7 @@ int main(void)
 				set_filter(spans[span].mhz == 80);
 				tune(freq_khz);
 				set_gain();
-				toast("USB HOST DONE");
+				app_toast("USB HOST DONE");
 			}
 		}
 
@@ -1251,7 +1351,9 @@ int main(void)
 		/* Capture/display. */
 		uint32_t t_capture = esp32sdr_ms();
 		int r, peak_x = 0;
-		if (mode == MODE_SCAN)
+		if (tool)
+			r = tools[tool]->update();
+		else if (mode == MODE_SCAN)
 			r = scan_update();
 		else {
 			r = esp32sdr_capture(SAMPLES, spans[span].index, iq, NULL);
