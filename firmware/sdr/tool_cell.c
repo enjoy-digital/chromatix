@@ -36,9 +36,8 @@ static const struct {
 #define STEP_KHZ    50000                /* Sweep step (+-25MHz of the wide captures: flat). */
 #define MAX_BINS    1300                 /* 200MHz. */
 #define OFFSET_KHZ  2000                 /* Carrier offset from the tuned frequency (DC away). */
-#define MIN_BW_HZ    2500000
 #define MAX_CARRIERS 16
-#define MAX_CAPTURES 30                  /* Per carrier (PSS: ~1 capture out of 5). */
+#define MAX_CAPTURES 35                  /* Per carrier (PSS: ~1 capture out of 5). */
 #define MIN_HITS     3
 #define SWEEP_GAIN   50                  /* Sweep: manual gain (comparable steps). */
 
@@ -142,29 +141,35 @@ static int percentile(const int16_t *v, int n, int pct)
 	return 1023;
 }
 
-static void add_carrier(int b0, int b1, int level, int threshold)
+static void add_carrier(int khz, int bw_khz, int level)
 {
-	/* Carrier: >= 2.5MHz (3MHz LTE: 2.7MHz occupied), flat (80% of the bins above the threshold:
-	   not a group of narrowband lines). */
-	int above = 0;
-	for (int i = b0; i < b1; i++)
-		above += (smooth[i] >= threshold);
-	if (ncarriers >= MAX_CARRIERS || (b1 - b0)*BIN_HZ < MIN_BW_HZ || above*5 < (b1 - b0)*4)
+	/* Candidate (100kHz raster), skipped if already tried (+-300kHz). */
+	khz = (khz + 50)/100*100;
+	for (int i = 0; i < ncarriers; i++)
+		if (carriers[i].khz - khz < 300 && khz - carriers[i].khz < 300)
+			return;
+	if (ncarriers >= MAX_CARRIERS)
 		return;
 	struct carrier *c = &carriers[ncarriers++];
 	memset(c, 0, sizeof(*c));
-	int khz   = bands[band].lo + (int)((int64_t)(b0 + b1)*BIN_HZ/2000);
-	c->khz    = (khz + 50)/100*100;
-	c->bw_khz = (int)((int64_t)(b1 - b0)*BIN_HZ/1000);
+	c->khz       = khz;
+	c->bw_khz    = bw_khz;
 	c->level_db4 = level;
-	c->pci    = -1;
+	c->pci       = -1;
+}
+
+static int bin_khz(int b)
+{
+	return bands[band].lo + (int)((int64_t)b*BIN_HZ/1000);
 }
 
 static void find_carriers(void)
 {
-	/* Smoothed spectrum (~470kHz), blocks above the floor + 5dB (gaps < 500kHz bridged), split on
-	   the guard dips between adjacent carriers (6dB below the block median), edges at the block
-	   median - 3dB. */
+	/* Smoothed spectrum (~470kHz), bins above the floor + 4dB, clusters (gaps < 2MHz bridged:
+	   lightly loaded carriers are not flat, only their reference signals fill the unused resource
+	   blocks), >= 1MHz and half filled (not a group of narrowband lines), tiled with the LTE
+	   bandwidths from the low edge (occupied: 90%): candidate centers. */
+	static const int widths[] = {20000, 15000, 10000, 5000, 3000};
 	static int16_t block[MAX_BINS];
 	for (int i = 0; i < bins; i++) {
 		int s = 0, n = 0;
@@ -176,50 +181,45 @@ static void find_carriers(void)
 		smooth[i] = s/n;
 	}
 	floor_db4 = percentile(smooth, bins, 20);
-	int threshold = floor_db4 + 5*4;
+	int threshold = floor_db4 + 4*4;
+	int gap_max   = 2000000/BIN_HZ;
 	for (int i = 0; i < bins; ) {
 		if (smooth[i] < threshold) {
 			i++;
 			continue;
 		}
-		int b0 = i, b1 = i, gap = 0;
-		for (; i < bins && gap <= 3; i++) {
+		int b0 = i, b1 = i, gap = 0, above = 0;
+		for (; i < bins && gap <= gap_max; i++) {
 			if (smooth[i] >= threshold) {
 				b1  = i;
 				gap = 0;
+				above++;
 			} else
 				gap++;
 		}
 		int n = b1 - b0 + 1;
+		if (n*BIN_HZ < 1000000 || above*2 < n)
+			continue;
 		memcpy(block, &smooth[b0], n*sizeof(int16_t));
-		int median = percentile(block, n, 50);
-		while (b0 < b1 && smooth[b0] < median - 3*4)
-			b0++;
-		while (b1 > b0 && smooth[b1] < median - 3*4)
-			b1--;
-		/* Sub-blocks separated by guard dips (>= 3 bins, ~470kHz, below the inner threshold). */
-		int inner = median - 6*4, parts = 0, s0 = b0, k = b0;
-		int first = ncarriers;
-		while (k <= b1) {
-			int d = k;
-			while (d <= b1 && smooth[d] < inner)
-				d++;
-			if (d - k >= 3) {
-				if ((k - s0)*BIN_HZ >= MIN_BW_HZ) {
-					add_carrier(s0, k, median, inner);
-					parts++;
-				}
-				s0 = d;
+		int level = percentile(block, n, 50);
+		int lo = bin_khz(b0), hi = bin_khz(b1 + 1);
+		/* Single carrier: centered. */
+		for (int k = 0; k < 5; k++)
+			if (hi - lo <= widths[k] + 1000 && hi - lo >= widths[k]*8/10) {
+				add_carrier((lo + hi)/2, hi - lo, level);
+				lo = hi;
+				break;
 			}
-			k = (d > k) ? d : k + 1;
-		}
-		if ((b1 + 1 - s0)*BIN_HZ >= MIN_BW_HZ) {
-			add_carrier(s0, b1 + 1, median, inner);
-			parts++;
-		}
-		if (parts <= 1) {
-			ncarriers = first;
-			add_carrier(b0, b1 + 1, median, threshold);
+		while (hi - lo >= 1000) {
+			int w = widths[4];
+			for (int k = 0; k < 5; k++)
+				if (widths[k]*9/10 <= hi - lo + 1000) {
+					w = widths[k];
+					break;
+				}
+			int occupied = (w*9/10 < hi - lo) ? w*9/10 : hi - lo;
+			add_carrier(lo + occupied/2, occupied, level);
+			lo += w;
 		}
 	}
 }
@@ -228,10 +228,10 @@ static void find_carriers(void)
 
 static int sweep(void)
 {
-	/* One 50MHz step: 2 wide captures (80MS/s, RX filter opened) averaged, +-25MHz kept. */
+	/* One 50MHz step: 4 wide captures (80MS/s, RX filter opened) averaged, +-25MHz kept. */
 	int center = bands[band].lo + STEP_KHZ/2 + sweep_step*STEP_KHZ;
 	app_tune(center);
-	for (int k = 0; k < 2; k++) {
+	for (int k = 0; k < 4; k++) {
 		int r = app_capture(APP_SAMPLES, ESP32SDR_RATE_80MSPS, app_iq);
 		if (r != 0)
 			return r;
@@ -242,7 +242,7 @@ static int sweep(void)
 			if (i < FFT_SIZE/2 - 160 || i >= FFT_SIZE/2 + 160 || b < 0 || b >= bins)
 				continue;
 			int db4 = dsp_db4(power[i]);
-			spec[b] = k ? (spec[b] + db4)/2 : db4;
+			spec[b] = k ? (k*spec[b] + db4)/(k + 1) : db4;
 		}
 	}
 	sweep_step++;
@@ -261,7 +261,7 @@ static int sweep(void)
 static int decode(void)
 {
 	/* One capture of the current carrier: raster offsets tried in turn until the cell is found. */
-	static const int rasters[5] = {0, -100, 100, -200, 200};
+	static const int rasters[7] = {0, -100, 100, -200, 200, -300, 300};
 	struct carrier *c = &carriers[current];
 	int raster = rasters[c->raster];
 	app_tune(c->khz + raster + OFFSET_KHZ);
@@ -292,7 +292,7 @@ static int decode(void)
 			lo_known = 1;
 		}
 	} else if (c->pci < 0 && c->captures % 4 == 0)
-		c->raster = (c->raster + 1) % 5;
+		c->raster = (c->raster + 1) % 7;
 	if (c->hits >= MIN_HITS || c->captures >= MAX_CAPTURES) {
 		current++;
 		if (current >= ncarriers)

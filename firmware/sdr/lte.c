@@ -237,8 +237,7 @@ int lte_search(const int8_t *iq, int samples, int offset_hz, int wide, struct lt
 		b.f[i] = (i < 2*n) ? b.y[i] << 10 : 0;
 	dsp_fft(b.f, FFT_LOG2, 0);
 	/* PSS: correlation (F*conj(P) shifted by the frequency hypothesis), best |c|^2/energy. */
-	int     best_nid2 = -1, best_pos = 0, best_cfo = 0;
-	int64_t best_c2 = 0, best_e = 1;
+	int     best_nid2 = -1, best_pos = 0, best_cfo = 0, best_m = 0;
 	int     hyps = wide ? 1 : 0;
 	for (int nid2 = 0; nid2 < 3; nid2++)
 		for (int h = -hyps; h <= hyps; h++) {
@@ -252,17 +251,11 @@ int lte_search(const int8_t *iq, int samples, int offset_hz, int wide, struct lt
 			}
 			dsp_fft(b.c, FFT_LOG2, 1);
 			for (int i = 0; i < positions; i++) {
-				/* |c|^2/energy > best_c2/best_e (both reduced to 31 bits). */
+				/* |c|^2/energy (log: no overflow/division). */
 				int64_t c2 = (int64_t)b.c[2*i]*b.c[2*i] + (int64_t)b.c[2*i + 1]*b.c[2*i + 1];
-				int64_t ei = (b.energy[i] >> 16) + 1;
-				while ((c2 >> 31) || (ei >> 31)) {
-					c2 >>= 1;
-					ei >>= 1;
-				}
-				ei = ei ? ei : 1;
-				if (c2*best_e > best_c2*ei) {
-					best_c2   = c2;
-					best_e    = ei;
+				int     m  = dsp_db4(c2 + 1) - dsp_db4(b.energy[i] + 1);
+				if (best_nid2 < 0 || m > best_m) {
+					best_m    = m;
 					best_nid2 = nid2;
 					best_pos  = i;
 					best_cfo  = h*CFO_BINS*LTE_RATE/FFT_N;

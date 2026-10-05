@@ -98,6 +98,13 @@ int dsp_db4(uint64_t power)
 
 /* FFT ------------------------------------------------------------------------------------------ */
 
+static inline int32_t mulq15(int32_t w, int32_t x)
+{
+	/* (w*x) >> 15 for a Q15 w and a 32-bit x with 32-bit multiplies (x split in 16-bit halves: no
+	   64-bit product on RV32). */
+	return (x >> 16)*w*2 + (((x & 0xffff)*w) >> 15);
+}
+
 void dsp_fft(int32_t *x, int log2n, int inverse)
 {
 	int n = 1 << log2n;
@@ -118,12 +125,12 @@ void dsp_fft(int32_t *x, int log2n, int inverse)
 		int half = len >> 1;
 		int step = (1 << FFT_MAX_LOG2)/len;
 		for (int k = 0; k < half; k++) {
-			int64_t wr = twiddle_cos[k*step];
-			int64_t wi = inverse ? twiddle_sin[k*step] : -twiddle_sin[k*step];
+			int32_t wr = twiddle_cos[k*step];
+			int32_t wi = inverse ? twiddle_sin[k*step] : -twiddle_sin[k*step];
 			for (int i = k; i < n; i += len) {
 				int32_t *a = &x[2*i], *b = &x[2*(i + half)];
-				int32_t  tr = (int32_t)((wr*b[0] - wi*b[1] + (1 << 14)) >> 15);
-				int32_t  ti = (int32_t)((wr*b[1] + wi*b[0] + (1 << 14)) >> 15);
+				int32_t  tr = mulq15(wr, b[0]) - mulq15(wi, b[1]);
+				int32_t  ti = mulq15(wr, b[1]) + mulq15(wi, b[0]);
 				int32_t  ar = a[0];
 				int32_t  ai = a[1];
 				b[0] = (ar - tr) >> 1;
