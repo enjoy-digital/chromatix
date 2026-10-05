@@ -14,7 +14,8 @@
 // (cursor: tune to the cursor), B: cursor on/off, Start: peak hold, Menu: menu (tool, band presets,
 // gain, reference level, waterfall, RSSI tone, scan range, help, info).
 //
-// Tools (menu, app.h): cell scanner (tool_cell.c), BLE scanner (tool_ble.c).
+// Tools (menu, app.h): cell scanner (tool_cell.c), BLE scanner (tool_ble.c), signal identification
+// (tool_signals.c).
 //
 // USB relay (USB link gateware): the host talks the ESP-SDR protocol over the USB CDC port
 // (commands forwarded to the ESP32, capture payloads sent by DMA from the QSPI buffer at the USB
@@ -219,6 +220,7 @@ static const struct tool *const tools[] = {
 	NULL,
 	&tool_cell,
 	&tool_ble,
+	&tool_signals,
 };
 #define TOOLS (int)(sizeof(tools)/sizeof(tools[0]))
 
