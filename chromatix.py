@@ -52,6 +52,7 @@ from chromatix.gateware.sysmon      import SystemMonitorUART, SystemMonitorBridg
 from chromatix.gateware.adc         import BatteryADC
 from chromatix.gateware.terminal    import LCDTerminal
 from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
+from chromatix.gateware.core_shell  import CoreTestPattern
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -119,6 +120,7 @@ class BaseSoC(SoCMini):
         uvc_frames            = None,
         with_bios             = False,
         with_app              = False,
+        with_core             = False,
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
@@ -135,6 +137,9 @@ class BaseSoC(SoCMini):
         }[sys_clk]
         assert not (with_bios and with_app)
         assert not (with_cpu and with_debug_bridge) # Both use the USB CDC port.
+        # MiSTer-core shell (core_shell.py): a hosted FPGA core in place of the Game Boy core. Not a
+        # CPU (CSR bus on gClk); mutually exclusive with the BIOS/app CPU variants.
+        assert not (with_core and with_cpu)
         with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
@@ -611,6 +616,30 @@ class BaseSoC(SoCMini):
                 ir.led.eq(0),
                 link.out.eq(0),
             ]
+        elif with_core:
+            # MiSTer-core shell in place of the Game Boy core. Bring-up source: a self-contained
+            # 160x144 test pattern driving the Game Boy LCD interface (no ROM, no GPL core RTL). A
+            # hosted core (and its downscaler/loader) replaces this `lcd_source` later.
+            self.core = lcd_source = CoreTestPattern()
+
+            # Cartridge/IR/link idle (as when the Game Boy core doesn't access them).
+            for pad in [cart.d, cart.rst, link.clk]:
+                self.specials += TSTriple(len(pad)).get_tristate(pad) # Not driven.
+            self.comb += [
+                gb_lcd_clkena.eq(lcd_source.gb_clkena),
+                gb_lcd_data.eq(lcd_source.gb_data),
+                gb_lcd_mode.eq(lcd_source.gb_mode),
+                gb_lcd_on.eq(lcd_source.gb_on),
+                gb_lcd_vsync.eq(lcd_source.gb_vsync),
+                cart.a.eq(0),
+                cart.clk.eq(0),
+                cart.cs.eq(1),
+                cart.rd.eq(1),
+                cart.wr.eq(1),
+                cart.data_dir_e.eq(1),
+                ir.led.eq(0),
+                link.out.eq(0),
+            ]
         else:
             self.specials += Instance("emu_system_top",
                 i_hclk              = ClockSignal("hclk"),
@@ -962,6 +991,7 @@ def main():
     parser.add_argument("--uvc-sizes",             default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
     parser.add_argument("--with-bios",             action="store_true",       help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
     parser.add_argument("--with-app",              action="store_true",       help="CPU application SoC (VexRiscv) in place of the Game Boy core: PSRAM framebuffer, PCM audio, ESP32 UART, firmware loaded over USB.")
+    parser.add_argument("--with-core",             action="store_true",       help="MiSTer-core shell in place of the Game Boy core (bring-up: a 160x144 test pattern on the LCD/UVC).")
     parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
 
@@ -973,7 +1003,7 @@ def main():
         gowin_path = os.path.expanduser(args.gowin_path)
         os.environ["PATH"]            = os.path.join(gowin_path, "bin") + os.pathsep + os.environ["PATH"]
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
-    if not (args.with_bios or args.with_app):
+    if not (args.with_bios or args.with_app or args.with_core):
         add_verilog_sources(platform) # Game Boy core.
     add_timing_constraints(platform)
 
@@ -982,6 +1012,7 @@ def main():
         with_debug_bridge     = args.with_debug_bridge,
         with_bios             = args.with_bios,
         with_app              = args.with_app,
+        with_core             = args.with_core,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],

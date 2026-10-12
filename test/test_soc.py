@@ -116,6 +116,26 @@ def test_soc_app_elaboration(tmp_path):
     assert "memory_region,rom," not in csrs
     assert "constant,config_cpu_reset_addr,1073741824" in csrs
 
+def test_soc_core_elaboration(tmp_path):
+    """MiSTer-core shell: the Game Boy core is replaced by the core shell (bring-up test pattern),
+    not a CPU, and keeps the common peripherals (no debug bridge by default)."""
+    target   = load_target()
+    platform = Platform()
+    target.add_timing_constraints(platform)
+    soc      = target.BaseSoC(platform, with_core=True)
+    csr_csv  = os.path.join(tmp_path, "csr.csv")
+    builder  = Builder(soc, output_dir=str(tmp_path), csr_csv=csr_csv, compile_software=False)
+    builder.build(build_name="chromatic", run=False)
+    with open(os.path.join(builder.gateware_dir, "chromatic.v"), encoding="utf-8") as f:
+        verilog = f.read()
+    with open(csr_csv, encoding="utf-8") as f:
+        csrs = f.read()
+    assert "core_marker" in verilog        # The core shell test pattern is present.
+    assert "emu_system_top" not in verilog # Game Boy core replaced.
+    assert "VexRiscv" not in verilog        # Not a CPU build.
+    assert "uartbone" not in verilog        # No debug bridge by default.
+    assert "csr_register,debug_ctrl_status," in csrs # Common peripherals kept.
+
 # IO Constraints -----------------------------------------------------------------------------------
 
 def test_soc_io_constraints(tmp_path):
