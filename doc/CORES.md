@@ -117,6 +117,29 @@ python3 scripts/chromatix_flash.py flash build/gateware/chromatic.fs
 python3 scripts/chromatic.py capture core.png --size 320x288
 ```
 
+## Worked example: NES
+
+The NES is the first worked port (NROM-class games, e.g. the homebrew `nes15`, 16 KB PRG + 8 KB CHR).
+Analysis of nand2mario's `nestang` core (same GW5A-25 as the Tang Primer 25K) shows the port is
+tractable: `compat.v`/`dpram.v` are already portable Verilog, the core takes a ~21.48 MHz clock, and
+memory is NROM-simple.
+
+- **Done and unit-tested** (BSD glue, `chromatix/gateware/cores/nes.py`, `test/test_nes.py`):
+  - `NESVideoAdapter`: `color`/`cycle`/`scanline` → `CoreVideo` through the public 2C02 palette
+    (RGB555) → `CoreVideoDownscaler` (256×240 → 160×144).
+  - `NESMemory`: PRG (0..) + CHR (0x200000..) in BRAM (single-cycle, no PSRAM latency), with the
+    loader write path and 16 KB PRG mirroring.
+  - `NESJoypad`: console buttons → the NES standard controller serial protocol.
+- **Remaining (one gated step)**: vendor the NES core RTL under `chromatix/verilog/cores/nes/` —
+  `nes.v ppu.v apu.v cart.sv t65/ mappers/ compat.v dpram.v game_loader.v EEPROM_24C0x.sv` from
+  nand2mario/`nestang` (GPL). This is **third-party code import**, which the environment gates
+  (untrusted-code integration): do it explicitly (clone `nestang`, copy those files), then `NESCore`
+  (`nes.py`) wires the glue to the RTL (the integration note in that file gives the exact port map),
+  and `--with-core nes` builds it. The video/memory/input glue needs no further work.
+- **BRAM budget**: the BRAM frame buffer (~30 BSRAM) + PRG/CHR (~20) + NES internal RAM + base (12)
+  is near 56/56, so for NES either move the frame buffer to PSRAM (triple-buffered, frees ~30 BSRAM —
+  the planned follow-up) or size PRG BRAM to the actual ROM.
+
 ## Prior art (mine, don't reinvent)
 
 - **nand2mario / TangCore**: `nestang` (NES, `game_loader.v`/`dpram.v`/`compat.v`), `snestang`,
