@@ -53,33 +53,29 @@ def test_nes_video_adapter():
 # Memory -------------------------------------------------------------------------------------------
 
 def test_nes_memory():
-    """PRG (bit21=0) and CHR (bit21=0x200000) load via channel B; CPU reads PRG (channel B), PPU
-    reads CHR (channel A); prg_mask mirrors a 16 KB PRG."""
-    dut = NESMemory(prg_kb=32, chr_kb=8, cd="sys")
-
-    def write(addr, data):
-        yield dut.b_write.eq(1); yield dut.b_addr.eq(addr); yield dut.b_din.eq(data); yield
-        yield dut.b_write.eq(0)
+    """PRG/CHR ROM pre-loaded into BRAM: CPU reads PRG (channel B, 0..), PPU reads CHR (channel A,
+    0x200000..); prg_mask mirrors a 16 KB PRG into the 32 KB CPU window."""
+    prg = [(a*7 + 1) & 0xff for a in range(32*1024)]
+    chr = [(a*3 + 5) & 0xff for a in range(8*1024)]
+    dut = NESMemory(prg_kb=32, chr_kb=8, cd="sys", prg_init=prg, chr_init=chr)
 
     def read_prg(addr):
-        yield dut.b_read.eq(1); yield dut.b_addr.eq(addr); yield; yield
+        yield dut.b_addr.eq(addr); yield; yield
         return (yield dut.b_dout)
 
     def read_chr(addr):
-        yield dut.a_read.eq(1); yield dut.a_addr.eq(addr); yield; yield
+        yield dut.a_addr.eq(addr); yield; yield
         return (yield dut.a_dout)
 
     def gen():
         yield dut.prg_mask.eq(0x7fff)
-        for a in range(8):
-            yield from write(a, (a*7 + 1) & 0xff)          # PRG.
-            yield from write(0x200000 + a, (a*3 + 5) & 0xff) # CHR.
-        for a in range(8):
-            assert (yield from read_prg(a)) == (a*7 + 1) & 0xff, a
-            assert (yield from read_chr(0x200000 + a)) == (a*3 + 5) & 0xff, a
+        for a in [0, 5, 100, 0x3fff, 0x7fff]:
+            assert (yield from read_prg(a)) == prg[a], a
+        for a in [0, 5, 100, 0x1fff]:
+            assert (yield from read_chr(0x200000 + a)) == chr[a], a
         # 16 KB mirroring: PRG address 0x4005 masks to 0x0005.
         yield dut.prg_mask.eq(0x3fff)
-        assert (yield from read_prg(0x4005)) == (5*7 + 1) & 0xff
+        assert (yield from read_prg(0x4005)) == prg[5]
 
     run_simulation(dut, gen())
 

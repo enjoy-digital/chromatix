@@ -117,28 +117,38 @@ python3 scripts/chromatix_flash.py flash build/gateware/chromatic.fs
 python3 scripts/chromatic.py capture core.png --size 320x288
 ```
 
-## Worked example: NES
+## Worked example: NES (in progress — core runs, game not yet rendering)
 
-The NES is the first worked port (NROM-class games, e.g. the homebrew `nes15`, 16 KB PRG + 8 KB CHR).
-Analysis of nand2mario's `nestang` core (same GW5A-25 as the Tang Primer 25K) shows the port is
-tractable: `compat.v`/`dpram.v` are already portable Verilog, the core takes a ~21.48 MHz clock, and
-memory is NROM-simple.
+The NES is the first worked port (NROM-class, the bundled homebrew `nes15`, 16 KB PRG + 8 KB CHR),
+hosting nand2mario's `nestang` core (same GW5A-25 as the Tang Primer 25K). Build it with
+`--with-core nes` after dropping the RTL in (see `chromatix/verilog/cores/nes/README.md`).
 
-- **Done and unit-tested** (BSD glue, `chromatix/gateware/cores/nes.py`, `test/test_nes.py`):
-  - `NESVideoAdapter`: `color`/`cycle`/`scanline` → `CoreVideo` through the public 2C02 palette
-    (RGB555) → `CoreVideoDownscaler` (256×240 → 160×144).
-  - `NESMemory`: PRG (0..) + CHR (0x200000..) in BRAM (single-cycle, no PSRAM latency), with the
-    loader write path and 16 KB PRG mirroring.
-  - `NESJoypad`: console buttons → the NES standard controller serial protocol.
-- **Remaining (one gated step)**: vendor the NES core RTL under `chromatix/verilog/cores/nes/` —
-  `nes.v ppu.v apu.v cart.sv t65/ mappers/ compat.v dpram.v game_loader.v EEPROM_24C0x.sv` from
-  nand2mario/`nestang` (GPL). This is **third-party code import**, which the environment gates
-  (untrusted-code integration): do it explicitly (clone `nestang`, copy those files), then `NESCore`
-  (`nes.py`) wires the glue to the RTL (the integration note in that file gives the exact port map),
-  and `--with-core nes` builds it. The video/memory/input glue needs no further work.
-- **BRAM budget**: the BRAM frame buffer (~30 BSRAM) + PRG/CHR (~20) + NES internal RAM + base (12)
-  is near 56/56, so for NES either move the frame buffer to PSRAM (triple-buffered, frees ~30 BSRAM —
-  the planned follow-up) or size PRG BRAM to the actual ROM.
+**What works (verified on hardware):**
+- The whole thing **synthesizes and fits**: logic 54%, BSRAM 35/56, DSP 15/28, 3/6 PLLs, timing met
+  (only the pre-existing benign PSRAM reset-recovery paths). The ~50 mappers are pruned by feeding a
+  **constant `mapper_flags`** (NROM); VRC/FDS excluded.
+- The glue (`chromatix/gateware/cores/nes.py`, BSD, unit-tested in `test/test_nes.py`): `NESCore`
+  (its own ~21.48 MHz PLL + a 4× clock for the ROM BRAM), `NESVideoDownscaler` (NES
+  `color`/`cycle`/`scanline` → 2C02 palette → 256×240 nearest-neighbor downscale → 160×144 Game Boy
+  LCD interface, storing the 6-bit index so the frame buffer is ~12 BSRAM), `NESMemory` (PRG at 0.. +
+  CHR at 0x200000.. in BRAM, read-only, direct-loaded from the parsed iNES at build time, 16 KB PRG
+  mirroring), `NESJoypad` (buttons → the standard controller serial).
+- On hardware the **NES core clocks and its PPU produces video** (confirmed: it overwrites a
+  pre-initialised frame buffer), and the **display path is proven** (a palette ramp shows correctly
+  over UVC).
+
+**What does not work yet:** the game renders **black** — the CPU is clocking but never enables PPU
+rendering (it is not reaching the game's draw code). Ruled out by inspection/experiment: clock source
+(clk_24, proven live), reset sequence (robust up-counter), ROM parse and reset/NMI/IRQ vectors
+(verified), PRG/CHR address mapping (`cpumem_addr`=PRG, `ppumem_addr`=CHR, confirmed), CPU/PPU
+dividers and `sys_type` (match nestang), and memory read latency (added a 4× BRAM read clock). The
+remaining fault is in CPU execution and is best found in **simulation** (a Verilator testbench of the
+core + glue, or nestang's own sim with `nes15`) — hardware build/flash/capture cycles (~8 min) are
+too slow to probe it. This is the documented next step.
+
+**BRAM budget** (resolved): PRG/CHR BRAM sized to the ROM, and the frame buffer stores the 6-bit
+palette index (palette applied on read) → ~12 BSRAM, giving 35/56 overall. A PSRAM-backed
+triple-buffered frame buffer remains the scalable follow-up for larger cores (and removes tearing).
 
 ## Prior art (mine, don't reinvent)
 

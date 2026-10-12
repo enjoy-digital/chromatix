@@ -53,6 +53,7 @@ from chromatix.gateware.adc         import BatteryADC
 from chromatix.gateware.terminal    import LCDTerminal
 from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
 from chromatix.gateware.core_shell  import CoreTestPattern, CoreVideoTestPattern, CoreVideoDownscaler
+from chromatix.gateware.cores.nes   import NESCore
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -121,6 +122,7 @@ class BaseSoC(SoCMini):
         with_bios             = False,
         with_app              = False,
         with_core             = False,
+        core                  = None,
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
@@ -617,22 +619,41 @@ class BaseSoC(SoCMini):
                 link.out.eq(0),
             ]
         elif with_core:
-            # MiSTer-core shell in place of the Game Boy core. Bring-up: a generic "core video" test
-            # source (256x224, the shape of an NES/SMS core) through the nearest-neighbor downscaler
-            # to the 160x144 Game Boy LCD interface (no ROM, no GPL core RTL). A hosted core replaces
-            # the test source (and the downscaler is bypassed for a 160x144-native core like Game
-            # Gear, which can drive the GB LCD interface directly: see CoreTestPattern).
-            self.core_src = src = CoreVideoTestPattern(256, 224, cd="hclk")
-            self.core     = ds  = CoreVideoDownscaler(256, 224, write_cd="hclk")
-            self.comb += [
-                ds.video.ce.eq(src.video.ce),
-                ds.video.r.eq(src.video.r),
-                ds.video.g.eq(src.video.g),
-                ds.video.b.eq(src.video.b),
-                ds.video.hblank.eq(src.video.hblank),
-                ds.video.vblank.eq(src.video.vblank),
-            ]
-            lcd_source = ds
+            # MiSTer-core shell in place of the Game Boy core.
+            if core == "nes":
+                # A hosted NES core (nand2mario nestang, GPL): built-in ROM, 256x240 downscaled to
+                # the 160x144 Game Boy LCD interface, console buttons -> joypad, APU -> audio.
+                nes_buttons = SimpleNamespace(
+                    a      = btns.a          | mcu_buttons[3],
+                    b      = btns.b          | mcu_buttons[2],
+                    select = btns.sel        | mcu_buttons[1],
+                    start  = btns.start      | mcu_buttons[0],
+                    up     = btns.dpad_up    | mcu_buttons[4],
+                    down   = btns.dpad_down  | mcu_buttons[7],
+                    left   = btns.dpad_left  | mcu_buttons[6],
+                    right  = btns.dpad_right | mcu_buttons[5],
+                )
+                self.core = lcd_source = NESCore(platform, clk_24, int(24e6), nes_buttons)
+                self.sync.hclk += [ # NES audio (nes domain) -> shared bus (quasi-static).
+                    left.eq(lcd_source.left),
+                    right.eq(lcd_source.right),
+                ]
+            else:
+                # Bring-up: a generic "core video" test source (256x224, the shape of an NES/SMS core)
+                # through the nearest-neighbor downscaler to the 160x144 Game Boy LCD interface (no
+                # ROM, no GPL core RTL). A 160x144-native core (Game Gear) can drive the GB LCD
+                # interface directly instead (CoreTestPattern).
+                self.core_src = src = CoreVideoTestPattern(256, 224, cd="hclk")
+                self.core     = ds  = CoreVideoDownscaler(256, 224, write_cd="hclk")
+                self.comb += [
+                    ds.video.ce.eq(src.video.ce),
+                    ds.video.r.eq(src.video.r),
+                    ds.video.g.eq(src.video.g),
+                    ds.video.b.eq(src.video.b),
+                    ds.video.hblank.eq(src.video.hblank),
+                    ds.video.vblank.eq(src.video.vblank),
+                ]
+                lcd_source = ds
 
             # Cartridge/IR/link idle (as when the Game Boy core doesn't access them).
             for pad in [cart.d, cart.rst, link.clk]:
@@ -1004,8 +1025,11 @@ def main():
     parser.add_argument("--with-bios",             action="store_true",       help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
     parser.add_argument("--with-app",              action="store_true",       help="CPU application SoC (VexRiscv) in place of the Game Boy core: PSRAM framebuffer, PCM audio, ESP32 UART, firmware loaded over USB.")
     parser.add_argument("--with-core",             action="store_true",       help="MiSTer-core shell in place of the Game Boy core (bring-up: a 160x144 test pattern on the LCD/UVC).")
+    parser.add_argument("--core",                  default=None, choices=["nes"], help="Hosted core for --with-core (default: the test pattern).")
     parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
+    if args.core is not None:
+        args.with_core = True
 
     # Platform.
     platform = Platform(toolchain=args.toolchain)
@@ -1025,6 +1049,7 @@ def main():
         with_bios             = args.with_bios,
         with_app              = args.with_app,
         with_core             = args.with_core,
+        core                  = args.core,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
