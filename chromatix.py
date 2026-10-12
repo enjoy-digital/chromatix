@@ -52,7 +52,7 @@ from chromatix.gateware.sysmon      import SystemMonitorUART, SystemMonitorBridg
 from chromatix.gateware.adc         import BatteryADC
 from chromatix.gateware.terminal    import LCDTerminal
 from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
-from chromatix.gateware.core_shell  import CoreTestPattern
+from chromatix.gateware.core_shell  import CoreTestPattern, CoreVideoTestPattern, CoreVideoDownscaler
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -617,10 +617,22 @@ class BaseSoC(SoCMini):
                 link.out.eq(0),
             ]
         elif with_core:
-            # MiSTer-core shell in place of the Game Boy core. Bring-up source: a self-contained
-            # 160x144 test pattern driving the Game Boy LCD interface (no ROM, no GPL core RTL). A
-            # hosted core (and its downscaler/loader) replaces this `lcd_source` later.
-            self.core = lcd_source = CoreTestPattern()
+            # MiSTer-core shell in place of the Game Boy core. Bring-up: a generic "core video" test
+            # source (256x224, the shape of an NES/SMS core) through the nearest-neighbor downscaler
+            # to the 160x144 Game Boy LCD interface (no ROM, no GPL core RTL). A hosted core replaces
+            # the test source (and the downscaler is bypassed for a 160x144-native core like Game
+            # Gear, which can drive the GB LCD interface directly: see CoreTestPattern).
+            self.core_src = src = CoreVideoTestPattern(256, 224, cd="hclk")
+            self.core     = ds  = CoreVideoDownscaler(256, 224, write_cd="hclk")
+            self.comb += [
+                ds.video.ce.eq(src.video.ce),
+                ds.video.r.eq(src.video.r),
+                ds.video.g.eq(src.video.g),
+                ds.video.b.eq(src.video.b),
+                ds.video.hblank.eq(src.video.hblank),
+                ds.video.vblank.eq(src.video.vblank),
+            ]
+            lcd_source = ds
 
             # Cartridge/IR/link idle (as when the Game Boy core doesn't access them).
             for pad in [cart.d, cart.rst, link.clk]:

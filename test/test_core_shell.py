@@ -8,7 +8,7 @@ from migen import *
 
 from litex.gen.sim import run_simulation
 
-from chromatix.gateware.core_shell import CoreTestPattern, COLOR_BARS, rgb555
+from chromatix.gateware.core_shell import CoreTestPattern, CoreVideoDownscaler, COLOR_BARS, rgb555
 
 # CoreTestPattern ----------------------------------------------------------------------------------
 
@@ -57,3 +57,50 @@ def test_core_test_pattern():
             assert pixels[(0, x)] == white, x
 
     run_simulation(dut, {"hclk": gen()}, clocks={"hclk": 10})
+
+# CoreVideoDownscaler ------------------------------------------------------------------------------
+
+def test_core_video_downscaler():
+    """Nearest-neighbor downscale (16x12 -> 8x6): every output pixel is written, and a horizontal
+    gradient (r=x_in) / vertical gradient (g=y_in) stays monotonic across the output, i.e. the
+    downscaled image preserves order and covers the full input range."""
+    in_w, in_h, out_w, out_h = 16, 12, 8, 6
+    dut = CoreVideoDownscaler(in_w=in_w, in_h=in_h, out_w=out_w, out_h=out_h, write_cd="sys")
+
+    writes = {} # output address -> last color written.
+
+    def gen():
+        v, w = dut.video, writes
+        # Frame start: a vblank rising edge resets the mapping.
+        yield v.ce.eq(1); yield v.hblank.eq(0); yield v.vblank.eq(1)
+        for _ in range(3):
+            yield
+        yield v.vblank.eq(0)
+        for y in range(in_h):
+            # Active line: in_w pixels, r=x_in, g=y_in.
+            yield v.hblank.eq(0)
+            for x in range(in_w):
+                yield v.r.eq(x); yield v.g.eq(y); yield v.b.eq(0)
+                yield
+                if (yield dut.fb_wr.we):
+                    w[(yield dut.fb_wr.adr)] = (yield dut.fb_wr.dat_w)
+            # Horizontal blank: its rising edge advances the vertical mapping.
+            yield v.hblank.eq(1)
+            for _ in range(4):
+                yield
+                if (yield dut.fb_wr.we):
+                    w[(yield dut.fb_wr.adr)] = (yield dut.fb_wr.dat_w)
+
+        # Every output pixel was written (full coverage, no gaps).
+        assert set(w.keys()) == set(range(out_w*out_h)), sorted(w.keys())
+
+        # Decode {B,G,R} and check monotonicity (order preserved by the downscale).
+        for yo in range(out_h):
+            rs = [ w[yo*out_w + xo] & 0x1f for xo in range(out_w) ]
+            assert rs == sorted(rs), (yo, rs)        # r non-decreasing across the row.
+            assert rs[0] <= 2 and rs[-1] >= in_w-3, rs # covers low..high input columns.
+        for xo in range(out_w):
+            gs = [ (w[yo*out_w + xo] >> 5) & 0x1f for yo in range(out_h) ]
+            assert gs == sorted(gs), (xo, gs)        # g non-decreasing down the column.
+
+    run_simulation(dut, {"sys": gen()}, clocks={"sys": 10, "hclk": 10})

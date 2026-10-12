@@ -130,7 +130,8 @@ def test_soc_core_elaboration(tmp_path):
         verilog = f.read()
     with open(csr_csv, encoding="utf-8") as f:
         csrs = f.read()
-    assert "core_marker" in verilog        # The core shell test pattern is present.
+    assert "core_src_marker" in verilog    # The core shell test pattern source is present.
+    assert "core_fb" in verilog            # The downscaler frame buffer is present.
     assert "emu_system_top" not in verilog # Game Boy core replaced.
     assert "VexRiscv" not in verilog        # Not a CPU build.
     assert "uartbone" not in verilog        # No debug bridge by default.
