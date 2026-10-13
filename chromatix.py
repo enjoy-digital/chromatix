@@ -54,6 +54,7 @@ from chromatix.gateware.terminal    import LCDTerminal
 from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
 from chromatix.gateware.core_shell  import CoreTestPattern, CoreVideoTestPattern, CoreVideoDownscaler
 from chromatix.gateware.cores.nes   import NESCore, NESLoaderCSR
+from chromatix.gateware.cores.sms   import SMSCore
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -124,6 +125,7 @@ class BaseSoC(SoCMini):
         with_core             = False,
         core                  = None,
         nes_rom               = "nes15.hex",
+        sms_rom               = None,
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
@@ -647,6 +649,26 @@ class BaseSoC(SoCMini):
                     left.eq(lcd_source.left),
                     right.eq(lcd_source.right),
                 ]
+            elif core == "sms":
+                # A hosted SMS / Game Gear core (nand2mario smstang, GPL). See cores/sms.py: a 2nd
+                # console family, the methodology's genericity proof. First-cut glue (elaborates; a
+                # fitting build needs the cartridge in PSRAM behind a cache -- doc/CORES.md).
+                sms_buttons = SimpleNamespace(
+                    a      = btns.a          | mcu_buttons[3],
+                    b      = btns.b          | mcu_buttons[2],
+                    select = btns.sel        | mcu_buttons[1],
+                    start  = btns.start      | mcu_buttons[0],
+                    up     = btns.dpad_up    | mcu_buttons[4],
+                    down   = btns.dpad_down  | mcu_buttons[7],
+                    left   = btns.dpad_left  | mcu_buttons[6],
+                    right  = btns.dpad_right | mcu_buttons[5],
+                )
+                self.core = lcd_source = SMSCore(platform, clk_24, int(24e6), sms_buttons,
+                    rom=sms_rom, game_gear=True)
+                self.sync.hclk += [
+                    left.eq(lcd_source.left),
+                    right.eq(lcd_source.right),
+                ]
             else:
                 # Bring-up: a generic "core video" test source (256x224, the shape of an NES/SMS core)
                 # through the nearest-neighbor downscaler to the 160x144 Game Boy LCD interface (no
@@ -1034,8 +1056,9 @@ def main():
     parser.add_argument("--with-bios",             action="store_true",       help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
     parser.add_argument("--with-app",              action="store_true",       help="CPU application SoC (VexRiscv) in place of the Game Boy core: PSRAM framebuffer, PCM audio, ESP32 UART, firmware loaded over USB.")
     parser.add_argument("--with-core",             action="store_true",       help="MiSTer-core shell in place of the Game Boy core (bring-up: a 160x144 test pattern on the LCD/UVC).")
-    parser.add_argument("--core",                  default=None, choices=["nes"], help="Hosted core for --with-core (default: the test pattern).")
+    parser.add_argument("--core",                  default=None, choices=["nes", "sms"], help="Hosted core for --with-core (default: the test pattern).")
     parser.add_argument("--nes-rom",               default="nes15.hex",          help="iNES ROM for --core nes (a .nes/.hex path, or a name under cores/nes/roms/; NROM only).")
+    parser.add_argument("--sms-rom",               default=None,                 help="SMS/Game Gear ROM for --core sms (a path, or a name under cores/sms/roms/; small unbanked for now).")
     parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
     if args.core is not None:
@@ -1061,6 +1084,7 @@ def main():
         with_core             = args.with_core,
         core                  = args.core,
         nes_rom               = args.nes_rom,
+        sms_rom               = args.sms_rom,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
