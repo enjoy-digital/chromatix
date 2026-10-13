@@ -678,7 +678,8 @@ class BaseSoC(SoCMini):
                     cart_port      = memory.sms_cart_port if with_sms_cart else None,
                     cart_port_dout = memory.ctrl.dout     if with_sms_cart else None,
                     cart_ready     = memory.bist_done     if with_sms_cart else None,
-                    cart_bram_kb   = 16 if sms_bram else 64)
+                    cart_bram_kb   = 16 if sms_bram else 64,
+                    hw_debug       = sms_bram) # BRAM diagnostic build: expose the VDP I/O handshake.
                 if with_debug_bridge:
                     self.sms_loader = SMSLoaderCSR(lcd_source, with_debug=True)
                 self.sync.hclk += [

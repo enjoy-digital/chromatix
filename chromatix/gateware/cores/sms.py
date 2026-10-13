@@ -46,8 +46,29 @@ SMS_ROM_BASE = 0x400000    # Cartridge ROM placed here in the PSRAM (host upload
 
 # SMS RTL sources ----------------------------------------------------------------------------------
 
-def add_sms_sources(platform):
+def sms_rtl_with_io_debug(dst_dir, src_dir=None):
+    """Copy the SMS RTL to dst_dir and add a 21-bit I/O-debug output to system.v (the Z80 <-> VDP
+    register-write handshake: {D_in, vdp_WR_n, M1_n, WR_n, RD_n, IORQ_n, A[7:0]}), for hardware
+    introspection. Repo RTL untouched. Returns dst_dir."""
+    import shutil, re
+    src_dir = src_dir or SMS_RTL_PATH
+    shutil.rmtree(dst_dir, ignore_errors=True)
+    shutil.copytree(src_dir, dst_dir)
+    sysv = os.path.join(dst_dir, "system.v")
+    with open(sysv, encoding="utf-8") as f:
+        text = f.read()
+    text = text.replace("ROMEN);", "ROMEN, dbg_io);", 1)
+    text = re.sub(r"\nendmodule\s*$",
+        "\n   output [20:0] dbg_io;\n"
+        "   assign dbg_io = {D_in, vdp_WR_n, M1_n, WR_n, RD_n, IORQ_n, A[7:0]};\nendmodule\n",
+        text, count=1)
+    with open(sysv, "w", encoding="utf-8") as f:
+        f.write(text)
+    return dst_dir
+
+def add_sms_sources(platform, rtl_path=None):
     """Add the vendored SMS core RTL (chromatix/verilog/cores/sms/, GPL) + the ChromatiX FM stub."""
+    rtl_path = rtl_path or SMS_RTL_PATH
     files = [
         "system.v", "video.v",
         "vdp.v", "vdp_main.v", "vdp_background.v", "vdp_sprites.v", "vdp_sprite_shifter.v",
@@ -59,7 +80,7 @@ def add_sms_sources(platform):
     ]
     for f in files:
         language = "systemverilog" if f.endswith(".sv") else "verilog"
-        platform.add_source(os.path.join(SMS_RTL_PATH, f), language=language)
+        platform.add_source(os.path.join(rtl_path, f), language=language)
 
 # SMS Loader CSR (host -> SMSCore cartridge, over the debug bridge) --------------------------------
 
@@ -86,7 +107,7 @@ class SMSLoaderCSR(LiteXModule):
         if with_debug:
             self.misses = CSRStatus(32, description="Cartridge cache misses.")
             self.reads  = CSRStatus(32, description="Cartridge reads.")
-            self.debug  = CSRStatus(16, description="[3:0] cache state, 4 stall, 5 reset, 6 rom_rd, [15:8] rom_do.")
+            self.debug  = CSRStatus(32, description="Debug: VDP color+raster, or the VDP I/O handshake (hw_debug).")
             self.specials += MultiReg(core.dbg, self.debug.status)
             if hasattr(core, "cart"):
                 self.specials += [
@@ -103,7 +124,8 @@ class SMSCore(LiteXModule):
     `game_gear` selects the 160x144 native path (no downscale); otherwise SMS 256x192 is downscaled.
     """
     def __init__(self, platform, clk, clk_freq, buttons, rom=None, game_gear=True, with_pll=True,
-                 cart_port=None, cart_port_dout=None, cart_ready=None, bios_en=False, cart_bram_kb=64):
+                 cart_port=None, cart_port_dout=None, cart_ready=None, bios_en=False, cart_bram_kb=64,
+                 hw_debug=False):
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
         self.gb_mode   = Signal(2)
@@ -115,16 +137,22 @@ class SMSCore(LiteXModule):
         # in reset while the host uploads the ROM into the PSRAM, and flush the cache afterwards.
         self.ld_hold    = Signal()
         self.cart_flush = Signal()
-        self.dbg        = Signal(16) # Debug: [3:0] cache state, 4 stall, 5 reset, 6 rom_rd, [15:8] rom_do.
+        self.dbg        = Signal(32) # Debug CSR payload (color+raster, or the VDP I/O handshake when hw_debug).
 
         # # #
 
-        add_sms_sources(platform)
+        # hw_debug: build against an RTL copy with an I/O-debug output added to system.v (the Z80 <->
+        # VDP register-write handshake), for hardware introspection; otherwise the repo RTL as-is.
+        if hw_debug:
+            add_sms_sources(platform, rtl_path=sms_rtl_with_io_debug(os.path.join("build", "sms_dbg_src")))
+        else:
+            add_sms_sources(platform)
 
-        rom_a  = Signal(22) # Cartridge address / read (from the core).
-        rom_rd = Signal()
-        rom_do = Signal(8)  # Cartridge byte (to the core).
-        stall  = Signal()   # Cartridge cache stall (freezes the clock-enables on a PSRAM miss).
+        rom_a   = Signal(22) # Cartridge address / read (from the core).
+        rom_rd  = Signal()
+        rom_do  = Signal(8)  # Cartridge byte (to the core).
+        stall   = Signal()   # Cartridge cache stall (freezes the clock-enables on a PSRAM miss).
+        dbg_io  = Signal(21) # system.v I/O-debug bus (hw_debug): {D_in,vdp_WR_n,M1_n,WR_n,RD_n,IORQ_n,A[7:0]}.
 
         # Clock: one 53.69 MHz clk_sys (own PLL), the SMS "sms" clock domain.
         if with_pll:
@@ -325,6 +353,7 @@ class SMSCore(LiteXModule):
             i_ROMAD           = 0,
             i_ROMDT           = 0,
             i_ROMEN           = 0,
+            **({"o_dbg_io": dbg_io} if hw_debug else {}),
         )
         self.comb += [self.left.eq(audio_l), self.right.eq(audio_r)]
 
@@ -347,5 +376,6 @@ class SMSCore(LiteXModule):
             self.gb_mode.eq(ds.gb_mode),
             self.gb_on.eq(ds.gb_on),
             self.gb_vsync.eq(ds.gb_vsync),
-            self.dbg.eq(Cat(color, x[:4])), # Debug: [11:0] VDP color output, [15:12] raster x low bits.
+            # Debug CSR: the VDP I/O handshake (hw_debug) or the VDP color output + raster x.
+            self.dbg.eq(dbg_io if hw_debug else Cat(color, x[:4])),
         ]
