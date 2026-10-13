@@ -218,7 +218,10 @@ class CoreVideoDownscaler(LiteXModule):
         fb_wr = fb.get_port(write_capable=True, clock_domain=write_cd)
         fb_rd = fb.get_port(clock_domain="hclk")
         self.specials += fb, fb_wr, fb_rd
-        self.fb    = fb    # Exposed for simulation/inspection.
+        # NB: do not expose the frame-buffer Memory as a module attribute (`self.fb = fb`): with a
+        # bus present (--with-debug-bridge, e.g. --core sms) LiteX auto-maps an attribute Memory onto
+        # the CSR bus, adding a third port -> Gowin "cannot infer ... due to multiple write clocks".
+        # The write port (not a Memory) is safe to expose for simulation/inspection.
         self.fb_wr = fb_wr
 
         # Write side (write_cd): scale-on-write ----------------------------------------------------
