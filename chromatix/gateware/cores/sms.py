@@ -103,7 +103,7 @@ class SMSCore(LiteXModule):
     `game_gear` selects the 160x144 native path (no downscale); otherwise SMS 256x192 is downscaled.
     """
     def __init__(self, platform, clk, clk_freq, buttons, rom=None, game_gear=True, with_pll=True,
-                 cart_port=None, cart_port_dout=None, cart_ready=None, bios_en=False):
+                 cart_port=None, cart_port_dout=None, cart_ready=None, bios_en=False, cart_bram_kb=64):
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
         self.gb_mode   = Signal(2)
@@ -199,10 +199,11 @@ class SMSCore(LiteXModule):
                 path = rom if os.path.exists(rom) else os.path.join(SMS_RTL_PATH, "roms", rom)
                 with open(path, "rb") as f:
                     rom_init = list(f.read())
-            cart     = Memory(8, 2**16, init=rom_init) # 64 KB window (unbanked small ROMs).
+            bits     = log2_int(cart_bram_kb*1024)
+            cart     = Memory(8, cart_bram_kb*1024, init=rom_init) # unbanked small ROMs.
             cart_rd  = cart.get_port(clock_domain="sms")
             self.specials += cart, cart_rd
-            self.comb += [cart_rd.adr.eq(rom_a[:16]), rom_do.eq(cart_rd.dat_r)]
+            self.comb += [cart_rd.adr.eq(rom_a[:bits]), rom_do.eq(cart_rd.dat_r)]
 
         # System RAM (16 KB window). (An 8 KB BRAM is enough for the SMS's 8 KB, but on this part it
         # did not reduce the BSRAM count and placed worse; the 16 KB layout routes at 56/56.)

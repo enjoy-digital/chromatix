@@ -126,6 +126,7 @@ class BaseSoC(SoCMini):
         core                  = None,
         nes_rom               = "nes15.hex",
         sms_rom               = None,
+        sms_bram              = False,
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
@@ -150,7 +151,9 @@ class BaseSoC(SoCMini):
         with_vcart = with_debug_bridge and not with_core
         # SMS cartridge cache: --core sms serves its ROM from the PSRAM behind a cache (CoreROMCache),
         # the host uploads it over the debug bridge -- this needs a dedicated PSRAM arbiter port.
-        with_sms_cart = with_core and (core == "sms") and with_debug_bridge
+        # --sms-bram bakes a (small) ROM into BRAM instead (no cache), to isolate the PSRAM-cache path
+        # from the rest on hardware.
+        with_sms_cart = with_core and (core == "sms") and with_debug_bridge and not sms_bram
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
@@ -674,8 +677,9 @@ class BaseSoC(SoCMini):
                     rom=sms_rom, game_gear=True, bios_en=False,
                     cart_port      = memory.sms_cart_port if with_sms_cart else None,
                     cart_port_dout = memory.ctrl.dout     if with_sms_cart else None,
-                    cart_ready     = memory.bist_done     if with_sms_cart else None)
-                if with_sms_cart:
+                    cart_ready     = memory.bist_done     if with_sms_cart else None,
+                    cart_bram_kb   = 16 if sms_bram else 64)
+                if with_debug_bridge:
                     self.sms_loader = SMSLoaderCSR(lcd_source, with_debug=True)
                 self.sync.hclk += [
                     left.eq(lcd_source.left),
@@ -1071,6 +1075,7 @@ def main():
     parser.add_argument("--core",                  default=None, choices=["nes", "sms"], help="Hosted core for --with-core (default: the test pattern).")
     parser.add_argument("--nes-rom",               default="nes15.hex",          help="iNES ROM for --core nes (a .nes/.hex path, or a name under cores/nes/roms/; NROM only).")
     parser.add_argument("--sms-rom",               default=None,                 help="SMS/Game Gear ROM for --core sms (a path, or a name under cores/sms/roms/; small unbanked for now).")
+    parser.add_argument("--sms-bram",              action="store_true",          help="--core sms: bake a small ROM into BRAM (no PSRAM cache) -- isolates the cache path on hardware.")
     parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
     if args.core is not None:
@@ -1097,6 +1102,7 @@ def main():
         core                  = args.core,
         nes_rom               = args.nes_rom,
         sms_rom               = args.sms_rom,
+        sms_bram              = args.sms_bram,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
