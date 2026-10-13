@@ -219,27 +219,58 @@ double-buffering (no tearing), but adds a PSRAM write+read stream. The NES fits 
 (loader build 47/56), so this is deferred until a core is BSRAM-starved (e.g. a maxed SMS) — the
 mechanism (`memory.gb_*` write + `LCDPSRAMFramebuffer`-style read) is the one to reuse then.
 
-## Worked example (bring-up planned): SMS / Game Gear — the 2nd core
+## Worked example: SMS / Game Gear — the 2nd core (builds & fits)
 
 The 2nd core proves the methodology generalises to a different console family. Target:
 nand2mario's [`smstang`](https://github.com/nand2mario/smstang) (SMS-MiSTer ported to Gowin; same
-GW5A-25). **Status: first-cut glue in place and elaborating.** The GPL RTL drops under
-`chromatix/verilog/cores/sms/` (gitignored; see its README); `chromatix/gateware/cores/sms.py`
-(`SMSCore`, BSD) + `--core sms` wire the `system` DUT to the shell — clock-enables, the `video`
-raster, system RAM in BRAM, a (placeholder BRAM) cartridge, audio, input — and the SoC elaborates.
-The remaining work to a **fitting + rendering** build:
-1. **Cartridge in PSRAM behind a cache** — the fit blocker. With a BRAM cartridge, the frame buffer
-   (~15–20 BSRAM) + 16 KB system RAM + 16 KB VRAM + the boot ROM + the cartridge overflow the 56
-   BSRAM, so the ROM (up to 512 KB) must go in PSRAM (reuse `VirtualCart`'s cache, freeze the core
-   via the clock-enables on a miss). This is the one hard piece the NES avoided.
-2. **Boot ROM path** — `sprom.v`'s `$readmemh("mboot.hex")` must resolve at build time (copy it into
-   the gateware dir, or make the path absolute); `bios_en=0` so its content is a don't-care.
-3. **A build** to validate the ~80-port glue against the real `system` (synthesis) and measure the
-   BSRAM overflow precisely.
-4. **Video alignment** — the `color[11:0]` output lags `x`/`y` by the VDP pipeline depth; align the
-   `CoreVideo.ce`/blanking to it on hardware (expect a shifted image first, like the NES bring-up).
+GW5A-25). **Status: `--core sms --with-debug-bridge` builds and FITS** — BSRAM **56/56**, 0 timing
+violations, logic ~72%. The GPL RTL drops under `chromatix/verilog/cores/sms/` (gitignored; see its
+README); `chromatix/gateware/cores/sms.py` (`SMSCore`, BSD) + `--core sms` wire the `system` DUT to
+the shell: clock-enables, the `video` raster, system RAM in BRAM, audio, input, the **PSRAM
+cartridge cache**, and the SMS BIOS.
+
+The fit blocker was memory: with a BRAM cartridge the frame buffer + 16 KB system RAM + 16 KB VRAM +
+the 16 KB boot ROM + the cartridge overflow the 56 BSRAM, so the cartridge ROM (up to 512 KB) goes in
+**PSRAM behind a cache** — `chromatix/gateware/cores/rom_cache.py` (`CoreROMCache`, the generalisation
+of `vcart.py`'s Game-Boy cache): a direct-mapped 16-byte-line cache in the core domain in front of
+one PSRAM arbiter port, which `stall`s the core (gating its clock-enables, so the whole core pauses
+in cadence and resumes) on a miss while the line is fetched. This is the one hard piece the NES
+avoided (NROM fit in BRAM). The host uploads the ROM over the debug bridge (`scripts/chromatic.py
+sms-load`) into the PSRAM at `SMS_ROM_BASE`; the `--core sms` branch boots the SMS **BIOS**
+(`mboot.hex`) in SMS mode (256×192 → downscaler) so it renders a screen with no cartridge — the first
+hardware validation of the video path — then boots the uploaded cartridge.
+
 The FM (`opll`) is stubbed (`opll_stub.v`, BSD) to skip the VHDL VM2413 and save area — fine for the
 vast majority of SMS games and all Game Gear games; drop in the real `vm2413/` for FM titles.
+
+**Render bring-up (in progress).** On hardware the core froze right after its first cartridge fetch.
+A cache debug CSR (`SMSLoaderCSR(with_debug=True)` — FSM state / stall / reset / `rom_do`) pinpointed
+it: the cache sat in **FILL forever** because the core left reset and issued its first PSRAM read
+**before the PSRAM BIST/init finished**, so the one-cycle arbiter request was dropped and the line
+fill never completed. Fixed by holding the SMS in reset until the PSRAM is ready
+(`cart_ready = bist_done`).
+
+**The routing wall.** The SMS fills the GW5A-25's BSRAM (**56/56**) and the design is routing-bound:
+P&R *places* fine (~16.4 K LUT) but routing succeeds only marginally and **seed-dependently** — one
+configuration routed cleanly (0 unrouted), and *any* small change (the debug CSR, the reset-gate,
+even a RAM resize) flips it to 45–90 unrouted nets. A reliably routable — and therefore renderable —
+build needs **BSRAM headroom** first. Options, in order of value: a **PSRAM-backed downscaler frame
+buffer** (−~20 BSRAM; reuses the mechanism noted in the NES section); an **indexed frame buffer**
+(store the VDP palette index, palette on read, like the NES — needs a VDP tap; −~10 BSRAM); or
+**trimming the unused boot ROM** (`bios_en=0` → shrink `sprom`; −8 BSRAM). This is the clear next step.
+
+**Also remaining** (after a routable build): video color/raster alignment (the `color[11:0]` output
+lags `x`/`y` by the VDP pipeline depth — expect a shifted image first, like the NES bring-up); the
+Game Gear 160×144-native path (no downscaler); FM audio (the real VM2413).
+
+Why SMS/GG is a good second target and what is *new* vs. the NES:
+- **Clean clock-enable DUT.** `system.v` runs off one 53.69 MHz `clk_sys` with enables `ce_cpu` (÷15),
+  `ce_vdp` (÷5), `ce_pix` (÷10), `ce_sp` — exactly the shape Gowin likes. Map to a `GW5APLL` + a
+  divider (cadence from `smstang_top.sv`). No cycle-exact gymnastics.
+- **Random-access video.** Unlike the NES's streamed `color`, the SMS DUT is scanned: drive
+  `x[8:0]`/`y[8:0]`, read `color[11:0]` (BGR 4-4-4 → RGB555). **Game Gear is 160×144 native → drive
+  the GB-LCD interface directly, no downscaler/FB (do GG first).** SMS is 256×192 → reuse the
+  downscaler.
 
 Why SMS/GG is a good second target and what is *new* vs. the NES:
 - **Clean clock-enable DUT.** `system.v` runs off one 53.69 MHz `clk_sys` with enables `ce_cpu` (÷15),
