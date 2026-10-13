@@ -137,6 +137,32 @@ def test_soc_core_elaboration(tmp_path):
     assert "uartbone" not in verilog        # No debug bridge by default.
     assert "csr_register,debug_ctrl_status," in csrs # Common peripherals kept.
 
+def test_soc_core_nes_loader_elaboration(tmp_path):
+    """--core nes --with-debug-bridge: the NES runtime ROM loader (NESLoaderCSR) is present, the Game
+    Boy virtual cartridge is NOT (no GB core), and -- the key regression guard -- the PRG/CHR ROM
+    BRAMs are not auto-mapped onto the CSR bus (which would add a third port and defeat BSRAM
+    inference, overflowing the device with registers)."""
+    from chromatix.gateware.cores.nes import NES_RTL_PATH
+    if not os.path.exists(os.path.join(NES_RTL_PATH, "nes.v")):
+        pytest.skip("NES core RTL not present (chromatix/verilog/cores/nes/, gitignored GPL drop-in).")
+    target   = load_target()
+    platform = Platform()
+    target.add_timing_constraints(platform)
+    soc      = target.BaseSoC(platform, with_core=True, core="nes", with_debug_bridge=True)
+    csr_csv  = os.path.join(tmp_path, "csr.csv")
+    builder  = Builder(soc, output_dir=str(tmp_path), csr_csv=csr_csv, compile_software=False)
+    builder.build(build_name="chromatic", run=False)
+    with open(os.path.join(builder.gateware_dir, "chromatic.v"), encoding="utf-8") as f:
+        verilog = f.read()
+    with open(csr_csv, encoding="utf-8") as f:
+        csrs = f.read()
+    assert "uartbone" in verilog                         # Debug bridge present.
+    assert "csr_register,nes_loader_control," in csrs    # Runtime ROM loader CSRs present.
+    assert "csr_register,nes_loader_data," in csrs
+    assert "vcart" not in csrs                            # No Game Boy virtual cartridge.
+    import re
+    assert not re.search(r"mem_(prg|chr)\[sram\d+_adr\]", verilog) # ROM BRAMs not CSR-mapped.
+
 # IO Constraints -----------------------------------------------------------------------------------
 
 def test_soc_io_constraints(tmp_path):
