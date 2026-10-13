@@ -43,6 +43,7 @@ from chromatix.gateware.memory  import memory_port_layout, MemorySystem
 from chromatix.gateware.video   import VideoPipeline
 from chromatix.gateware.vcart   import VirtualCart
 from chromatix.gateware.cores.nes import NESCore
+from chromatix.gateware.cores.sms import SMSCore, add_sms_sources, SMS_RTL_PATH
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -554,6 +555,116 @@ def run_sim_nes(gateware_dir, frames=6, every=1):
     if os.path.exists(log):
         os.remove(log)
     subprocess.run(["obj_dir/Vsim", f"+frames={frames}", f"+every={every}"], cwd=gateware_dir, check=True)
+    return sorted(glob.glob(os.path.join(gateware_dir, "frame_*.ppm")))
+
+# SMS core simulation -----------------------------------------------------------------------------
+
+SMS_SIM_CLK_FREQ = 53.693175e6
+
+# Minimal SMS test cartridge (Z80): continuously set VDP mode 4 + display on + CRAM[0]=blue, so if the
+# core/VDP work the frame is solid blue. Looped so one-time-write races do not matter.
+SMS_TEST_ROM = bytes([
+    0xF3, 0xED,0x56, 0x31,0xF0,0xDF,              # di; im 1; ld sp,$DFF0
+    0x3E,0x04, 0xD3,0xBF, 0x3E,0x80, 0xD3,0xBF,   # reg0 = $04 (mode 4)
+    0x3E,0x40, 0xD3,0xBF, 0x3E,0x81, 0xD3,0xBF,   # reg1 = $40 (display ON)
+    0xAF,      0xD3,0xBF, 0x3E,0x87, 0xD3,0xBF,   # reg7 = 0 (backdrop index 0)
+    0xAF,      0xD3,0xBF, 0x3E,0xC0, 0xD3,0xBF,   # CRAM write address 0
+    0x3E,0x30, 0xD3,0xBE,                         # CRAM[0] = $30 (blue)
+    0xC3,0x06,0x00,                               # jp $0006 (re-run the setup forever)
+])
+
+class SimTopSMS(LiteXModule):
+    """Simulate the hosted SMS core (SMSCore, no PLL, BRAM cartridge): clk_sys from the clocker,
+    hclk = clk_sys/4; the Game Boy LCD output is captured to PPM frames. sanitize_sms_rtl injects an
+    I/O $display into system.v so the Z80 <-> VDP register-write handshake is visible in the run log."""
+    def __init__(self, rom):
+        self.cd_sms  = ClockDomain("sms",  reset_less=True)
+        self.cd_hclk = ClockDomain("hclk", reset_less=True)
+        div = Signal(2)
+        platform = SimPlatform("SIM", _io)
+        self._platform = platform
+        self.comb += [
+            self.cd_sms.clk.eq(platform.request("sys_clk")),
+            self.cd_hclk.clk.eq(div[1]), # clk_sys/4.
+        ]
+        self.sync.sms += div.eq(div + 1)
+
+        class _Buttons: pass
+        buttons = _Buttons()
+        for name in ["a", "b", "select", "start", "up", "down", "left", "right"]:
+            setattr(buttons, name, Signal())
+        self.sms = sms = SMSCore(platform, clk=None, clk_freq=None, buttons=buttons,
+            rom=rom, game_gear=False, bios_en=False, with_pll=False, cart_port=None)
+
+        self.specials += Instance("gb_lcd_capture",
+            i_clk    = ClockSignal("hclk"),
+            i_clkena = sms.gb_clkena,
+            i_data   = sms.gb_data,
+            i_vsync  = sms.gb_vsync,
+        )
+
+def sanitize_sms_rtl(src_dir, dst_dir):
+    """Copy the SMS RTL to dst_dir for Verilator: fix the bare-ANSI-output-redeclared-as-wire construct
+    (as sanitize_nes_rtl), and inject an I/O trace $display into system.v (the Z80 <-> VDP register
+    writes: on each CPU I/O cycle, print A/D/M1_n/vdp_WR_n). Repo files are untouched."""
+    shutil.rmtree(dst_dir, ignore_errors=True)
+    shutil.copytree(src_dir, dst_dir)
+    def fix_module(m):
+        body  = m.group(0)
+        ports = [p for p in re.findall(r"output\s+(\w+)\s*[,)]", body) if p not in ("reg", "wire", "logic")]
+        for name in ports:
+            body = re.sub(rf"^[ \t]*wire\s+{name}\s*;[ \t]*\n", "", body, flags=re.M)
+        return body
+    for root, _, files in os.walk(dst_dir):
+        for fn in files:
+            if not fn.endswith((".v", ".sv")):
+                continue
+            path = os.path.join(root, fn)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            text = re.sub(r"module\b.*?endmodule", fix_module, text, flags=re.S)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+    # I/O trace into system.v (before its single endmodule): on each CPU I/O cycle, print the Z80
+    # <-> VDP register-write handshake (A/D/control + whether vdp_WR_n asserts). Short sims keep the
+    # log small. Repo system.v is untouched (this edits the build-dir copy only).
+    sysv  = os.path.join(dst_dir, "system.v")
+    trace = ('\nalways @(posedge clk_sys) if (ce_cpu & ~IORQ_n) '
+             '$display("[sms_io] A=%h D=%h rd_n=%b wr_n=%b m1_n=%b vdp_wr_n=%b",'
+             ' A[7:0], D_in, RD_n, WR_n, M1_n, vdp_WR_n);\n')
+    with open(sysv, encoding="utf-8") as f:
+        text = f.read()
+    text = re.sub(r"\nendmodule\s*$", trace + "\nendmodule\n", text, count=1)
+    with open(sysv, "w", encoding="utf-8") as f:
+        f.write(text)
+    return dst_dir
+
+def build_sim_sms(gateware_dir, threads=1, trace=False):
+    import chromatix.gateware.cores.sms as smsmod
+    rtl = sanitize_sms_rtl(smsmod.SMS_RTL_PATH, os.path.join(gateware_dir, "sms_src"))
+    # Test ROM for the BRAM cartridge.
+    os.makedirs(gateware_dir, exist_ok=True)
+    rom_path = os.path.join(gateware_dir, "sms_test.sms")
+    with open(rom_path, "wb") as f:
+        f.write(SMS_TEST_ROM + bytes(0x4000 - len(SMS_TEST_ROM)))
+    saved, smsmod.SMS_RTL_PATH = smsmod.SMS_RTL_PATH, rtl
+    try:
+        top = SimTopSMS(rom_path)
+        platform = top._platform
+        platform.add_source(os.path.join(SIM_VERILOG_PATH, "gb_lcd_capture.v"))
+        sim_config = SimConfig()
+        freq = 1e12/(2*round(1e12/(2*SMS_SIM_CLK_FREQ)/2))
+        sim_config.add_clocker("sys_clk", freq_hz=freq)
+        platform.build(top, build_dir=gateware_dir, sim_config=sim_config, opt_level="O3",
+            threads=threads, trace=trace, run=False)
+        compile_sim(gateware_dir)
+    finally:
+        smsmod.SMS_RTL_PATH = saved
+
+def run_sim_sms(gateware_dir, frames=4):
+    for ppm in glob.glob(os.path.join(gateware_dir, "*_*.ppm")):
+        os.remove(ppm)
+    subprocess.run(["obj_dir/Vsim", f"+frames={frames}"], cwd=gateware_dir, check=True)
     return sorted(glob.glob(os.path.join(gateware_dir, "frame_*.ppm")))
 
 def main():
