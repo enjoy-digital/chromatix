@@ -99,9 +99,10 @@ RAM region; see `NESMemory`'s region split.
 ## Loading a ROM
 
 Bring-up uses the PC debug bridge (no ESP32 firmware change): build `--with-core --with-debug-bridge`,
-and `scripts/chromatic.py` writes the ROM into the PSRAM/BRAM ROM region over UARTBone (as it does
-for the Game Boy virtual cartridge). The productized path (reuse the ChroMagic ESP32/SD QSPI 1 KB
-upload) is a later step.
+and `scripts/chromatic.py` writes the ROM into the ROM region over UARTBone (as it does for the Game
+Boy virtual cartridge). The NES does this today — `nes-load` streams PRG/CHR into BRAM and the game
+runs with no rebuild (see the worked example below). The productized path (reuse the ChroMagic
+ESP32/SD QSPI 1 KB upload) is a later step.
 
 ## Input and audio
 
@@ -168,9 +169,40 @@ cd build/sim_nes && ./obj_dir/Vsim +frames=1000 +nes_ticks=2500000
 `sanitize_nes_rtl()` rewrites a Verilator-5.x-strict construct the vendored mappers use (a bare ANSI
 `output` port redeclared as a body `wire`) into a build-dir copy, leaving the repo RTL untouched.
 
-**Next for the NES:** a runtime ROM loader (debug bridge → the PRG/CHR BRAM, holding the core in
-reset during upload) to run arbitrary NROM games without a rebuild; a PSRAM-backed frame buffer for
-larger cores.
+### Runtime ROM loader (verified on hardware)
+
+`--core nes --with-debug-bridge` adds a **runtime ROM loader**: any NROM game is uploaded over the
+debug bridge and runs **without a rebuild or reflash**. Verified on hardware — the same bitstream
+boots empty, then `nes15` (the "15" puzzle) and `helloworld` ("HELLO WORLD") each load in ~1 s and
+render, swapping live:
+
+```bash
+env -u DISPLAY python3 chromatix.py --core nes --with-debug-bridge --gowin-path ~/tools/.../IDE --build
+python3 scripts/chromatix_flash.py flash build/gateware/chromatic.fs
+python3 scripts/chromatic.py --serial /dev/ttyACM0 nes-load path/to/game.nes   # .nes or .hex, NROM
+python3 scripts/chromatic.py capture game.png --size 320x288
+```
+
+How it works (`NESCore(with_loader=True)` + `NESLoaderCSR`, `scripts/chromatic.py nes_load`): the
+PRG/CHR BRAMs are fixed to the max NROM window (32 KB/8 KB) and made host-writable (a second,
+write-only BRAM port); the host holds the core in reset, sets the config (PRG size, mirroring,
+CHR-RAM), streams PRG then CHR as 32-bit words (a 4-byte spreader auto-increments the address), and
+releases the hold so the core boots fresh on the new ROM. The **mapper number stays a constant 0**
+(only the size/mirror/CHR-RAM `mapper_flags` bits are runtime), so synthesis still prunes the ~50
+other mappers. Fit: **BSRAM 47/56**, DSP 13/28, timing met.
+
+> **Gotcha (BSRAM inference):** keep a loadable ROM `Memory` in `specials` only, never as a module
+> attribute (`self.<name>`). With a bus present (`--with-debug-bridge`), LiteX auto-maps an
+> attribute `Memory` onto the CSR bus, adding a third port — Gowin then cannot infer BSRAM and falls
+> back to registers ("DFF … exceeds the resource limit"). Also: Gowin will not infer BSRAM for a
+> memory that is *both* `init`-ialised *and* written, so the loader's PRG/CHR are uninitialised
+> (the host uploads the ROM); the non-loader build keeps the read-only `init` ROM.
+
+**Loading a different game with a dedicated build** (no debug bridge) also works: `--nes-rom
+game.nes` bakes any NROM ROM into the bitstream (verified: `helloworld` renders).
+
+**Next for the NES:** a PSRAM-backed frame buffer (frees ~30 BSRAM, double-buffered — headroom and
+no tearing for larger cores); ESP32/SD loading for standalone play.
 
 ## Prior art (mine, don't reinvent)
 
