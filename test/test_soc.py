@@ -163,6 +163,25 @@ def test_soc_core_nes_loader_elaboration(tmp_path):
     import re
     assert not re.search(r"mem_(prg|chr)\[sram\d+_adr\]", verilog) # ROM BRAMs not CSR-mapped.
 
+def test_soc_core_sms_elaboration(tmp_path):
+    """--core sms: the SMS/Game Gear core glue (SMSCore + the `system`/`video` instances) elaborates.
+    Skips if the gitignored SMS RTL is absent. (A fitting build additionally needs the cartridge in
+    PSRAM behind a cache -- see doc/CORES.md -- so this only checks the structural wiring.)"""
+    from chromatix.gateware.cores.sms import SMS_RTL_PATH
+    if not os.path.exists(os.path.join(SMS_RTL_PATH, "system.v")):
+        pytest.skip("SMS core RTL not present (chromatix/verilog/cores/sms/, gitignored GPL drop-in).")
+    target   = load_target()
+    platform = Platform()
+    target.add_timing_constraints(platform)
+    soc      = target.BaseSoC(platform, with_core=True, core="sms")
+    builder  = Builder(soc, output_dir=str(tmp_path), csr_csv=os.path.join(tmp_path, "csr.csv"),
+                       compile_software=False)
+    builder.build(build_name="chromatic", run=False)
+    with open(os.path.join(builder.gateware_dir, "chromatic.v"), encoding="utf-8") as f:
+        verilog = f.read()
+    assert "system " in verilog            # SMS DUT instantiated.
+    assert "emu_system_top" not in verilog # Game Boy core replaced.
+
 # IO Constraints -----------------------------------------------------------------------------------
 
 def test_soc_io_constraints(tmp_path):
