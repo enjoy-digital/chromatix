@@ -219,7 +219,7 @@ double-buffering (no tearing), but adds a PSRAM write+read stream. The NES fits 
 (loader build 47/56), so this is deferred until a core is BSRAM-starved (e.g. a maxed SMS) — the
 mechanism (`memory.gb_*` write + `LCDPSRAMFramebuffer`-style read) is the one to reuse then.
 
-## Worked example: SMS / Game Gear — the 2nd core (builds & fits)
+## Worked example: SMS / Game Gear — the 2nd core (runs on hardware; video bring-up)
 
 The 2nd core proves the methodology generalises to a different console family. Target:
 nand2mario's [`smstang`](https://github.com/nand2mario/smstang) (SMS-MiSTer ported to Gowin; same
@@ -243,12 +243,25 @@ hardware validation of the video path — then boots the uploaded cartridge.
 The FM (`opll`) is stubbed (`opll_stub.v`, BSD) to skip the VHDL VM2413 and save area — fine for the
 vast majority of SMS games and all Game Gear games; drop in the real `vm2413/` for FM titles.
 
-**Render bring-up (in progress).** On hardware the core froze right after its first cartridge fetch.
-A cache debug CSR (`SMSLoaderCSR(with_debug=True)` — FSM state / stall / reset / `rom_do`) pinpointed
-it: the cache sat in **FILL forever** because the core left reset and issued its first PSRAM read
-**before the PSRAM BIST/init finished**, so the one-cycle arbiter request was dropped and the line
-fill never completed. Fixed by holding the SMS in reset until the PSRAM is ready
-(`cart_ready = bist_done`).
+**The core runs on hardware.** The cache debug CSR (`SMSLoaderCSR(with_debug=True)`) confirms the
+Z80 executes an uploaded cartridge ROM from the PSRAM cache: cache IDLE, `stall=0`, `reads` climbing,
+only 4 line misses for a 40-byte ROM. Getting here took two fixes: (1) the cache froze in **FILL
+forever** on the first fetch because the core issued its first PSRAM read before the PSRAM BIST
+finished and the one-cycle arbiter request was dropped — fixed by holding reset until
+`cart_ready = bist_done`; (2) that fix (and anything else) would not **route** at 56/56 BSRAM, fixed
+by the RGB333 frame buffer (45/56) **and** raising the Gowin place/route effort
+(`place_option/route_option 2`, `replicate_resources`).
+
+**Open issue — the VDP is not configured.** The screen is a uniform `0xFFF` (white). The debug CSR
+(now exposing the VDP `color` output + raster `x`) shows `x` scanning but `color` stuck at `0xFFF`
+for every `x`. In `vdp_main.v`, `color = smode_M4 ? cram_D : <legacy palette> : 12'hFFF`, so `0xFFF`
+means **`smode_M4=0`** — the VDP never entered mode 4, i.e. the Z80's `OUT ($BF)` register writes are
+not reaching/latching in the VDP, even though the Z80 demonstrably runs and re-executes those writes
+(a looped-config test ROM does not change it). The VDP port decode (`A[7:6]==10`) is correct, so the
+break is in the Z80 `IORQ`/`WR`/`M1` → VDP latch path inside `system.v`. Those signals live inside
+the GPL blackbox, so the next step is a **Verilator sim of SMSCore** (full internal visibility, as
+the NES sim gave — more than a LiteScope on the shell-visible signals can show), or build-dir RTL
+debug ports routing `IORQ_n`/`WR_n`/`vdp_WR_n`/`smode_M4` out to a CSR.
 
 **The routing wall (the real blocker).** The SMS core is a tight fit on the GW5A-25 (smstang itself
 targets the Tang Console **60K/138K**, not the 25K): ~16.4 K LUT (71%), near-full BSRAM, and four
