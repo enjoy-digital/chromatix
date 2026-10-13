@@ -32,13 +32,17 @@ from migen.genlib.cdc import MultiReg
 
 from litex.gen import *
 
+from litex.soc.interconnect.csr      import CSRStorage, CSRField, CSRStatus
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
 
-from chromatix.gateware.core_shell import CoreVideo, CoreVideoDownscaler, rgb555
+from chromatix.gateware.core_shell     import CoreVideo, CoreVideoDownscaler, rgb555
+from chromatix.gateware.cores.rom_cache import CoreROMCache
 
 SMS_RTL_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "verilog", "cores", "sms")
 
 SMS_CLK_FREQ = 53.693175e6 # clk_sys (= 15x the ~3.58 MHz Z80 ce_cpu).
+SMS_ROM_BASE = 0x400000    # Cartridge ROM placed here in the PSRAM (host upload); upper half, clear
+                           # of the framebuffers/OSD/BIST in the low PSRAM.
 
 # SMS RTL sources ----------------------------------------------------------------------------------
 
@@ -47,14 +51,42 @@ def add_sms_sources(platform):
     files = [
         "system.v", "video.v",
         "vdp.v", "vdp_main.v", "vdp_background.v", "vdp_sprites.v", "vdp_sprite_shifter.v",
-        "vdp_cram.v", "io.v", "audiomix.v", "MC8123.v", "SEGASYS1_PRGDEC.v", "parts.v",
+        "vdp_cram.v", "io.v", "audiomix.v", "cheatcodes.sv", "MC8123.v", "SEGASYS1_PRGDEC.v", "parts.v",
         "spram.v", "sprom.v", "dpram.v",
         "opll_stub.v", # ChromatiX BSD FM stub (replaces the VHDL vm2413 opll for first bring-up).
         "t80/t80.v", "t80/t80_alu.v", "t80/t80_mcode.v", "t80/t80_reg.v", "t80/t80pa.v", "t80/t80s.v",
         "jt89/jt89.v", "jt89/jt89_mixer.v", "jt89/jt89_noise.v", "jt89/jt89_tone.v", "jt89/jt89_vol.v",
     ]
     for f in files:
-        platform.add_source(os.path.join(SMS_RTL_PATH, f), language="verilog")
+        language = "systemverilog" if f.endswith(".sv") else "verilog"
+        platform.add_source(os.path.join(SMS_RTL_PATH, f), language=language)
+
+# SMS Loader CSR (host -> SMSCore cartridge, over the debug bridge) --------------------------------
+
+class SMSLoaderCSR(LiteXModule):
+    """SoC-CSR front end to SMSCore's cartridge loader (needs --with-debug-bridge). The host
+    (scripts/chromatic.py sms-load) holds the core, uploads the ROM into the PSRAM at SMS_ROM_BASE
+    over the debug bridge, flushes the cache, then releases the hold so the core boots the ROM."""
+    def __init__(self, core):
+        self.control = CSRStorage(fields=[
+            CSRField("hold",  size=1, offset=0,             description="Hold the SMS in reset while loading."),
+            CSRField("flush", size=1, offset=1, pulse=True, description="Invalidate the cartridge cache."),
+        ])
+        self.misses = CSRStatus(32, description="Cartridge cache misses.")
+        self.reads  = CSRStatus(32, description="Cartridge reads.")
+
+        # # #
+
+        self.comb += [
+            core.ld_hold.eq(self.control.fields.hold),
+            core.cart_flush.eq(self.control.fields.flush),
+        ]
+        if hasattr(core, "cart"):
+            from migen.genlib.cdc import MultiReg
+            self.specials += [
+                MultiReg(core.cart.misses, self.misses.status),
+                MultiReg(core.cart.reads,  self.reads.status),
+            ]
 
 # SMS Core -----------------------------------------------------------------------------------------
 
@@ -64,7 +96,8 @@ class SMSCore(LiteXModule):
     .down/.left/.right (1 = pressed). Exposes the Game Boy LCD interface and left/right audio.
     `game_gear` selects the 160x144 native path (no downscale); otherwise SMS 256x192 is downscaled.
     """
-    def __init__(self, platform, clk, clk_freq, buttons, rom=None, game_gear=True, with_pll=True):
+    def __init__(self, platform, clk, clk_freq, buttons, rom=None, game_gear=True, with_pll=True,
+                 cart_port=None, cart_port_dout=None, bios_en=False):
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
         self.gb_mode   = Signal(2)
@@ -72,10 +105,19 @@ class SMSCore(LiteXModule):
         self.gb_vsync  = Signal()
         self.left      = Signal(16)
         self.right     = Signal(16)
+        # Runtime loader interface (sys domain, driven by SoC CSRs; see chromatix.py): hold the core
+        # in reset while the host uploads the ROM into the PSRAM, and flush the cache afterwards.
+        self.ld_hold    = Signal()
+        self.cart_flush = Signal()
 
         # # #
 
         add_sms_sources(platform)
+
+        rom_a  = Signal(22) # Cartridge address / read (from the core).
+        rom_rd = Signal()
+        rom_do = Signal(8)  # Cartridge byte (to the core).
+        stall  = Signal()   # Cartridge cache stall (freezes the clock-enables on a PSRAM miss).
 
         # Clock: one 53.69 MHz clk_sys (own PLL), the SMS "sms" clock domain.
         if with_pll:
@@ -94,37 +136,58 @@ class SMSCore(LiteXModule):
         ce_vdp = Signal()
         ce_pix = Signal()
         ce_sp  = Signal()
+        # `stall` (cartridge cache miss) freezes the cadence: hold clkd + emit no enables, so the
+        # whole core pauses until the PSRAM line is fetched, then resumes exactly where it left off.
         self.sync.sms += [
-            ce_cpu.eq(0), ce_vdp.eq(0), ce_pix.eq(0),
-            ce_sp.eq(clkd[0]),
-            clkd.eq(clkd + 1),
-            If(clkd == 29, clkd.eq(0), ce_vdp.eq(1), ce_pix.eq(1),
-            ).Elif(clkd == 24, ce_cpu.eq(1), ce_vdp.eq(1),
-            ).Elif(clkd == 19, ce_vdp.eq(1), ce_pix.eq(1),
-            ).Elif(clkd == 14, ce_vdp.eq(1),
-            ).Elif(clkd ==  9, ce_cpu.eq(1), ce_vdp.eq(1), ce_pix.eq(1),
-            ).Elif(clkd ==  4, ce_vdp.eq(1),
+            ce_cpu.eq(0), ce_vdp.eq(0), ce_pix.eq(0), ce_sp.eq(0),
+            If(~stall,
+                ce_sp.eq(clkd[0]),
+                clkd.eq(clkd + 1),
+                If(clkd == 29, clkd.eq(0), ce_vdp.eq(1), ce_pix.eq(1),
+                ).Elif(clkd == 24, ce_cpu.eq(1), ce_vdp.eq(1),
+                ).Elif(clkd == 19, ce_vdp.eq(1), ce_pix.eq(1),
+                ).Elif(clkd == 14, ce_vdp.eq(1),
+                ).Elif(clkd ==  9, ce_cpu.eq(1), ce_vdp.eq(1), ce_pix.eq(1),
+                ).Elif(clkd ==  4, ce_vdp.eq(1),
+                ),
             ),
         ]
 
-        # Reset: held ~256 ce_cpu cycles after the PLL locks (count up from power-on 0).
+        # Reset: held ~256 ce_cpu cycles after the PLL locks (count up from power-on 0); ld_hold
+        # (sys -> sms) restarts it so the core boots fresh on a freshly uploaded ROM. The settle
+        # counter runs on the raw sms clock (not ce) so it still advances while the cache stalls.
+        hold_sms  = Signal()
+        self.specials += MultiReg(self.ld_hold, hold_sms, "sms")
         reset_cnt = Signal(8)
         reset     = Signal()
-        self.sync.sms += If(locked & ce_cpu & (reset_cnt != 255), reset_cnt.eq(reset_cnt + 1))
+        self.sync.sms += If(hold_sms, reset_cnt.eq(0)
+            ).Elif(locked & (reset_cnt != 255), reset_cnt.eq(reset_cnt + 1))
         self.comb += reset.eq(~locked | (reset_cnt != 255))
 
-        # Cartridge ROM (placeholder BRAM; PSRAM+cache is the next step -- see the module docstring).
-        rom_init = None
-        if rom is not None:
-            path = rom if os.path.exists(rom) else os.path.join(SMS_RTL_PATH, "roms", rom)
-            with open(path, "rb") as f:
-                rom_init = list(f.read())
-        cart     = Memory(8, 2**16, init=rom_init) # 64 KB window (unbanked small ROMs).
-        cart_rd  = cart.get_port(clock_domain="sms")
-        self.specials += cart, cart_rd
-        rom_a    = Signal(22)
-        rom_do   = Signal(8)
-        self.comb += [cart_rd.adr.eq(rom_a[:16]), rom_do.eq(cart_rd.dat_r)]
+        # Cartridge ROM. With a PSRAM port (cart_port): a direct-mapped cache (CoreROMCache) serves
+        # the ROM from the PSRAM (uploaded by the host) and `stall`s the core on a miss -- this is
+        # what lets the design fit (the ROM is up to 512 KB, far too big for BRAM). Without a port
+        # (sim/elaboration): a small BRAM placeholder, no stall.
+        if cart_port is not None:
+            self.cart = cart = CoreROMCache(cart_port, cart_port_dout, base=SMS_ROM_BASE,
+                addr_width=22, lines=128, core_cd="sms")
+            self.comb += [
+                cart.addr.eq(rom_a),
+                cart.rd.eq(rom_rd & ~reset), # Only fault in lines for real cartridge reads.
+                cart.flush.eq(self.cart_flush),
+                rom_do.eq(cart.data),
+                stall.eq(cart.stall),
+            ]
+        else:
+            rom_init = None
+            if rom is not None:
+                path = rom if os.path.exists(rom) else os.path.join(SMS_RTL_PATH, "roms", rom)
+                with open(path, "rb") as f:
+                    rom_init = list(f.read())
+            cart     = Memory(8, 2**16, init=rom_init) # 64 KB window (unbanked small ROMs).
+            cart_rd  = cart.get_port(clock_domain="sms")
+            self.specials += cart, cart_rd
+            self.comb += [cart_rd.adr.eq(rom_a[:16]), rom_do.eq(cart_rd.dat_r)]
 
         # System RAM (16 KB) in BRAM.
         ram      = Memory(8, 2**14)
@@ -179,13 +242,13 @@ class SMSCore(LiteXModule):
             i_gg              = 1 if game_gear else 0,
             i_ggres           = ggres,
             i_systeme         = 0,
-            i_bios_en         = 0,
+            i_bios_en         = 1 if bios_en else 0, # Boot the SMS BIOS (mboot.hex) if enabled.
             i_GG_EN           = 0,
             i_GG_CODE         = 0,
             i_GG_RESET        = 0,
             i_RESET_n         = ~reset,
-            # Cartridge ROM.
-            o_rom_rd          = Signal(),
+            # Cartridge ROM (served by the PSRAM cache or the BRAM placeholder).
+            o_rom_rd          = rom_rd,
             o_rom_a           = rom_a,
             i_rom_do          = rom_do,
             # Controller 1 (active low): console buttons -> the SMS pad.

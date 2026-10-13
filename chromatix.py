@@ -54,7 +54,7 @@ from chromatix.gateware.terminal    import LCDTerminal
 from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
 from chromatix.gateware.core_shell  import CoreTestPattern, CoreVideoTestPattern, CoreVideoDownscaler
 from chromatix.gateware.cores.nes   import NESCore, NESLoaderCSR
-from chromatix.gateware.cores.sms   import SMSCore
+from chromatix.gateware.cores.sms   import SMSCore, SMSLoaderCSR
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -148,6 +148,9 @@ class BaseSoC(SoCMini):
         # Virtual cartridge (Game Boy ROM over the debug bridge) -- not for the core shell, which
         # has no Game Boy core; --core nes uses the debug bridge for its own NES ROM loader instead.
         with_vcart = with_debug_bridge and not with_core
+        # SMS cartridge cache: --core sms serves its ROM from the PSRAM behind a cache (CoreROMCache),
+        # the host uploads it over the debug bridge -- this needs a dedicated PSRAM arbiter port.
+        with_sms_cart = with_core and (core == "sms") and with_debug_bridge
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
@@ -495,6 +498,7 @@ class BaseSoC(SoCMini):
             bus_base       = main_ram_offset,
             bus_data_width = 64 if with_cpu else 32,
             with_vcart     = with_vcart,
+            with_sms_cart  = with_sms_cart,
             # Frame blending only for the Game Boy (CPU builds: PSRAM bandwidth for the CPU).
             with_frame_blend = not with_cpu,
             # Application: LCD frame buffers in the PSRAM (CPU line writes, framebuffer reads).
@@ -663,8 +667,15 @@ class BaseSoC(SoCMini):
                     left   = btns.dpad_left  | mcu_buttons[6],
                     right  = btns.dpad_right | mcu_buttons[5],
                 )
+                # Boot the SMS BIOS (mboot.hex) in SMS mode (256x192 -> downscaler): this renders a
+                # screen with no cartridge (the BIOS drives the VDP), the first hardware validation of
+                # the video path; it then boots a cartridge uploaded over the debug bridge (sms-load).
                 self.core = lcd_source = SMSCore(platform, clk_24, int(24e6), sms_buttons,
-                    rom=sms_rom, game_gear=True)
+                    rom=sms_rom, game_gear=False, bios_en=True,
+                    cart_port      = memory.sms_cart_port if with_sms_cart else None,
+                    cart_port_dout = memory.ctrl.dout     if with_sms_cart else None)
+                if with_sms_cart:
+                    self.sms_loader = SMSLoaderCSR(lcd_source)
                 self.sync.hclk += [
                     left.eq(lcd_source.left),
                     right.eq(lcd_source.right),
