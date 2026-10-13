@@ -201,8 +201,51 @@ other mappers. Fit: **BSRAM 47/56**, DSP 13/28, timing met.
 **Loading a different game with a dedicated build** (no debug bridge) also works: `--nes-rom
 game.nes` bakes any NROM ROM into the bitstream (verified: `helloworld` renders).
 
-**Next for the NES:** a PSRAM-backed frame buffer (frees ~30 BSRAM, double-buffered — headroom and
-no tearing for larger cores); ESP32/SD loading for standalone play.
+**Next for the NES:** ESP32/SD loading for standalone play. (A PSRAM-backed *downscaler* frame
+buffer was considered and **deliberately deferred** — see the note below: the NES display is already
+PSRAM-backed and the only BRAM frame buffer is the downscaler's small indexed one, so the payoff for
+the NES is low; it matters for a BSRAM-starved core.)
+
+### Note: the display is already PSRAM-backed; a PSRAM downscaler FB is a core-specific option
+
+Every `lcd_source` (Game Boy core, CPU framebuffer, or `NESCore`) drives the **GB-LCD interface**
+(`gb_clkena`/`gb_data`/…), which `VideoPipeline` writes into the **PSRAM** framebuffer (`memory.gb_*`)
+and reads back for the panel + UVC (with frame blending). So a hosted core's shown frame already lives
+in PSRAM. The only on-chip frame buffer is `NESVideoDownscaler`'s internal **6-bit-indexed 160×144**
+store (~12 BSRAM), which decouples the core's 256×240 raster (core clock) from the 160×144 GB-LCD
+scanout (hClk). Moving *that* to PSRAM (core writes the downscaled RGB555 to `memory.gb_*` directly +
+generates its own GB-LCD read timing from `fb_data`, bypassing its BRAM) saves ~12 BSRAM and allows
+double-buffering (no tearing), but adds a PSRAM write+read stream. The NES fits comfortably
+(loader build 47/56), so this is deferred until a core is BSRAM-starved (e.g. a maxed SMS) — the
+mechanism (`memory.gb_*` write + `LCDPSRAMFramebuffer`-style read) is the one to reuse then.
+
+## Worked example (bring-up planned): SMS / Game Gear — the 2nd core
+
+The 2nd core proves the methodology generalises to a different console family. Target:
+nand2mario's [`smstang`](https://github.com/nand2mario/smstang) (SMS-MiSTer ported to Gowin; same
+GW5A-25). **Status: planned — the GPL RTL must be dropped in first** (see
+`chromatix/verilog/cores/sms/README.md`); this repo's tooling cannot copy third-party RTL into the
+tree. The glue (`chromatix/gateware/cores/sms.py`, BSD) and `--core sms` wiring are written following
+the NES pattern once the RTL is in and can be iterated against on hardware.
+
+Why SMS/GG is a good second target and what is *new* vs. the NES:
+- **Clean clock-enable DUT.** `system.v` runs off one 53.69 MHz `clk_sys` with enables `ce_cpu` (÷15),
+  `ce_vdp` (÷5), `ce_pix` (÷10), `ce_sp` — exactly the shape Gowin likes. Map to a `GW5APLL` + a
+  divider (cadence from `smstang_top.sv`). No cycle-exact gymnastics.
+- **Random-access video.** Unlike the NES's streamed `color`, the SMS DUT is scanned: drive
+  `x[8:0]`/`y[8:0]`, read `color[11:0]` (BGR 4-4-4 → RGB555). **Game Gear is 160×144 native → drive
+  the GB-LCD interface directly, no downscaler/FB (do GG first).** SMS is 256×192 → reuse the
+  downscaler.
+- **ROM from PSRAM behind a cache — the new hard part.** `rom_rd`/`rom_a[21:0]`/`rom_do[7:0]`
+  (+`rom_do_valid`, ~2 cycles after `ce_cpu`) is served from SDRAM upstream; here it becomes a
+  PSRAM-cache port (reuse `VirtualCart`'s direct-mapped line cache; freeze the core via the clock
+  enables on a miss). The NES avoided this (NROM fit BRAM). *First-milestone shortcut*: bring the
+  core up on a small (≤48 KB) ROM in BRAM, add the PSRAM cache after.
+- **Work RAM** `ram_*` (8 KB) → inferred BRAM; VDP VRAM (16 KB) is internal. **Audio** `audioL/R`
+  (jt89 PSG + optional VM2413 FM — disable FM to save area) → the shared bus. **Input** `j1_*` ←
+  console buttons.
+
+The combined build is GPL; the shell/glue stays BSD (upstreamable).
 
 ## Prior art (mine, don't reinvent)
 

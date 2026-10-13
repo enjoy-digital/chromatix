@@ -1,0 +1,6 @@
+# Third-party SMS/Game Gear core RTL (nand2mario/smstang, a Gowin port of SMS-MiSTer, GPL) is a
+# drop-in, not vendored into this repo's history. See README.md for how to obtain it. Track only the
+# README and this file.
+*
+!.gitignore
+!README.md
