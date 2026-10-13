@@ -671,9 +671,10 @@ class BaseSoC(SoCMini):
                 # screen with no cartridge (the BIOS drives the VDP), the first hardware validation of
                 # the video path; it then boots a cartridge uploaded over the debug bridge (sms-load).
                 self.core = lcd_source = SMSCore(platform, clk_24, int(24e6), sms_buttons,
-                    rom=sms_rom, game_gear=False, bios_en=True,
+                    rom=sms_rom, game_gear=True, bios_en=False,
                     cart_port      = memory.sms_cart_port if with_sms_cart else None,
-                    cart_port_dout = memory.ctrl.dout     if with_sms_cart else None)
+                    cart_port_dout = memory.ctrl.dout     if with_sms_cart else None,
+                    cart_ready     = memory.bist_done     if with_sms_cart else None)
                 if with_sms_cart:
                     self.sms_loader = SMSLoaderCSR(lcd_source)
                 self.sync.hclk += [

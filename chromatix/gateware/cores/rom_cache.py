@@ -36,9 +36,10 @@ class CoreROMCache(LiteXModule):
         self.data  = Signal(8)          # Byte to the core.
         self.stall = Signal()           # 1 = the core must freeze (miss being served / lookup).
         self.flush = Signal()           # Pulse: invalidate the cache.
-        # Statistics (core_cd).
+        # Statistics / debug (core_cd).
         self.misses = Signal(32)
         self.reads  = Signal(32)
+        self.state  = Signal(4)         # Current FSM state (debug).
 
         # # #
 
@@ -140,13 +141,15 @@ class CoreROMCache(LiteXModule):
             NextState("IDLE"),
         )
 
-        # Statistics.
+        # Statistics / debug.
         access_d = Signal()
         sync += [
             access_d.eq(self.rd),
             If(self.rd & ~access_d, self.reads.eq(self.reads + 1)),
             If(miss_issue, self.misses.eq(self.misses + 1)),
         ]
+        for i, n in enumerate(["FLUSH", "IDLE", "FILL", "FILL-DONE", "TAG", "TAG-WAIT"]):
+            self.comb += If(fsm.ongoing(n), self.state.eq(i))
 
         # xClk: PSRAM port (read-only line fetch).
         req_sync = Signal()

@@ -67,26 +67,32 @@ class SMSLoaderCSR(LiteXModule):
     """SoC-CSR front end to SMSCore's cartridge loader (needs --with-debug-bridge). The host
     (scripts/chromatic.py sms-load) holds the core, uploads the ROM into the PSRAM at SMS_ROM_BASE
     over the debug bridge, flushes the cache, then releases the hold so the core boots the ROM."""
-    def __init__(self, core):
+    def __init__(self, core, with_debug=False):
         self.control = CSRStorage(fields=[
             CSRField("hold",  size=1, offset=0,             description="Hold the SMS in reset while loading."),
             CSRField("flush", size=1, offset=1, pulse=True, description="Invalidate the cartridge cache."),
         ])
-        self.misses = CSRStatus(32, description="Cartridge cache misses.")
-        self.reads  = CSRStatus(32, description="Cartridge reads.")
 
         # # #
 
+        from migen.genlib.cdc import MultiReg
         self.comb += [
             core.ld_hold.eq(self.control.fields.hold),
             core.cart_flush.eq(self.control.fields.flush),
         ]
-        if hasattr(core, "cart"):
-            from migen.genlib.cdc import MultiReg
-            self.specials += [
-                MultiReg(core.cart.misses, self.misses.status),
-                MultiReg(core.cart.reads,  self.reads.status),
-            ]
+        # Cache debug/stats CSRs: off by default -- the design fills the GW5A-25's BSRAM (56/56) and
+        # is routing-bound, so the extra CSR nets fail to route. Enable only for bring-up debugging
+        # (and free some BSRAM first). These pinpointed the BIST-race FILL stall (see cart_ready).
+        if with_debug:
+            self.misses = CSRStatus(32, description="Cartridge cache misses.")
+            self.reads  = CSRStatus(32, description="Cartridge reads.")
+            self.debug  = CSRStatus(16, description="[3:0] cache state, 4 stall, 5 reset, 6 rom_rd, [15:8] rom_do.")
+            self.specials += MultiReg(core.dbg, self.debug.status)
+            if hasattr(core, "cart"):
+                self.specials += [
+                    MultiReg(core.cart.misses, self.misses.status),
+                    MultiReg(core.cart.reads,  self.reads.status),
+                ]
 
 # SMS Core -----------------------------------------------------------------------------------------
 
@@ -97,7 +103,7 @@ class SMSCore(LiteXModule):
     `game_gear` selects the 160x144 native path (no downscale); otherwise SMS 256x192 is downscaled.
     """
     def __init__(self, platform, clk, clk_freq, buttons, rom=None, game_gear=True, with_pll=True,
-                 cart_port=None, cart_port_dout=None, bios_en=False):
+                 cart_port=None, cart_port_dout=None, cart_ready=None, bios_en=False):
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
         self.gb_mode   = Signal(2)
@@ -109,6 +115,7 @@ class SMSCore(LiteXModule):
         # in reset while the host uploads the ROM into the PSRAM, and flush the cache afterwards.
         self.ld_hold    = Signal()
         self.cart_flush = Signal()
+        self.dbg        = Signal(16) # Debug: [3:0] cache state, 4 stall, 5 reset, 6 rom_rd, [15:8] rom_do.
 
         # # #
 
@@ -153,14 +160,22 @@ class SMSCore(LiteXModule):
             ),
         ]
 
-        # Reset: held ~256 ce_cpu cycles after the PLL locks (count up from power-on 0); ld_hold
-        # (sys -> sms) restarts it so the core boots fresh on a freshly uploaded ROM. The settle
-        # counter runs on the raw sms clock (not ce) so it still advances while the cache stalls.
+        # Reset: held ~256 ce_cpu cycles after the PLL locks AND the cartridge PSRAM is ready (BIST
+        # done) -- otherwise the core's first cartridge fetch issues a PSRAM read before the PSRAM is
+        # initialised, the one-cycle request is dropped and the cache hangs forever in its FILL state
+        # (observed). ld_hold (sys -> sms) also restarts it, so the core boots fresh on a freshly
+        # uploaded ROM. The settle counter runs on the raw sms clock (not ce) so it advances even
+        # while the cache stalls.
         hold_sms  = Signal()
+        ready_sms = Signal() # PSRAM ready (BIST done), synchronized into the sms domain.
         self.specials += MultiReg(self.ld_hold, hold_sms, "sms")
+        if cart_ready is not None:
+            self.specials += MultiReg(cart_ready, ready_sms, "sms")
+        else:
+            self.comb += ready_sms.eq(1) # No cartridge port (sim/elaboration): always ready.
         reset_cnt = Signal(8)
         reset     = Signal()
-        self.sync.sms += If(hold_sms, reset_cnt.eq(0)
+        self.sync.sms += If(hold_sms | ~ready_sms, reset_cnt.eq(0)
             ).Elif(locked & (reset_cnt != 255), reset_cnt.eq(reset_cnt + 1))
         self.comb += reset.eq(~locked | (reset_cnt != 255))
 
@@ -177,6 +192,7 @@ class SMSCore(LiteXModule):
                 cart.flush.eq(self.cart_flush),
                 rom_do.eq(cart.data),
                 stall.eq(cart.stall),
+                self.dbg.eq(Cat(cart.state, stall, reset, rom_rd, Constant(0, 1), rom_do)),
             ]
         else:
             rom_init = None
@@ -189,7 +205,8 @@ class SMSCore(LiteXModule):
             self.specials += cart, cart_rd
             self.comb += [cart_rd.adr.eq(rom_a[:16]), rom_do.eq(cart_rd.dat_r)]
 
-        # System RAM (16 KB) in BRAM.
+        # System RAM (16 KB window). (An 8 KB BRAM is enough for the SMS's 8 KB, but on this part it
+        # did not reduce the BSRAM count and placed worse; the 16 KB layout routes at 56/56.)
         ram      = Memory(8, 2**14)
         ram_rdwr = ram.get_port(write_capable=True, clock_domain="sms")
         self.specials += ram, ram_rdwr
