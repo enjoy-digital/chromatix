@@ -40,7 +40,11 @@ from chromatix.gateware.cores.rom_cache import CoreROMCache
 
 SMS_RTL_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "verilog", "cores", "sms")
 
-SMS_CLK_FREQ = 53.693175e6 # clk_sys (= 15x the ~3.58 MHz Z80 ce_cpu).
+SMS_CLK_FREQ = 48e6 # clk_sys. Ideal SMS is 53.69 MHz (15x the ~3.58 MHz Z80), but the near-full
+                    # GW5A-25 only closes timing at ~51 MHz (Fmax 50.97, 21 setup-violated endpoints
+                    # at 53.69 -> the VDP register writes do not latch on hardware); 48 MHz meets
+                    # timing with margin. Video runs ~11% slow (the PSRAM framebuffer + panel decouple
+                    # the rate). Raising it back needs timing closure on the critical path.
 SMS_ROM_BASE = 0x400000    # Cartridge ROM placed here in the PSRAM (host upload); upper half, clear
                            # of the framebuffers/OSD/BIST in the low PSRAM.
 
