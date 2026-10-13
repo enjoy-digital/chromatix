@@ -250,14 +250,21 @@ it: the cache sat in **FILL forever** because the core left reset and issued its
 fill never completed. Fixed by holding the SMS in reset until the PSRAM is ready
 (`cart_ready = bist_done`).
 
-**The routing wall.** The SMS fills the GW5A-25's BSRAM (**56/56**) and the design is routing-bound:
-P&R *places* fine (~16.4 K LUT) but routing succeeds only marginally and **seed-dependently** — one
-configuration routed cleanly (0 unrouted), and *any* small change (the debug CSR, the reset-gate,
-even a RAM resize) flips it to 45–90 unrouted nets. A reliably routable — and therefore renderable —
-build needs **BSRAM headroom** first. Options, in order of value: a **PSRAM-backed downscaler frame
-buffer** (−~20 BSRAM; reuses the mechanism noted in the NES section); an **indexed frame buffer**
-(store the VDP palette index, palette on read, like the NES — needs a VDP tap; −~10 BSRAM); or
-**trimming the unused boot ROM** (`bios_en=0` → shrink `sprom`; −8 BSRAM). This is the clear next step.
+**The routing wall (the real blocker).** The SMS core is a tight fit on the GW5A-25 (smstang itself
+targets the Tang Console **60K/138K**, not the 25K): ~16.4 K LUT (71%), near-full BSRAM, and four
+clock domains (sms 53.69 MHz, hClk, xClk, sys) with several CDC crossings. P&R **places** fine but
+**routing** is at the edge — one configuration routed cleanly (0 unrouted) and *any* change (the
+reset-gate fix, a debug CSR) tips it to tens-to-hundreds of unrouted nets.
+
+Freeing BSRAM was tried first and is **not** the lever: the reduced-depth frame buffer (RGB333) took
+the build from 56/56 to **45/56 BSRAM**, yet routing got *worse* (463 unrouted) — the odd-width BRAM
+placed poorly and, more importantly, the bottleneck is interconnect/logic, not BSRAM. So a reliably
+routable (and therefore renderable) build needs to **reduce logic/interconnect** or route with more
+effort — in order of value: **prune the SMS core's unused blocks** (it instantiates `CODES`
+cheat-codes, `MC8123` decryption, `SEGASYS1` arcade decode, lightgun — all tied off here; removing
+their instances in `system.v` is the biggest LUT win), **raise Gowin place/route effort / replicate
+high-fanout nets**, a **PSRAM-backed frame buffer** (moves the FB out of BRAM entirely and simplifies
+the sms↔hClk path), or ultimately a **larger part**. This is the clear next step for the render.
 
 **Also remaining** (after a routable build): video color/raster alignment (the `color[11:0]` output
 lags `x`/`y` by the VDP pipeline depth — expect a shifted image first, like the NES bring-up); the
