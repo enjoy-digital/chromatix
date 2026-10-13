@@ -4,9 +4,9 @@ A reusable LiteX "shell" to host a third-party FPGA core (a MiSTer / Tang-lineag
 Sega Master System / Game Gear, ...) on the Chromatic (Gowin **GW5A-25**), in place of the Game Boy
 core, reusing the video pipeline, PSRAM, audio and buttons unchanged.
 
-Status (incremental): the shell and the downscaler are implemented and **verified on hardware** (a
-color-bar test source, native and downscaled, shown on the LCD and over UVC). A worked core port is
-in progress; this document is the methodology to port one.
+Status (incremental): the shell, the downscaler and a first worked core (**NES**) are implemented and
+**verified on hardware** — a NES game (the bundled `nes15`) renders and is playable on the Chromatic,
+downscaled to 160×144 and shown over UVC. This document is the methodology to port another.
 
 ## Why this is a "MiST-class", not a "MiSTer-class", target
 
@@ -86,6 +86,16 @@ read. So:
 - The **frame buffer** → **PSRAM** (triple-buffered, the `LCDPSRAMFramebuffer` reader), to keep BRAM
   for the core and remove tearing.
 
+**The gotcha that cost the most (read this):** a MiSTer core often puts its CPU/work RAM and its
+video RAM in the *same external memory space* as the cartridge ROM, not in internal registers — so
+when you replace SDRAM with your own memory you must provide **writable** RAM for those regions, not
+just ROM. The NES core (`cart.sv`) maps the 2 KB CPU RAM (including the 6502 stack `$0100-$01FF`) to
+`cpumem` 0x380000 and the 2 KB nametable CIRAM to `ppumem` 0x300000. Serving the whole space read-only
+looks fine (the CPU fetches correct code) until the first `JSR`/`RTS`: the stack write is dropped and
+`RTS` reads ROM bytes as the return address, jumping the CPU into garbage. Decode the core's address
+map (grep the cart/mapper for the RAM/CIRAM base constants) and route **read/write BRAM** for every
+RAM region; see `NESMemory`'s region split.
+
 ## Loading a ROM
 
 Bring-up uses the PC debug bridge (no ESP32 firmware change): build `--with-core --with-debug-bridge`,
@@ -117,38 +127,50 @@ python3 scripts/chromatix_flash.py flash build/gateware/chromatic.fs
 python3 scripts/chromatic.py capture core.png --size 320x288
 ```
 
-## Worked example: NES (in progress — core runs, game not yet rendering)
+## Worked example: NES — runs a game on hardware
 
 The NES is the first worked port (NROM-class, the bundled homebrew `nes15`, 16 KB PRG + 8 KB CHR),
 hosting nand2mario's `nestang` core (same GW5A-25 as the Tang Primer 25K). Build it with
-`--with-core nes` after dropping the RTL in (see `chromatix/verilog/cores/nes/README.md`).
+`--core nes` after dropping the RTL in (see `chromatix/verilog/cores/nes/README.md`). **The game
+renders and is playable on the Chromatic** (verified over UVC), downscaled 256×240 → 160×144.
 
-**What works (verified on hardware):**
-- The whole thing **synthesizes and fits**: logic 54%, BSRAM 35/56, DSP 15/28, 3/6 PLLs, timing met
-  (only the pre-existing benign PSRAM reset-recovery paths). The ~50 mappers are pruned by feeding a
-  **constant `mapper_flags`** (NROM); VRC/FDS excluded.
-- The glue (`chromatix/gateware/cores/nes.py`, BSD, unit-tested in `test/test_nes.py`): `NESCore`
-  (its own ~21.48 MHz PLL + a 4× clock for the ROM BRAM), `NESVideoDownscaler` (NES
-  `color`/`cycle`/`scanline` → 2C02 palette → 256×240 nearest-neighbor downscale → 160×144 Game Boy
-  LCD interface, storing the 6-bit index so the frame buffer is ~12 BSRAM), `NESMemory` (PRG at 0.. +
-  CHR at 0x200000.. in BRAM, read-only, direct-loaded from the parsed iNES at build time, 16 KB PRG
-  mirroring), `NESJoypad` (buttons → the standard controller serial).
-- On hardware the **NES core clocks and its PPU produces video** (confirmed: it overwrites a
-  pre-initialised frame buffer), and the **display path is proven** (a palette ramp shows correctly
-  over UVC).
+**The glue** (`chromatix/gateware/cores/nes.py`, BSD, unit-tested in `test/test_nes.py`):
+- `NESCore` — its own ~21.48 MHz PLL (from `clk_24`) + a 4× clock so the ROM/RAM BRAM is fresh within
+  one core cycle; a constant `mapper_flags` prunes the ~50 mappers at synthesis (NROM; VRC/FDS
+  excluded) so the core fits (else ~58K LUT > 23K).
+- `NESVideoDownscaler` — NES `color`/`cycle`/`scanline` → 2C02 palette → 256×240 nearest-neighbor
+  downscale → the 160×144 Game Boy LCD interface, storing the **6-bit palette index** (palette applied
+  on read) so the frame buffer is ~12 BSRAM.
+- `NESMemory` — the core's unified 22-bit space in BRAM: read-only PRG (0x000000) / CHR (0x200000)
+  ROM (direct-loaded from the parsed iNES at build time, 16 KB PRG mirrored), and **read/write** CPU
+  RAM (0x380000) + nametable CIRAM (0x300000). See the memory-strategy gotcha above.
+- `NESJoypad` — console buttons (+ ESP32 `mcu_buttons`) → the standard NES controller serial.
 
-**What does not work yet:** the game renders **black** — the CPU is clocking but never enables PPU
-rendering (it is not reaching the game's draw code). Ruled out by inspection/experiment: clock source
-(clk_24, proven live), reset sequence (robust up-counter), ROM parse and reset/NMI/IRQ vectors
-(verified), PRG/CHR address mapping (`cpumem_addr`=PRG, `ppumem_addr`=CHR, confirmed), CPU/PPU
-dividers and `sys_type` (match nestang), and memory read latency (added a 4× BRAM read clock). The
-remaining fault is in CPU execution and is best found in **simulation** (a Verilator testbench of the
-core + glue, or nestang's own sim with `nes15`) — hardware build/flash/capture cycles (~8 min) are
-too slow to probe it. This is the documented next step.
+Fit: logic 54%, **BSRAM 37/56**, DSP 15/28, timing met (0 setup/hold violations; only benign
+async-clock warnings).
 
-**BRAM budget** (resolved): PRG/CHR BRAM sized to the ROM, and the frame buffer stores the 6-bit
-palette index (palette applied on read) → ~12 BSRAM, giving 35/56 overall. A PSRAM-backed
-triple-buffered frame buffer remains the scalable follow-up for larger cores (and removes tearing).
+**How the black screen was fixed.** The core ran, the PPU raster + vblank worked, but the game stayed
+black. A Verilator sim of the core + glue (`chromatix_sim.py --core nes`, see below) reproduced it
+deterministically and the CPU PC trace showed the CPU crashing on its **first `RTS`** into
+uninitialised `$00`/BRK memory — because `NESMemory` served the CPU RAM/stack as read-only ROM (the
+gotcha above). Making the CPU RAM + CIRAM writable fixed it. (An early "CPU/PPU vblank-flag phase"
+theory was a trace-measurement artifact — the `$2002` read tap was a *level*, not a per-read pulse.)
+
+**Debugging workflow (reusable for the next core):**
+```bash
+# Build the Verilator sim of the core (single-threaded is ~100x faster here than multi-threaded):
+python3 -c "import chromatix_sim as cs; cs.build_sim_nes('build/sim_nes', threads=1, trace_cpu=True)"
+# Run N NES cycles; nes_trace.v logs the CPU PRG bus (windowed via +rd_lo/+rd_hi) and a periodic PC
+# snapshot, flushed, self-terminating at +nes_ticks:
+cd build/sim_nes && ./obj_dir/Vsim +frames=1000 +nes_ticks=2500000
+# Frames are frame_*.ppm; a stuck/looping PC in nes_trace.log -> disassemble the ROM at that PC.
+```
+`sanitize_nes_rtl()` rewrites a Verilator-5.x-strict construct the vendored mappers use (a bare ANSI
+`output` port redeclared as a body `wire`) into a build-dir copy, leaving the repo RTL untouched.
+
+**Next for the NES:** a runtime ROM loader (debug bridge → the PRG/CHR BRAM, holding the core in
+reset during upload) to run arbitrary NROM games without a rebuild; a PSRAM-backed frame buffer for
+larger cores.
 
 ## Prior art (mine, don't reinvent)
 
