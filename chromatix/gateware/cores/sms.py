@@ -192,7 +192,6 @@ class SMSCore(LiteXModule):
                 cart.flush.eq(self.cart_flush),
                 rom_do.eq(cart.data),
                 stall.eq(cart.stall),
-                self.dbg.eq(Cat(cart.state, stall, reset, rom_rd, Constant(0, 1), rom_do)),
             ]
         else:
             rom_init = None
@@ -347,4 +346,5 @@ class SMSCore(LiteXModule):
             self.gb_mode.eq(ds.gb_mode),
             self.gb_on.eq(ds.gb_on),
             self.gb_vsync.eq(ds.gb_vsync),
+            self.dbg.eq(Cat(color, x[:4])), # Debug: [11:0] VDP color output, [15:12] raster x low bits.
         ]

@@ -676,7 +676,7 @@ class BaseSoC(SoCMini):
                     cart_port_dout = memory.ctrl.dout     if with_sms_cart else None,
                     cart_ready     = memory.bist_done     if with_sms_cart else None)
                 if with_sms_cart:
-                    self.sms_loader = SMSLoaderCSR(lcd_source)
+                    self.sms_loader = SMSLoaderCSR(lcd_source, with_debug=True)
                 self.sync.hclk += [
                     left.eq(lcd_source.left),
                     right.eq(lcd_source.right),
@@ -1101,6 +1101,13 @@ def main():
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
     )
+
+    # A hosted core (especially --core sms) nearly fills the GW5A-25 and is routing-bound: raise the
+    # Gowin place/route effort and replicate high-fanout nets to help it route.
+    if args.with_core and args.toolchain == "gowin":
+        platform.toolchain.options.update({
+            "place_option": 2, "route_option": 2, "replicate_resources": 1,
+        })
 
     # Build.
     builder = Builder(soc,
