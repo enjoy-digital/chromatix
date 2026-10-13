@@ -289,6 +289,16 @@ timing (the 48 MHz drop is kept for margin but was never the cause — the write
 writes-not-arriving theory, and the `ce_cpu`/`ce_vdp` coincidence. The RTL is correct; the two defects
 were the CRAM memory inference and the mode mismatch.
 
+**Full BG pipeline on hardware (PSRAM cache, runtime ROM load).** A tile test ROM
+(`scratchpad/make_sms_tiles.py`: four solid-colour tiles in the pattern table, a 4-colour palette, a
+nametable of diagonal colour blocks) loaded over the debug bridge with `scripts/chromatic.py sms-load`
+into the plain `--core sms` (PSRAM-cache) build — no rebuild per ROM — renders the diagonal
+black/red/green/blue block pattern over UVC, **pixel-identical to the sim** (`build_sim_sms` now takes
+`rom_bytes=`). This exercises the whole path: Z80, VRAM pattern + nametable writes, VDP background
+render, CRAM palette, the 256x192→160x144 downscaler, the PSRAM framebuffer and UVC. (One cosmetic
+detail: a solid band at the very top is backdrop/uninitialised-VRAM dependent — black in sim, blue on
+hardware — while the defined pattern below is identical; worth revisiting with a full-screen game.)
+
 **The routing wall (the real blocker).** The SMS core is a tight fit on the GW5A-25 (smstang itself
 targets the Tang Console **60K/138K**, not the 25K): ~16.4 K LUT (71%), near-full BSRAM, and four
 clock domains (sms 53.69 MHz, hClk, xClk, sys) with several CDC crossings. P&R **places** fine but

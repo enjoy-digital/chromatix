@@ -1118,7 +1118,7 @@ def main():
     )
 
     # A hosted core (especially --core sms) nearly fills the GW5A-25 and is routing-bound: raise the
-    # Gowin place/route effort and replicate high-fanout nets to help it route.
+    # Gowin place/route effort to help it route.
     if args.with_core and args.toolchain == "gowin":
         platform.toolchain.options.update({
             "place_option": 2, "route_option": 2,

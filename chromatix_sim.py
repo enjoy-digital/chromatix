@@ -682,14 +682,16 @@ def sanitize_sms_rtl(src_dir, dst_dir):
         f.write(text)
     return dst_dir
 
-def build_sim_sms(gateware_dir, threads=1, trace=False, with_cache=False, game_gear=False):
+def build_sim_sms(gateware_dir, threads=1, trace=False, with_cache=False, game_gear=False,
+                  rom_bytes=None):
     import chromatix.gateware.cores.sms as smsmod
     rtl = sanitize_sms_rtl(smsmod.SMS_RTL_PATH, os.path.join(gateware_dir, "sms_src"))
-    # Test ROM for the cartridge (BRAM or PSRAM-cache model).
+    # Test ROM for the cartridge (BRAM or PSRAM-cache model); rom_bytes overrides the built-in one.
     os.makedirs(gateware_dir, exist_ok=True)
     rom_path = os.path.join(gateware_dir, "sms_test.sms")
+    rom = rom_bytes if rom_bytes is not None else (SMS_TEST_ROM + bytes(0x4000 - len(SMS_TEST_ROM)))
     with open(rom_path, "wb") as f:
-        f.write(SMS_TEST_ROM + bytes(0x4000 - len(SMS_TEST_ROM)))
+        f.write(rom)
     saved, smsmod.SMS_RTL_PATH = smsmod.SMS_RTL_PATH, rtl
     try:
         top = SimTopSMS(rom_path, with_cache=with_cache, game_gear=game_gear)
