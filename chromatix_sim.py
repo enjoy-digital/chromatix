@@ -603,7 +603,7 @@ class SimTopSMS(LiteXModule):
     system.v so the Z80 <-> VDP register-write handshake is visible in the run log. with_cache uses
     the real PSRAM cartridge cache (CoreROMCache) + SimSMSPSRAMPort (to reproduce/debug the hardware
     cache path); otherwise a plain BRAM cartridge."""
-    def __init__(self, rom, with_cache=False):
+    def __init__(self, rom, with_cache=False, game_gear=False):
         self.cd_sms  = ClockDomain("sms",  reset_less=True)
         self.cd_hclk = ClockDomain("hclk", reset_less=True)
         self.cd_xclk = ClockDomain("xclk", reset_less=True)
@@ -631,7 +631,7 @@ class SimTopSMS(LiteXModule):
             self.psram = ClockDomainsRenamer("xclk")(
                 SimSMSPSRAMPort(cart_port, cart_dout, rom_bytes, base=SMS_ROM_BASE))
         self.sms = sms = SMSCore(platform, clk=None, clk_freq=None, buttons=buttons,
-            rom=(None if with_cache else rom), game_gear=False, bios_en=False, with_pll=False,
+            rom=(None if with_cache else rom), game_gear=game_gear, bios_en=False, with_pll=False,
             cart_port=cart_port, cart_port_dout=cart_dout)
 
         self.specials += Instance("gb_lcd_capture",
@@ -647,6 +647,11 @@ def sanitize_sms_rtl(src_dir, dst_dir):
     writes: on each CPU I/O cycle, print A/D/M1_n/vdp_WR_n). Repo files are untouched."""
     shutil.rmtree(dst_dir, ignore_errors=True)
     shutil.copytree(src_dir, dst_dir)
+    # Same Gowin lowering the hardware build applies (so sim and hardware test identical RTL): the
+    # VDP CRAM init is dropped. Verilator ignores the syn_ramstyle attribute and zeroes the array, so
+    # the backdrop renders from a palette the ROM writes anyway -- the picture is unchanged.
+    import chromatix.gateware.cores.sms as _smsmod
+    _smsmod._sms_lower_rtl_for_gowin(dst_dir)
     def fix_module(m):
         body  = m.group(0)
         ports = [p for p in re.findall(r"output\s+(\w+)\s*[,)]", body) if p not in ("reg", "wire", "logic")]
@@ -677,7 +682,7 @@ def sanitize_sms_rtl(src_dir, dst_dir):
         f.write(text)
     return dst_dir
 
-def build_sim_sms(gateware_dir, threads=1, trace=False, with_cache=False):
+def build_sim_sms(gateware_dir, threads=1, trace=False, with_cache=False, game_gear=False):
     import chromatix.gateware.cores.sms as smsmod
     rtl = sanitize_sms_rtl(smsmod.SMS_RTL_PATH, os.path.join(gateware_dir, "sms_src"))
     # Test ROM for the cartridge (BRAM or PSRAM-cache model).
@@ -687,7 +692,7 @@ def build_sim_sms(gateware_dir, threads=1, trace=False, with_cache=False):
         f.write(SMS_TEST_ROM + bytes(0x4000 - len(SMS_TEST_ROM)))
     saved, smsmod.SMS_RTL_PATH = smsmod.SMS_RTL_PATH, rtl
     try:
-        top = SimTopSMS(rom_path, with_cache=with_cache)
+        top = SimTopSMS(rom_path, with_cache=with_cache, game_gear=game_gear)
         platform = top._platform
         platform.add_source(os.path.join(SIM_VERILOG_PATH, "gb_lcd_capture.v"))
         sim_config = SimConfig()

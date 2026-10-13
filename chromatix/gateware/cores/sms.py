@@ -42,37 +42,121 @@ SMS_RTL_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "verilog", "c
 
 SMS_CLK_FREQ = 48e6 # clk_sys. Ideal SMS is 53.69 MHz (15x the ~3.58 MHz Z80), but the near-full
                     # GW5A-25 only closes timing at ~51 MHz (Fmax 50.97, 21 setup-violated endpoints
-                    # at 53.69 -> the VDP register writes do not latch on hardware); 48 MHz meets
-                    # timing with margin. Video runs ~11% slow (the PSRAM framebuffer + panel decouple
-                    # the rate). Raising it back needs timing closure on the critical path.
+                    # at 53.69); 48 MHz meets timing with margin. Video runs ~11% slow (the PSRAM
+                    # framebuffer + panel decouple the rate). Raising it back needs timing closure on
+                    # the critical path. (The white screen during bring-up was NOT this -- it was the
+                    # VDP CRAM, see _sms_lower_rtl_for_gowin; the register writes latch fine at 48 MHz.)
 SMS_ROM_BASE = 0x400000    # Cartridge ROM placed here in the PSRAM (host upload); upper half, clear
                            # of the framebuffers/OSD/BIST in the low PSRAM.
 
 # SMS RTL sources ----------------------------------------------------------------------------------
 
-def sms_rtl_with_io_debug(dst_dir, src_dir=None):
-    """Copy the SMS RTL to dst_dir and add a 21-bit I/O-debug output to system.v (the Z80 <-> VDP
-    register-write handshake: {D_in, vdp_WR_n, M1_n, WR_n, RD_n, IORQ_n, A[7:0]}), for hardware
-    introspection. Repo RTL untouched. Returns dst_dir."""
+def _sms_lower_rtl_for_gowin(dst_dir):
+    """Apply the Gowin (GW5A-25 / gw_sh) lowering patches to an SMS RTL tree already copied to
+    dst_dir, in place. Currently: fix the VDP CRAM. vdp_cram.v is a 32x12 palette RAM that is both
+    initialized (to white, 0xFFF) and CPU-written; Gowin cannot infer a both-init'd-and-written RAM
+    as BSRAM -- the init wins and the CPU writes are dropped, so every palette entry reads back 0xFFF
+    and the whole screen is white (Verilator honours init+write and renders correctly, which hid this
+    through the whole sim bring-up; the hardware `vdp` debug probe caught it: mode_M4/display_on set,
+    yet cram_vdp_D==0xFFF at cram_vdp_A==0). Fix: drop the initial block so it is a clean write+read
+    RAM (the same uninit-then-written pattern the NES ROM loader uses, which infers BSRAM and works
+    on hardware -- CRAM powers up at 0/black and the game loads its own palette), and tag it
+    `syn_ramstyle = "registers"` (attribute form; gw_sh ignores the trailing-comment form) so a small
+    palette RAM may also just map to flip-flops. Either way the CPU writes now take."""
+    import re
+    vcram = os.path.join(dst_dir, "vdp_cram.v")
+    with open(vcram, encoding="utf-8") as f:
+        t = f.read()
+    if "syn_ramstyle" not in t:
+        t = t.replace("   reg [11:0]    ram[0:31];",
+                      '   (* syn_ramstyle = "registers" *) reg [11:0] ram[0:31];', 1)
+        # Remove the "initialize every entry to white" block (it blocks Gowin RAM inference).
+        t = re.sub(r"\n   initial begin\n.*?\n   end\n", "\n", t, count=1, flags=re.DOTALL)
+        with open(vcram, "w", encoding="utf-8") as f:
+            f.write(t)
+
+def sms_rtl_lowered(dst_dir, src_dir=None):
+    """Copy the SMS RTL to dst_dir and apply the Gowin lowering patches (see _sms_lower_rtl_for_gowin).
+    Returns dst_dir. add_sms_sources builds from this so every hardware build gets the fixes."""
+    import shutil
+    src_dir = src_dir or SMS_RTL_PATH
+    shutil.rmtree(dst_dir, ignore_errors=True)
+    shutil.copytree(src_dir, dst_dir)
+    _sms_lower_rtl_for_gowin(dst_dir)
+    return dst_dir
+
+def sms_rtl_with_io_debug(dst_dir, src_dir=None, probe="io"):
+    """Copy the SMS RTL to dst_dir (with the Gowin lowering patches applied) and add a debug output
+    to system.v, for hardware introspection. Repo RTL untouched. Returns dst_dir. Two probes:
+      "io"  (21-bit): the Z80 <-> VDP register-write handshake
+                      {D_in, vdp_WR_n, M1_n, WR_n, RD_n, IORQ_n, A[7:0]}.
+      "vdp" (32-bit): a vdp_inst video snapshot latched at a fixed center pixel (x==128, y==96), to
+                      tell where the white screen comes from now that the VDP is known to configure
+                      correctly on hardware (mode_M4/display_on set, register writes latch). Layout,
+                      LSB first: [11:0] color (VDP RGB444 output), [23:12] cram_vdp_D (the CRAM
+                      palette entry read for that pixel), [28:24] cram_vdp_A (CRAM address, 5-bit),
+                      [29] mode_M4, [30] display_on, [31] latch_valid (the center pixel rendered).
+                      color==blue  => VDP output is correct, the bug is downstream (LiteX downscaler/
+                      framebuffer/panel); color/cram_vdp_D==white => a CRAM readback problem;
+                      latch_valid==0 => the raster never reached the center (display timing)."""
     import shutil, re
     src_dir = src_dir or SMS_RTL_PATH
     shutil.rmtree(dst_dir, ignore_errors=True)
     shutil.copytree(src_dir, dst_dir)
+    _sms_lower_rtl_for_gowin(dst_dir)
     sysv = os.path.join(dst_dir, "system.v")
     with open(sysv, encoding="utf-8") as f:
         text = f.read()
     text = text.replace("ROMEN);", "ROMEN, dbg_io);", 1)
-    text = re.sub(r"\nendmodule\s*$",
-        "\n   output [20:0] dbg_io;\n"
-        "   assign dbg_io = {D_in, vdp_WR_n, M1_n, WR_n, RD_n, IORQ_n, A[7:0]};\nendmodule\n",
-        text, count=1)
+    if probe == "io":
+        text = re.sub(r"\nendmodule\s*$",
+            "\n   output [20:0] dbg_io;\n"
+            "   assign dbg_io = {D_in, vdp_WR_n, M1_n, WR_n, RD_n, IORQ_n, A[7:0]};\nendmodule\n",
+            text, count=1)
+    elif probe == "vdp":
+        # Route vdp_inst's new dbg_vdp output up to the system.v dbg_io port (vdp2_inst leaves it
+        # unconnected, which is legal). Only vdp_inst uses ".reset_n(RESET_n))".
+        text = text.replace(".reset_n(RESET_n));",
+                            ".reset_n(RESET_n),\n      .dbg_vdp(dbg_io));", 1)
+        text = re.sub(r"\nendmodule\s*$", "\n   output [31:0] dbg_io;\nendmodule\n", text, count=1)
+        # Add the dbg_vdp output + a small observer to vdp.v (same clk/ce/reset as the real logic).
+        vdpv = os.path.join(dst_dir, "vdp.v")
+        with open(vdpv, encoding="utf-8") as f:
+            vtext = f.read()
+        vtext = vtext.replace("ysj_quirk, reset_n);", "ysj_quirk, reset_n, dbg_vdp);", 1)
+        observer = (
+            "\n   // ChromatiX hw_debug (probe=vdp): latch a center-pixel video snapshot.\n"
+            "   output [31:0] dbg_vdp;\n"
+            "   reg [11:0] dbg_color_lat; reg [11:0] dbg_cramd_lat; reg [4:0] dbg_crama_lat;\n"
+            "   reg dbg_lat_valid;\n"
+            "   assign dbg_vdp = {dbg_lat_valid, display_on, mode_M4, dbg_crama_lat,\n"
+            "                     dbg_cramd_lat, dbg_color_lat};\n"
+            "   always @(posedge clk_sys or negedge reset_n) begin\n"
+            "      if (reset_n == 1'b0) begin\n"
+            "         dbg_color_lat <= 12'd0; dbg_cramd_lat <= 12'd0; dbg_crama_lat <= 5'd0;\n"
+            "         dbg_lat_valid <= 1'b0;\n"
+            "      end else if (ce_pix) begin\n"
+            "         if (x == 9'd128 && y == 9'd96) begin\n"
+            "            dbg_color_lat <= color; dbg_cramd_lat <= cram_vdp_D; dbg_crama_lat <= cram_vdp_A;\n"
+            "            dbg_lat_valid <= 1'b1;\n"
+            "         end\n"
+            "      end\n"
+            "   end\n"
+            "endmodule\n")
+        vtext = re.sub(r"\nendmodule\s*$", "\n" + observer, vtext, count=1)
+        with open(vdpv, "w", encoding="utf-8") as f:
+            f.write(vtext)
+    else:
+        raise ValueError(f"unknown probe {probe!r}")
     with open(sysv, "w", encoding="utf-8") as f:
         f.write(text)
     return dst_dir
 
 def add_sms_sources(platform, rtl_path=None):
-    """Add the vendored SMS core RTL (chromatix/verilog/cores/sms/, GPL) + the ChromatiX FM stub."""
-    rtl_path = rtl_path or SMS_RTL_PATH
+    """Add the vendored SMS core RTL (chromatix/verilog/cores/sms/, GPL) + the ChromatiX FM stub.
+    By default the RTL is run through the Gowin lowering (sms_rtl_lowered) first; pass rtl_path to
+    use an already-prepared tree (e.g. the hw_debug copy, which lowers too)."""
+    rtl_path = rtl_path or sms_rtl_lowered(os.path.join("build", "sms_src"))
     files = [
         "system.v", "video.v",
         "vdp.v", "vdp_main.v", "vdp_background.v", "vdp_sprites.v", "vdp_sprite_shifter.v",
@@ -145,10 +229,13 @@ class SMSCore(LiteXModule):
 
         # # #
 
-        # hw_debug: build against an RTL copy with an I/O-debug output added to system.v (the Z80 <->
-        # VDP register-write handshake), for hardware introspection; otherwise the repo RTL as-is.
+        # hw_debug: build against an RTL copy with a debug output added, for hardware introspection
+        # (otherwise the repo RTL as-is). hw_debug may be True/"io" (the Z80<->VDP handshake) or "vdp"
+        # (vdp_inst internal latch state); see sms_rtl_with_io_debug.
+        probe = hw_debug if isinstance(hw_debug, str) else "io"
         if hw_debug:
-            add_sms_sources(platform, rtl_path=sms_rtl_with_io_debug(os.path.join("build", "sms_dbg_src")))
+            add_sms_sources(platform, rtl_path=sms_rtl_with_io_debug(
+                os.path.join("build", "sms_dbg_src"), probe=probe))
         else:
             add_sms_sources(platform)
 
@@ -156,7 +243,7 @@ class SMSCore(LiteXModule):
         rom_rd  = Signal()
         rom_do  = Signal(8)  # Cartridge byte (to the core).
         stall   = Signal()   # Cartridge cache stall (freezes the clock-enables on a PSRAM miss).
-        dbg_io  = Signal(21) # system.v I/O-debug bus (hw_debug): {D_in,vdp_WR_n,M1_n,WR_n,RD_n,IORQ_n,A[7:0]}.
+        dbg_io  = Signal(32 if probe == "vdp" else 21) # system.v debug bus (hw_debug); see sms_rtl_with_io_debug.
 
         # Clock: one 53.69 MHz clk_sys (own PLL), the SMS "sms" clock domain.
         if with_pll:

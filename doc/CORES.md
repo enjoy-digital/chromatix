@@ -257,26 +257,37 @@ by the RGB333 frame buffer (45/56) **and** raising the Gowin place/route effort
 register writes reaching the VDP (`vdp_wr_n=0`, correct data). So the whole SMS integration — Z80,
 VDP, video/color path, downscaler, cache — is functionally correct.
 
-**Open issue — the VDP does not latch its registers on hardware.** The screen is uniform `0xFFF`
-(white). `vdp_main.v`: `color = smode_M4 ? cram_D : <legacy> : 12'hFFF`, so `0xFFF` means
-`smode_M4=0` — the VDP never entered mode 4. The VDP latches a register on the `WR_n` falling edge
-sampled at `ce_vdp` (`vdp.v`: `if (ce_vdp) if (old_WR_n & ~WR_n) …`). A build-dir RTL debug port
-(`sms_rtl_with_io_debug`, `--sms-bram` → `hw_debug`) routing `{D_in, vdp_WR_n, M1_n, WR_n, RD_n,
-IORQ_n, A[7:0]}` to the debug CSR shows that **on hardware the writes DO reach the VDP** — `A=bf
-D=04`/`D=80` (mode 4), `D=40`/`D=81` (display on), `A=be D=30` (CRAM blue), all with `vdp_wr_n=0`,
-identical to the sim — yet the VDP does not latch them.
+**Resolved — the backdrop renders blue on hardware.** It was two stacked bugs, not the one first
+guessed ("the VDP does not latch its registers"). A `vdp` hardware debug probe
+(`sms_rtl_with_io_debug(probe="vdp")`, `--sms-hw-debug vdp`) that latches a center-pixel VDP snapshot
+to the debug CSR disproved that guess outright: on hardware the VDP is **fully configured** —
+`mode_M4=1`, `display_on=1`, register writes latch — but `cram_vdp_D=0xFFF` at `cram_vdp_A=0`, i.e.
+the color RAM returns its initial value and the CPU's palette writes never took.
 
-Ruled out, systematically: the **cartridge cache** (a BRAM-cartridge HW build, `--sms-bram`, is
-equally white; the PSRAM readback matches the ROM byte-for-byte; the sim cache path renders blue);
-the **sms-clock timing** (53.69 MHz overflows the near-full GW5A-25 — Fmax 50.97 MHz, 21 setup-
-violated endpoints — so the core now runs at **48 MHz**, timing clean, but the VDP still does not
-latch); and **the writes not arriving**. So it is a part/flow-specific hardware effect in the VDP's
-register-latch path — the identical RTL latches in the zero-delay sim but not on the real GW5A-25 via
-the LiteX/`gw_sh` flow (smstang targets the larger 60K/138K Tang Console parts and the Gowin IDE).
-**Next:** route `smode_M4` + the VDP write-strobe/latch out to the debug CSR to see whether the
-falling-edge detect fires on hardware; inspect the `ce_vdp`/`WR_n` relationship and hold timing on
-the ce-gated VDP write path (the `ce_cpu`/`ce_vdp` edges coincide at clkd 9/24); try the real VM2413
-+ a smaller/clean synthesis without `replicate_resources`.
+1. **CRAM init+write (the white).** `vdp_cram.v` is a 32x12 palette RAM both **initialized** (to
+   `0xFFF` white) and **CPU-written**. Gowin cannot infer a both-init'd-and-written array as BSRAM —
+   the init wins, the writes drop, every entry reads back `0xFFF` → whole screen white. Verilator
+   honours init+write and rendered correctly, hiding it through the entire sim bring-up (the same
+   class of problem as the NES ROM loader). Fix (`_sms_lower_rtl_for_gowin`, applied by
+   `sms_rtl_lowered`/`add_sms_sources` to every hardware build and by `sanitize_sms_rtl` to the sim,
+   so both test identical RTL): drop the `initial` block so it is a clean write+read RAM that infers
+   and works on hardware. (`syn_ramstyle = "registers"`, both the comment and `(* *)` attribute
+   forms, is **not** honoured by this `gw_sh`, so the init removal is what does it.) With this alone
+   the screen went white → **black**: CRAM now reads `0` instead of the init, but the writes still
+   were not landing — exposing the second bug.
+2. **SMS vs Game Gear mode (the black).** The sim ran the core as SMS (`game_gear=False`, `gg=0`), the
+   hardware ran it as Game Gear (`game_gear=True`, `gg=1`) — a sim/hardware config mismatch. The test
+   ROM writes CRAM the SMS way (a single byte to `$BE` at an even address); in Game Gear mode
+   `cram_cpu_WE` needs the two-byte protocol (`xram_cpu_A[0]==1`), so the single-byte write is
+   suppressed and CRAM stays `0` (black). The sim reproduces it exactly: `gg=0` → center `(0,0,255)`
+   blue, `gg=1` → `(0,0,0)` black. Fix: `game_gear` is now a build option (`--sms-game-gear`),
+   **default SMS mode (`gg=0`)** to match SMS ROMs and the sim; Game Gear ROMs set the flag.
+
+With both fixes the `--sms-bram` SMS test ROM renders a uniform `(0,0,246)` blue frame over UVC on
+hardware, matching the sim. The earlier dead-ends are retired: the cartridge cache, the sms-clock
+timing (the 48 MHz drop is kept for margin but was never the cause — the writes latch fine), the
+writes-not-arriving theory, and the `ce_cpu`/`ce_vdp` coincidence. The RTL is correct; the two defects
+were the CRAM memory inference and the mode mismatch.
 
 **The routing wall (the real blocker).** The SMS core is a tight fit on the GW5A-25 (smstang itself
 targets the Tang Console **60K/138K**, not the 25K): ~16.4 K LUT (71%), near-full BSRAM, and four

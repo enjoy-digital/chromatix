@@ -127,6 +127,8 @@ class BaseSoC(SoCMini):
         nes_rom               = "nes15.hex",
         sms_rom               = None,
         sms_bram              = False,
+        sms_hw_debug          = None,
+        sms_game_gear         = False,
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
@@ -674,12 +676,14 @@ class BaseSoC(SoCMini):
                 # screen with no cartridge (the BIOS drives the VDP), the first hardware validation of
                 # the video path; it then boots a cartridge uploaded over the debug bridge (sms-load).
                 self.core = lcd_source = SMSCore(platform, clk_24, int(24e6), sms_buttons,
-                    rom=sms_rom, game_gear=True, bios_en=False,
+                    rom=sms_rom, game_gear=sms_game_gear, bios_en=False,
                     cart_port      = memory.sms_cart_port if with_sms_cart else None,
                     cart_port_dout = memory.ctrl.dout     if with_sms_cart else None,
                     cart_ready     = memory.bist_done     if with_sms_cart else None,
                     cart_bram_kb   = 16 if sms_bram else 64,
-                    hw_debug       = sms_bram) # BRAM diagnostic build: expose the VDP I/O handshake.
+                    # Diagnostic builds: expose a debug output. --sms-hw-debug {io,vdp} selects the
+                    # probe (vdp = whether the VDP latches register writes); else --sms-bram -> "io".
+                    hw_debug       = sms_hw_debug if sms_hw_debug else sms_bram)
                 if with_debug_bridge:
                     self.sms_loader = SMSLoaderCSR(lcd_source, with_debug=True)
                 self.sync.hclk += [
@@ -1077,6 +1081,8 @@ def main():
     parser.add_argument("--nes-rom",               default="nes15.hex",          help="iNES ROM for --core nes (a .nes/.hex path, or a name under cores/nes/roms/; NROM only).")
     parser.add_argument("--sms-rom",               default=None,                 help="SMS/Game Gear ROM for --core sms (a path, or a name under cores/sms/roms/; small unbanked for now).")
     parser.add_argument("--sms-bram",              action="store_true",          help="--core sms: bake a small ROM into BRAM (no PSRAM cache) -- isolates the cache path on hardware.")
+    parser.add_argument("--sms-hw-debug",          default=None, choices=["io", "vdp"], help="--core sms: expose a debug output on the SMS debug CSR (io = Z80<->VDP handshake; vdp = VDP register-latch state).")
+    parser.add_argument("--sms-game-gear",         action="store_true",          help="--core sms: run in Game Gear mode (gg=1: 12-bit two-byte CRAM, 160x144 window). Default is SMS mode (gg=0, 256x192 downscaled) -- use that for SMS ROMs.")
     parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
     if args.core is not None:
@@ -1104,6 +1110,8 @@ def main():
         nes_rom               = args.nes_rom,
         sms_rom               = args.sms_rom,
         sms_bram              = args.sms_bram,
+        sms_hw_debug          = args.sms_hw_debug,
+        sms_game_gear         = args.sms_game_gear,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
@@ -1113,7 +1121,7 @@ def main():
     # Gowin place/route effort and replicate high-fanout nets to help it route.
     if args.with_core and args.toolchain == "gowin":
         platform.toolchain.options.update({
-            "place_option": 2, "route_option": 2, "replicate_resources": 1,
+            "place_option": 2, "route_option": 2,
         })
 
     # Build.
