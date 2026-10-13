@@ -123,6 +123,7 @@ class BaseSoC(SoCMini):
         with_app              = False,
         with_core             = False,
         core                  = None,
+        nes_rom               = "nes15.hex",
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
@@ -633,7 +634,7 @@ class BaseSoC(SoCMini):
                     left   = btns.dpad_left  | mcu_buttons[6],
                     right  = btns.dpad_right | mcu_buttons[5],
                 )
-                self.core = lcd_source = NESCore(platform, clk_24, int(24e6), nes_buttons)
+                self.core = lcd_source = NESCore(platform, clk_24, int(24e6), nes_buttons, rom=nes_rom)
                 self.sync.hclk += [ # NES audio (nes domain) -> shared bus (quasi-static).
                     left.eq(lcd_source.left),
                     right.eq(lcd_source.right),
@@ -1026,6 +1027,7 @@ def main():
     parser.add_argument("--with-app",              action="store_true",       help="CPU application SoC (VexRiscv) in place of the Game Boy core: PSRAM framebuffer, PCM audio, ESP32 UART, firmware loaded over USB.")
     parser.add_argument("--with-core",             action="store_true",       help="MiSTer-core shell in place of the Game Boy core (bring-up: a 160x144 test pattern on the LCD/UVC).")
     parser.add_argument("--core",                  default=None, choices=["nes"], help="Hosted core for --with-core (default: the test pattern).")
+    parser.add_argument("--nes-rom",               default="nes15.hex",          help="iNES ROM for --core nes (a .nes/.hex path, or a name under cores/nes/roms/; NROM only).")
     parser.add_argument("--with-utmi-monitor",     action="store_true",       help="USB UTMI packet recorder (debug bridge).")
     args = parser.parse_args()
     if args.core is not None:
@@ -1050,6 +1052,7 @@ def main():
         with_app              = args.with_app,
         with_core             = args.with_core,
         core                  = args.core,
+        nes_rom               = args.nes_rom,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],

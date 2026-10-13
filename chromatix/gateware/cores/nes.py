@@ -217,9 +217,13 @@ def add_nes_sources(platform):
             platform.add_source(path, language=language)
 
 def _read_ines(path):
-    """Parse a whitespace-separated hex iNES file into a list of byte values."""
-    with open(path) as f:
-        return [int(tok, 16) for tok in f.read().split()]
+    """Read an iNES ROM into a list of byte values: a binary .nes file, or a whitespace-separated
+    hex dump (.hex, as the bundled roms)."""
+    if path.endswith(".hex"):
+        with open(path) as f:
+            return [int(tok, 16) for tok in f.read().split()]
+    with open(path, "rb") as f:
+        return list(f.read())
 
 def _size_code(pages):
     """iNES page count -> mapper_flags size field (0:min .. 7), as in game_loader.v."""
@@ -391,7 +395,9 @@ class NESCore(LiteXModule):
         # # #
 
         add_nes_sources(platform)
-        prg, chr, mapper_flags = parse_ines(os.path.join(NES_RTL_PATH, "roms", rom))
+        # `rom` is a path (any .nes / .hex iNES ROM) or a bare name under cores/nes/roms/.
+        rom_path = rom if os.path.exists(rom) else os.path.join(NES_RTL_PATH, "roms", rom)
+        prg, chr, mapper_flags = parse_ines(rom_path)
         prg_size = (mapper_flags >> 8) & 0x7
         prg_mask = 0x3fff if prg_size == 0 else 0x7fff
 
