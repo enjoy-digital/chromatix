@@ -53,7 +53,7 @@ from chromatix.gateware.adc         import BatteryADC
 from chromatix.gateware.terminal    import LCDTerminal
 from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
 from chromatix.gateware.core_shell  import CoreTestPattern, CoreVideoTestPattern, CoreVideoDownscaler
-from chromatix.gateware.cores.nes   import NESCore
+from chromatix.gateware.cores.nes   import NESCore, NESLoaderCSR
 
 # Timing Constraints -------------------------------------------------------------------------------
 
@@ -143,7 +143,9 @@ class BaseSoC(SoCMini):
         # MiSTer-core shell (core_shell.py): a hosted FPGA core in place of the Game Boy core. Not a
         # CPU (CSR bus on gClk); mutually exclusive with the BIOS/app CPU variants.
         assert not (with_core and with_cpu)
-        with_vcart = with_debug_bridge # Virtual cartridge loaded over the debug bridge.
+        # Virtual cartridge (Game Boy ROM over the debug bridge) -- not for the core shell, which
+        # has no Game Boy core; --core nes uses the debug bridge for its own NES ROM loader instead.
+        with_vcart = with_debug_bridge and not with_core
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
@@ -634,7 +636,13 @@ class BaseSoC(SoCMini):
                     left   = btns.dpad_left  | mcu_buttons[6],
                     right  = btns.dpad_right | mcu_buttons[5],
                 )
-                self.core = lcd_source = NESCore(platform, clk_24, int(24e6), nes_buttons, rom=nes_rom)
+                # With the debug bridge, enable the runtime ROM loader: PRG/CHR become host-writable
+                # (32 KB/8 KB, seeded with --nes-rom) and a NESLoaderCSR uploads any NROM game at
+                # runtime (scripts/chromatic.py nes-load) with no rebuild.
+                self.core = lcd_source = NESCore(platform, clk_24, int(24e6), nes_buttons,
+                    rom=nes_rom, with_loader=with_debug_bridge)
+                if with_debug_bridge:
+                    self.nes_loader = NESLoaderCSR(lcd_source)
                 self.sync.hclk += [ # NES audio (nes domain) -> shared bus (quasi-static).
                     left.eq(lcd_source.left),
                     right.eq(lcd_source.right),
