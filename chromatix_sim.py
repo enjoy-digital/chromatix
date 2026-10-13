@@ -43,7 +43,7 @@ from chromatix.gateware.memory  import memory_port_layout, MemorySystem
 from chromatix.gateware.video   import VideoPipeline
 from chromatix.gateware.vcart   import VirtualCart
 from chromatix.gateware.cores.nes import NESCore
-from chromatix.gateware.cores.sms import SMSCore, add_sms_sources, SMS_RTL_PATH
+from chromatix.gateware.cores.sms import SMSCore, add_sms_sources, SMS_RTL_PATH, SMS_ROM_BASE
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -573,19 +573,47 @@ SMS_TEST_ROM = bytes([
     0xC3,0x06,0x00,                               # jp $0006 (re-run the setup forever)
 ])
 
+class SimSMSPSRAMPort(LiteXModule):
+    """Minimal PSRAM arbiter-port model for the SMS cartridge cache (xClk): on request, deliver
+    burst_length/2 16-bit little-endian words from the ROM (placed at `base`) after `latency` cycles,
+    one per cycle, then `done` -- the memory-port burst protocol CoreROMCache expects."""
+    def __init__(self, port, dout, rom_bytes, base=0x400000, latency=8):
+        words = [rom_bytes[i] | (rom_bytes[i + 1] << 8) for i in range(0, len(rom_bytes) - 1, 2)]
+        self.specials.rom = mem = Memory(16, len(words), init=words, name="sms_cart_rom")
+        rd = mem.get_port(async_read=True)
+        self.specials += rd
+        addr  = Signal(23)
+        count = Signal(11)
+        timer = Signal(max=latency + 1)
+        self.comb += [rd.adr.eq((addr - base)[1:]), dout.eq(rd.dat_r)]
+        self.fsm = fsm = FSM(reset_state="IDLE")
+        fsm.act("IDLE",
+            If(port.request,
+                NextValue(addr, port.addr), NextValue(count, port.burst_length[1:]),
+                NextValue(timer, 0), NextState("LATENCY")))
+        fsm.act("LATENCY", NextValue(timer, timer + 1), If(timer == (latency - 1), NextState("DATA")))
+        fsm.act("DATA",
+            port.dout_valid.eq(1),
+            NextValue(addr, addr + 2), NextValue(count, count - 1),
+            If(count == 1, port.done.eq(1), NextState("IDLE")))
+
 class SimTopSMS(LiteXModule):
-    """Simulate the hosted SMS core (SMSCore, no PLL, BRAM cartridge): clk_sys from the clocker,
-    hclk = clk_sys/4; the Game Boy LCD output is captured to PPM frames. sanitize_sms_rtl injects an
-    I/O $display into system.v so the Z80 <-> VDP register-write handshake is visible in the run log."""
-    def __init__(self, rom):
+    """Simulate the hosted SMS core (SMSCore, no PLL): clk_sys from the clocker, hclk = clk_sys/4; the
+    Game Boy LCD output is captured to PPM frames. sanitize_sms_rtl injects an I/O $display into
+    system.v so the Z80 <-> VDP register-write handshake is visible in the run log. with_cache uses
+    the real PSRAM cartridge cache (CoreROMCache) + SimSMSPSRAMPort (to reproduce/debug the hardware
+    cache path); otherwise a plain BRAM cartridge."""
+    def __init__(self, rom, with_cache=False):
         self.cd_sms  = ClockDomain("sms",  reset_less=True)
         self.cd_hclk = ClockDomain("hclk", reset_less=True)
+        self.cd_xclk = ClockDomain("xclk", reset_less=True)
         div = Signal(2)
         platform = SimPlatform("SIM", _io)
         self._platform = platform
         self.comb += [
             self.cd_sms.clk.eq(platform.request("sys_clk")),
-            self.cd_hclk.clk.eq(div[1]), # clk_sys/4.
+            self.cd_hclk.clk.eq(div[1]),           # clk_sys/4.
+            self.cd_xclk.clk.eq(ClockSignal("sms")), # xClk = clk_sys (same clock, separate domain).
         ]
         self.sync.sms += div.eq(div + 1)
 
@@ -593,8 +621,18 @@ class SimTopSMS(LiteXModule):
         buttons = _Buttons()
         for name in ["a", "b", "select", "start", "up", "down", "left", "right"]:
             setattr(buttons, name, Signal())
+
+        cart_port = cart_dout = None
+        if with_cache:
+            with open(rom, "rb") as f:
+                rom_bytes = f.read()
+            cart_port = Record(memory_port_layout())
+            cart_dout = Signal(16)
+            self.psram = ClockDomainsRenamer("xclk")(
+                SimSMSPSRAMPort(cart_port, cart_dout, rom_bytes, base=SMS_ROM_BASE))
         self.sms = sms = SMSCore(platform, clk=None, clk_freq=None, buttons=buttons,
-            rom=rom, game_gear=False, bios_en=False, with_pll=False, cart_port=None)
+            rom=(None if with_cache else rom), game_gear=False, bios_en=False, with_pll=False,
+            cart_port=cart_port, cart_port_dout=cart_dout)
 
         self.specials += Instance("gb_lcd_capture",
             i_clk    = ClockSignal("hclk"),
@@ -639,17 +677,17 @@ def sanitize_sms_rtl(src_dir, dst_dir):
         f.write(text)
     return dst_dir
 
-def build_sim_sms(gateware_dir, threads=1, trace=False):
+def build_sim_sms(gateware_dir, threads=1, trace=False, with_cache=False):
     import chromatix.gateware.cores.sms as smsmod
     rtl = sanitize_sms_rtl(smsmod.SMS_RTL_PATH, os.path.join(gateware_dir, "sms_src"))
-    # Test ROM for the BRAM cartridge.
+    # Test ROM for the cartridge (BRAM or PSRAM-cache model).
     os.makedirs(gateware_dir, exist_ok=True)
     rom_path = os.path.join(gateware_dir, "sms_test.sms")
     with open(rom_path, "wb") as f:
         f.write(SMS_TEST_ROM + bytes(0x4000 - len(SMS_TEST_ROM)))
     saved, smsmod.SMS_RTL_PATH = smsmod.SMS_RTL_PATH, rtl
     try:
-        top = SimTopSMS(rom_path)
+        top = SimTopSMS(rom_path, with_cache=with_cache)
         platform = top._platform
         platform.add_source(os.path.join(SIM_VERILOG_PATH, "gb_lcd_capture.v"))
         sim_config = SimConfig()
