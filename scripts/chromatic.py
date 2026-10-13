@@ -222,6 +222,45 @@ class Chromatic:
         time.sleep(0.01)
         self.vcart_control(enable=0, hold=0)
 
+    # NES runtime ROM loader (--core nes --with-debug-bridge): PRG/CHR streamed into BRAM.
+    @staticmethod
+    def _nes_ctrl(hold, sel_chr, prg32k, mirror_v, chr_ram, addr_rst=0):
+        return ((hold    << 0) | (sel_chr  << 1) | (prg32k << 2) |
+                (mirror_v << 3) | (chr_ram << 4) | (addr_rst << 5))
+
+    def nes_load(self, rom):
+        """Upload an NROM (mapper 0) iNES ROM into the hosted NES core's PRG/CHR BRAM at runtime
+        (no rebuild): hold the core, set config, stream PRG then CHR as 32-bit words, release."""
+        if rom[:4] != b"NES\x1a":
+            raise ValueError("Not an iNES ROM (bad magic).")
+        prg_n, chr_n, flag6, flag7 = rom[4], rom[5], rom[6], rom[7]
+        mapper = (flag6 >> 4) | (flag7 & 0xf0)
+        if mapper != 0:
+            raise ValueError(f"Runtime loader supports NROM (mapper 0) only, got mapper {mapper}.")
+        if prg_n > 2 or chr_n > 1:
+            raise ValueError(f"NROM out of range (PRG {prg_n}x16KB, CHR {chr_n}x8KB; max 2/1).")
+        prg = rom[16:16 + prg_n*16384]
+        chr = rom[16 + prg_n*16384:16 + prg_n*16384 + chr_n*8192]
+        cfg = dict(prg32k=1 if prg_n >= 2 else 0, mirror_v=flag6 & 1, chr_ram=1 if chr_n == 0 else 0)
+
+        def words(data):
+            data = bytes(data) + bytes(-len(data) % 4)
+            return [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
+
+        reg = self.bus.regs
+        # PRG: hold + reset address + target PRG, then stream.
+        reg.nes_loader_control.write(self._nes_ctrl(hold=1, sel_chr=0, addr_rst=1, **cfg))
+        for w in words(prg):
+            reg.nes_loader_data.write(w)
+        # CHR: reset address + target CHR, then stream.
+        if chr:
+            reg.nes_loader_control.write(self._nes_ctrl(hold=1, sel_chr=1, addr_rst=1, **cfg))
+            for w in words(chr):
+                reg.nes_loader_data.write(w)
+        # Release: the core resets fresh and runs the new ROM.
+        reg.nes_loader_control.write(self._nes_ctrl(hold=0, sel_chr=0, **cfg))
+        return dict(prg_kb=len(prg)//1024, chr_kb=len(chr)//1024, **cfg)
+
 # Helpers ------------------------------------------------------------------------------------------
 
 def _read_file(filename):
@@ -342,6 +381,9 @@ def main():
 
     subparsers.add_parser("unload", help="Back to the physical cartridge.")
 
+    p = subparsers.add_parser("nes-load", help="Upload an NROM game to a --core nes --with-debug-bridge build (runtime, no rebuild).")
+    p.add_argument("rom", help="iNES ROM file (.nes/.hex, NROM/mapper 0).")
+
     p = subparsers.add_parser("run", help="Load and start a firmware (--with-app build).")
     p.add_argument("firmware",                         help="Firmware binary (ex: firmware/fbtest/fbtest.bin).")
     p.add_argument("--file",      default=[],          help="Data file at a main RAM offset.", nargs=2, action="append", metavar=("FILE", "OFFSET"))
@@ -385,6 +427,17 @@ def main():
             print(f"{len(data)} bytes saved to {args.file}.")
         elif args.command == "unload":
             chromatic.unload_rom()
+        elif args.command == "nes-load":
+            if args.rom.endswith(".hex"): # Whitespace-separated hex dump (bundled roms).
+                with open(args.rom) as f:
+                    rom = bytes(int(tok, 16) for tok in f.read().split())
+            else:
+                rom = _read_file(args.rom)
+            t0  = time.time()
+            cfg = chromatic.nes_load(rom)
+            print(f"NES ROM loaded in {time.time() - t0:.1f}s: PRG {cfg['prg_kb']}KB, "
+                  f"CHR {cfg['chr_kb']}KB, {'vertical' if cfg['mirror_v'] else 'horizontal'} mirror"
+                  + (", CHR-RAM" if cfg['chr_ram'] else "") + ".")
         elif args.command == "run":
             firmware = _read_file(args.firmware)
             files    = [(int(offset, 0), _read_file(name)) for name, offset in args.file]
