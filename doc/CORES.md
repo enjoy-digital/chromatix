@@ -236,9 +236,8 @@ of `vcart.py`'s Game-Boy cache): a direct-mapped 16-byte-line cache in the core 
 one PSRAM arbiter port, which `stall`s the core (gating its clock-enables, so the whole core pauses
 in cadence and resumes) on a miss while the line is fetched. This is the one hard piece the NES
 avoided (NROM fit in BRAM). The host uploads the ROM over the debug bridge (`scripts/chromatic.py
-sms-load`) into the PSRAM at `SMS_ROM_BASE`; the `--core sms` branch boots the SMS **BIOS**
-(`mboot.hex`) in SMS mode (256×192 → downscaler) so it renders a screen with no cartridge — the first
-hardware validation of the video path — then boots the uploaded cartridge.
+sms-load`) into the PSRAM at `SMS_ROM_BASE`, and the core boots it. (`--sms-bram` bakes a small ROM
+into BRAM instead, no cache; `bios_en` boots the `mboot.hex` BIOS.)
 
 The FM (`opll`) is stubbed (`opll_stub.v`, BSD) to skip the VHDL VM2413 and save area — fine for the
 vast majority of SMS games and all Game Gear games; drop in the real `vm2413/` for FM titles.
@@ -252,16 +251,32 @@ finished and the one-cycle arbiter request was dropped — fixed by holding rese
 by the RGB333 frame buffer (45/56) **and** raising the Gowin place/route effort
 (`place_option/route_option 2`, `replicate_resources`).
 
-**Open issue — the VDP is not configured.** The screen is a uniform `0xFFF` (white). The debug CSR
-(now exposing the VDP `color` output + raster `x`) shows `x` scanning but `color` stuck at `0xFFF`
-for every `x`. In `vdp_main.v`, `color = smode_M4 ? cram_D : <legacy palette> : 12'hFFF`, so `0xFFF`
-means **`smode_M4=0`** — the VDP never entered mode 4, i.e. the Z80's `OUT ($BF)` register writes are
-not reaching/latching in the VDP, even though the Z80 demonstrably runs and re-executes those writes
-(a looped-config test ROM does not change it). The VDP port decode (`A[7:6]==10`) is correct, so the
-break is in the Z80 `IORQ`/`WR`/`M1` → VDP latch path inside `system.v`. Those signals live inside
-the GPL blackbox, so the next step is a **Verilator sim of SMSCore** (full internal visibility, as
-the NES sim gave — more than a LiteScope on the shell-visible signals can show), or build-dir RTL
-debug ports routing `IORQ_n`/`WR_n`/`vdp_WR_n`/`smode_M4` out to a CSR.
+**The port is proven correct in simulation.** A Verilator sim of `SMSCore` (`chromatix_sim.py`
+`build_sim_sms`, both the BRAM cartridge and the `with_cache` PSRAM-cache path via `SimSMSPSRAMPort`)
+**renders the test ROM's backdrop blue** and its injected I/O trace shows the Z80's `OUT ($BF)`
+register writes reaching the VDP (`vdp_wr_n=0`, correct data). So the whole SMS integration — Z80,
+VDP, video/color path, downscaler, cache — is functionally correct.
+
+**Open issue — the VDP does not latch its registers on hardware.** The screen is uniform `0xFFF`
+(white). `vdp_main.v`: `color = smode_M4 ? cram_D : <legacy> : 12'hFFF`, so `0xFFF` means
+`smode_M4=0` — the VDP never entered mode 4. The VDP latches a register on the `WR_n` falling edge
+sampled at `ce_vdp` (`vdp.v`: `if (ce_vdp) if (old_WR_n & ~WR_n) …`). A build-dir RTL debug port
+(`sms_rtl_with_io_debug`, `--sms-bram` → `hw_debug`) routing `{D_in, vdp_WR_n, M1_n, WR_n, RD_n,
+IORQ_n, A[7:0]}` to the debug CSR shows that **on hardware the writes DO reach the VDP** — `A=bf
+D=04`/`D=80` (mode 4), `D=40`/`D=81` (display on), `A=be D=30` (CRAM blue), all with `vdp_wr_n=0`,
+identical to the sim — yet the VDP does not latch them.
+
+Ruled out, systematically: the **cartridge cache** (a BRAM-cartridge HW build, `--sms-bram`, is
+equally white; the PSRAM readback matches the ROM byte-for-byte; the sim cache path renders blue);
+the **sms-clock timing** (53.69 MHz overflows the near-full GW5A-25 — Fmax 50.97 MHz, 21 setup-
+violated endpoints — so the core now runs at **48 MHz**, timing clean, but the VDP still does not
+latch); and **the writes not arriving**. So it is a part/flow-specific hardware effect in the VDP's
+register-latch path — the identical RTL latches in the zero-delay sim but not on the real GW5A-25 via
+the LiteX/`gw_sh` flow (smstang targets the larger 60K/138K Tang Console parts and the Gowin IDE).
+**Next:** route `smode_M4` + the VDP write-strobe/latch out to the debug CSR to see whether the
+falling-edge detect fires on hardware; inspect the `ce_vdp`/`WR_n` relationship and hold timing on
+the ce-gated VDP write path (the `ce_cpu`/`ce_vdp` edges coincide at clkd 9/24); try the real VM2413
++ a smaller/clean synthesis without `replicate_resources`.
 
 **The routing wall (the real blocker).** The SMS core is a tight fit on the GW5A-25 (smstang itself
 targets the Tang Console **60K/138K**, not the 25K): ~16.4 K LUT (71%), near-full BSRAM, and four
