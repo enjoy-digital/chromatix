@@ -26,9 +26,11 @@ import os
 
 from migen import *
 from migen.fhdl.specials import NO_CHANGE
+from migen.genlib.cdc     import MultiReg
 
 from litex.gen import *
 
+from litex.soc.interconnect.csr      import CSRStorage, CSRField
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
 
 from chromatix.gateware.core_shell import CoreVideo, rgb555
@@ -104,7 +106,8 @@ class NESMemory(LiteXModule):
     Channel B = CPU (PRG + CPU RAM), channel A = PPU (CHR + CIRAM). Reads are registered on `read_cd`
     (a faster clock gives fresh data within one core cycle); RAM writes are on `cd`.
     """
-    def __init__(self, prg_kb=32, chr_kb=8, cd="nes", read_cd=None, prg_init=None, chr_init=None):
+    def __init__(self, prg_kb=32, chr_kb=8, cd="nes", read_cd=None, prg_init=None, chr_init=None,
+                 with_load=False, load_cd="sys"):
         read_cd = read_cd or cd
         # Channel B: CPU (PRG-ROM reads, CPU-RAM reads/writes).
         self.b_addr  = Signal(22)
@@ -120,6 +123,14 @@ class NESMemory(LiteXModule):
         self.a_dout  = Signal(8)
         # PRG size mask (0x3FFF for 16 KB, 0x7FFF for 32 KB), from the mapper flags.
         self.prg_mask = Signal(15, reset=2**15 - 1)
+        # Runtime loader write path (host -> PRG/CHR BRAM, in the `load_cd` domain). Used only when
+        # `with_load`: a second, write-only port on each ROM BRAM (so PRG/CHR become SDP BRAM: the NES
+        # read port and the load write port are independent, no read-before-write hazard). The NES is
+        # held in reset while loading, so the write (load_cd) and read (read_cd) never race.
+        self.load_addr = Signal(15) # Byte address within PRG (sel=0) or CHR (sel=1).
+        self.load_data = Signal(8)
+        self.load_we   = Signal()
+        self.load_sel  = Signal()   # 0 = PRG, 1 = CHR.
 
         # # #
 
@@ -135,7 +146,22 @@ class NESMemory(LiteXModule):
         ciram_wr  = ciram.get_port(write_capable=True, clock_domain=cd)
         self.specials += prg, chr, cpuram, ciram
         self.specials += prg_rd, chr_rd, cpuram_rd, cpuram_wr, ciram_rd, ciram_wr
-        self.prg, self.chr = prg, chr # Exposed for simulation.
+        # NB: the ROM Memories are kept in `specials` only, never as module attributes -- a Memory
+        # exposed as `self.<name>` is auto-mapped onto the CSR bus by LiteX when a bus is present
+        # (--with-debug-bridge), which adds a third port and defeats BSRAM inference (falls back to
+        # registers: "DFF exceeds the resource limit"). cpuram/ciram are specials-only for the same
+        # reason.
+
+        if with_load:
+            prg_ld = prg.get_port(write_capable=True, clock_domain=load_cd)
+            chr_ld = chr.get_port(write_capable=True, clock_domain=load_cd)
+            self.specials += prg_ld, chr_ld
+            self.comb += [
+                prg_ld.adr.eq(self.load_addr[:len(prg_ld.adr)]), prg_ld.dat_w.eq(self.load_data),
+                prg_ld.we.eq(self.load_we & ~self.load_sel),
+                chr_ld.adr.eq(self.load_addr[:len(chr_ld.adr)]), chr_ld.dat_w.eq(self.load_data),
+                chr_ld.we.eq(self.load_we & self.load_sel),
+            ]
 
         # Region select: CPU RAM at 0x380000 (b_addr[21:19]==0b111), else PRG; CIRAM at 0x300000
         # (a_addr[20] set within the PPU's 0x2.. space), else CHR.
@@ -370,6 +396,38 @@ class NESBuiltinROM(LiteXModule):
             ),
         ]
 
+# NES Loader CSR (host -> NESCore runtime loader, over the debug bridge) ---------------------------
+
+class NESLoaderCSR(LiteXModule):
+    """SoC-CSR front end to NESCore's runtime loader (needs --with-debug-bridge). The host
+    (scripts/chromatic.py nes-load) holds the core, sets the config (PRG size, mirroring, CHR-RAM),
+    resets the address, streams PRG then CHR as 32-bit words (4 bytes each, auto-incrementing), then
+    releases the hold -- any NROM game loads without a rebuild. Reset defaults match the seed ROM, so
+    the core boots it with no host interaction."""
+    def __init__(self, core):
+        self.control = CSRStorage(fields=[
+            CSRField("hold",     size=1, offset=0,             description="Hold the NES in reset while loading."),
+            CSRField("sel",      size=1, offset=1,             description="Load target: 0 = PRG, 1 = CHR."),
+            CSRField("prg32k",   size=1, offset=2, reset=core.ld_default_prg32k,  description="PRG size: 0 = 16 KB, 1 = 32 KB."),
+            CSRField("mirror_v", size=1, offset=3, reset=core.ld_default_mirror_v, description="Mirroring: 0 = horizontal, 1 = vertical."),
+            CSRField("chr_ram",  size=1, offset=4, reset=core.ld_default_chr_ram,  description="CHR is RAM (iNES CHR page count 0)."),
+            CSRField("addr_rst", size=1, offset=5, pulse=True, description="Reset the load address to 0 (before each section)."),
+        ])
+        self.data = CSRStorage(32, description="Write 4 bytes to the current target at the current address, then address += 4.")
+
+        # # #
+
+        self.comb += [
+            core.ld_hold.eq(self.control.fields.hold),
+            core.ld_sel.eq(self.control.fields.sel),
+            core.cfg_prg32k.eq(self.control.fields.prg32k),
+            core.cfg_mirror_v.eq(self.control.fields.mirror_v),
+            core.cfg_chr_ram.eq(self.control.fields.chr_ram),
+            core.ld_addr_rst.eq(self.control.fields.addr_rst),
+            core.ld_word.eq(self.data.storage),
+            core.ld_word_we.eq(self.data.re),
+        ]
+
 # NES Core -----------------------------------------------------------------------------------------
 
 class NESCore(LiteXModule):
@@ -383,7 +441,8 @@ class NESCore(LiteXModule):
     First target: NROM (mapper 0) games such as the bundled nes15. A general runtime loader + full
     mapper set needs more logic than the GW5A-25 has with all mappers enabled (see doc/CORES.md).
     """
-    def __init__(self, platform, clk, clk_freq, buttons, rom="nes15.hex", with_pll=True):
+    def __init__(self, platform, clk, clk_freq, buttons, rom="nes15.hex", with_pll=True,
+                 with_loader=False):
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
         self.gb_mode   = Signal(2)
@@ -391,6 +450,17 @@ class NESCore(LiteXModule):
         self.gb_vsync  = Signal()
         self.left      = Signal(16)
         self.right     = Signal(16)
+        # Runtime loader interface (driven by SoC CSRs in the sys domain; see chromatix.py). Any
+        # NROM game can be uploaded over the debug bridge without a rebuild: hold the core, stream
+        # PRG then CHR, set the config bits, release. Unused (tied off) when with_loader=False.
+        self.ld_hold     = Signal() # Hold the NES in reset while loading.
+        self.ld_sel      = Signal() # Load target: 0 = PRG, 1 = CHR.
+        self.ld_addr_rst = Signal() # Pulse: reset the load address to 0 (before each section).
+        self.ld_word     = Signal(32)
+        self.ld_word_we  = Signal() # Pulse: write the 4 bytes of ld_word at the current address.
+        self.cfg_prg32k  = Signal() # 0 = 16 KB PRG (mirrored), 1 = 32 KB PRG.
+        self.cfg_mirror_v = Signal() # 0 = horizontal, 1 = vertical nametable mirroring.
+        self.cfg_chr_ram = Signal() # 1 = CHR is RAM (iNES CHR page count 0).
 
         # # #
 
@@ -400,6 +470,10 @@ class NESCore(LiteXModule):
         prg, chr, mapper_flags = parse_ines(rom_path)
         prg_size = (mapper_flags >> 8) & 0x7
         prg_mask = 0x3fff if prg_size == 0 else 0x7fff
+        # Default config (matches the seed ROM, so --nes-loader boots it with no host interaction).
+        self.ld_default_prg32k  = 1 if prg_size else 0
+        self.ld_default_mirror_v = (mapper_flags >> 14) & 1
+        self.ld_default_chr_ram = (mapper_flags >> 15) & 1
 
         # NES clock (~21.477 MHz) + a 4x clock (~85.9 MHz) for the ROM BRAM reads, so cpumem/ppumem
         # data is fresh within one NES cycle (the core samples it the next NES edge), as nestang's
@@ -421,15 +495,59 @@ class NESCore(LiteXModule):
         # depend on a domain reset (the nes clock only runs once locked).
         reset_cnt = Signal(8)
         reset_nes = Signal()
-        self.sync.nes += If(locked & (reset_cnt != 255), reset_cnt.eq(reset_cnt + 1))
+        hold_nes  = Signal() # ld_hold (sys) synchronized into the nes domain.
+        self.specials += MultiReg(self.ld_hold, hold_nes, "nes")
+        self.sync.nes += [
+            If(hold_nes,                              # Held in reset while loading: restart the
+                reset_cnt.eq(0),                      # settle counter so the core starts fresh on
+            ).Elif(locked & (reset_cnt != 255),       # the new ROM when hold is released.
+                reset_cnt.eq(reset_cnt + 1),
+            ),
+        ]
         self.comb += reset_nes.eq(~locked | (reset_cnt != 255))
 
-        # PRG/CHR ROM pre-loaded into BRAM (direct, no runtime loader), sized to the ROM.
-        prg_kb = max(1, len(prg)//1024)
-        chr_kb = max(1, len(chr)//1024)
+        # PRG/CHR ROM in BRAM. Without the loader: sized to the ROM, direct-init (read-only ROM, which
+        # Gowin infers as BSRAM). With the loader: fixed to the max NROM window (32 KB PRG + 8 KB CHR),
+        # NOT init (Gowin cannot infer BSRAM for an initialized *and* written memory -- it falls back
+        # to registers), uploaded by the host at runtime; any NROM game loads without a rebuild.
+        if with_loader:
+            prg_kb, chr_kb = 32, 8
+            prg_init, chr_init = None, None
+        else:
+            prg_kb = max(1, len(prg)//1024)
+            chr_kb = max(1, len(chr)//1024)
+            prg_init, chr_init = prg, chr
         self.mem = mem = NESMemory(prg_kb=prg_kb, chr_kb=chr_kb, cd="nes", read_cd="nes4x",
-            prg_init=prg, chr_init=chr)
-        self.comb += mem.prg_mask.eq(prg_mask)
+            prg_init=prg_init, chr_init=chr_init, with_load=with_loader, load_cd="sys")
+        if with_loader:
+            self.comb += mem.prg_mask.eq(Mux(self.cfg_prg32k, 0x7fff, 0x3fff))
+        else:
+            self.comb += mem.prg_mask.eq(prg_mask)
+
+        # Loader byte-spreader (sys domain): a 32-bit word from the host is written as 4 consecutive
+        # bytes over 4 cycles, with an auto-incrementing address; ld_addr_rst reloads 0 (per section).
+        if with_loader:
+            ld_addr = Signal(15)
+            ld_busy = Signal()
+            ld_cnt  = Signal(2)
+            ld_word_r = Signal(32)
+            self.sync += [
+                mem.load_we.eq(0),
+                If(self.ld_addr_rst, ld_addr.eq(0)),
+                If(self.ld_word_we & ~ld_busy,
+                    ld_word_r.eq(self.ld_word), ld_busy.eq(1), ld_cnt.eq(0),
+                ),
+                If(ld_busy,
+                    mem.load_we.eq(1),
+                    mem.load_sel.eq(self.ld_sel),
+                    mem.load_addr.eq(ld_addr),
+                    mem.load_data.eq(Array([ld_word_r[0:8], ld_word_r[8:16],
+                                            ld_word_r[16:24], ld_word_r[24:32]])[ld_cnt]),
+                    ld_addr.eq(ld_addr + 1),
+                    ld_cnt.eq(ld_cnt + 1),
+                    If(ld_cnt == 3, ld_busy.eq(0)),
+                ),
+            ]
 
         # Joypad. joypad_out/clock are 3/2-bit buses; bit 0 drives the glue, serial data on
         # joypad1_data[0].
@@ -456,14 +574,30 @@ class NESCore(LiteXModule):
             self.gb_vsync.eq(video.gb_vsync),
         ]
 
-        # NES core (constant mapper_flags prunes the unused mappers).
+        # NES core (constant mapper number prunes the unused mappers). With the loader, only the
+        # size/mirror/CHR-RAM fields are made runtime; the mapper number (bits 7:0) stays a constant 0
+        # (NROM), so synthesis still prunes the ~50 other mappers (they would not fit otherwise).
+        if with_loader:
+            mapper_flags_in = Signal(64)
+            self.comb += mapper_flags_in.eq(Cat(
+                Constant(0, 8),       # [7:0]   mapper = 0 (NROM), constant.
+                self.cfg_prg32k,      # [8]     PRG size (0 = 16 KB code 0, 1 = 32 KB code 1).
+                Constant(0, 2),       # [10:9]  PRG size high bits.
+                Constant(0, 3),       # [13:11] CHR size (code 0 = 8 KB).
+                self.cfg_mirror_v,    # [14]    mirroring.
+                self.cfg_chr_ram,     # [15]    CHR-RAM.
+                Constant(0, 48),      # [63:16].
+            ))
+        else:
+            mapper_flags_in = Constant(mapper_flags, 64)
+
         sample = Signal(16)
         self.specials += Instance("NES",
             i_clk            = ClockSignal("nes"),
             i_reset_nes      = reset_nes,
             i_cold_reset     = 0,
             i_sys_type       = 0,
-            i_mapper_flags   = Constant(mapper_flags, 64),
+            i_mapper_flags   = mapper_flags_in,
             o_sample         = sample,
             o_color          = video.color,
             o_joypad_out     = joypad_out,
