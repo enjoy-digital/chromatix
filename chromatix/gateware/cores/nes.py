@@ -359,7 +359,7 @@ class NESCore(LiteXModule):
     First target: NROM (mapper 0) games such as the bundled nes15. A general runtime loader + full
     mapper set needs more logic than the GW5A-25 has with all mappers enabled (see doc/CORES.md).
     """
-    def __init__(self, platform, clk, clk_freq, buttons, rom="nes15.hex"):
+    def __init__(self, platform, clk, clk_freq, buttons, rom="nes15.hex", with_pll=True):
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
         self.gb_mode   = Signal(2)
@@ -378,20 +378,25 @@ class NESCore(LiteXModule):
         # NES clock (~21.477 MHz) + a 4x clock (~85.9 MHz) for the ROM BRAM reads, so cpumem/ppumem
         # data is fresh within one NES cycle (the core samples it the next NES edge), as nestang's
         # SDRAM runs at 4x the core clock.
-        self.cd_nes   = ClockDomain()
-        self.cd_nes4x = ClockDomain()
-        self.pll      = pll = GW5APLL(devicename=platform.devicename, device=platform.device, name="nes_pll")
-        pll.register_clkin(clk, clk_freq)
-        pll.create_clkout(self.cd_nes4x, 21.477272e6*4)
-        pll.create_clkout(self.cd_nes,   21.477272e6)
+        if with_pll:
+            self.cd_nes   = ClockDomain()
+            self.cd_nes4x = ClockDomain()
+            self.pll      = pll = GW5APLL(devicename=platform.devicename, device=platform.device, name="nes_pll")
+            pll.register_clkin(clk, clk_freq)
+            pll.create_clkout(self.cd_nes4x, 21.477272e6*4)
+            pll.create_clkout(self.cd_nes,   21.477272e6)
+            locked = pll.locked
+        else:
+            # Simulation: the nes/nes4x clock domains are provided externally, always "locked".
+            locked = Signal(reset=1)
 
         # Reset: held for 256 NES cycles after the PLL locks (the core needs settle time, as nestang's
         # reset_cnt); cold_reset tied low (as nestang). Count UP from the power-on 0 so it does not
         # depend on a domain reset (the nes clock only runs once locked).
         reset_cnt = Signal(8)
         reset_nes = Signal()
-        self.sync.nes += If(pll.locked & (reset_cnt != 255), reset_cnt.eq(reset_cnt + 1))
-        self.comb += reset_nes.eq(~pll.locked | (reset_cnt != 255))
+        self.sync.nes += If(locked & (reset_cnt != 255), reset_cnt.eq(reset_cnt + 1))
+        self.comb += reset_nes.eq(~locked | (reset_cnt != 255))
 
         # PRG/CHR ROM pre-loaded into BRAM (direct, no runtime loader), sized to the ROM.
         prg_kb = max(1, len(prg)//1024)

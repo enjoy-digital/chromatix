@@ -42,6 +42,7 @@ from chromatix.gateware.sim     import parse_button_sequence, write_button_event
 from chromatix.gateware.memory  import memory_port_layout, MemorySystem
 from chromatix.gateware.video   import VideoPipeline
 from chromatix.gateware.vcart   import VirtualCart
+from chromatix.gateware.cores.nes import NESCore
 
 # IOs ----------------------------------------------------------------------------------------------
 
@@ -452,6 +453,108 @@ def ppm_to_png(ppm, png, scale=1):
     if scale > 1:
         image = image.resize((image.width*scale, image.height*scale), Image.NEAREST)
     image.save(png)
+
+# NES core simulation ------------------------------------------------------------------------------
+
+NES4X_FREQ = 21.477272e6*4
+
+class SimTopNES(LiteXModule):
+    """Simulate the hosted NES core (NESCore, no PLL): nes4x from the clocker, nes = nes4x/4, hclk =
+    nes4x/8; the Game Boy LCD output is captured to PPM frames. A `nes_trace` module (when present)
+    logs the CPU memory bus and PPU raster to nes_trace.log for debugging."""
+    def __init__(self, platform, trace_cpu=False):
+        self.cd_nes4x = ClockDomain("nes4x", reset_less=True)
+        self.cd_nes   = ClockDomain("nes",   reset_less=True)
+        self.cd_hclk  = ClockDomain("hclk",  reset_less=True)
+        div = Signal(3)
+        self.comb += [
+            self.cd_nes4x.clk.eq(platform.request("sys_clk")),
+            self.cd_nes.clk.eq(div[1]),  # nes4x/4.
+            self.cd_hclk.clk.eq(div[2]), # nes4x/8.
+        ]
+        self.sync.nes4x += div.eq(div + 1)
+
+        class _Buttons: pass
+        buttons = _Buttons()
+        for name in ["a", "b", "select", "start", "up", "down", "left", "right"]:
+            setattr(buttons, name, Signal())
+        self.nes = nes = NESCore(platform, clk=None, clk_freq=None, buttons=buttons, with_pll=False)
+
+        # LCD capture (PPM frames, ends the simulation after +frames vsyncs).
+        self.specials += Instance("gb_lcd_capture",
+            i_clk    = ClockSignal("hclk"),
+            i_clkena = nes.gb_clkena,
+            i_data   = nes.gb_data,
+            i_vsync  = nes.gb_vsync,
+        )
+
+        # CPU/PPU trace (logs the PRG fetch bus + raster to find where the CPU gets stuck).
+        if trace_cpu:
+            self.specials += Instance("nes_trace",
+                i_clk      = ClockSignal("nes"),
+                i_reset    = 0,
+                i_cpu_addr = nes.mem.b_addr,
+                i_cpu_read = nes.mem.b_read,
+                i_cpu_din  = nes.mem.b_dout,
+                i_color    = nes.video.color,
+                i_cycle    = nes.video.cycle,
+                i_scanline = nes.video.scanline,
+            )
+
+def sanitize_nes_rtl(src_dir, dst_dir):
+    """Copy the NES RTL to dst_dir, fixing a Verilator-5.x-strict construct that Gowin tolerates: a
+    bare ANSI `output <name>` port redeclared as `wire <name>;` in the body (illegal ANSI/non-ANSI
+    mix). Per module, drop the redundant body wire where <name> is a bare output port of that module.
+    Returns dst_dir (for use as the NES RTL path during the sim build). Repo files are untouched."""
+    shutil.rmtree(dst_dir, ignore_errors=True)
+    shutil.copytree(src_dir, dst_dir)
+    def fix_module(m):
+        body  = m.group(0)
+        ports = [p for p in re.findall(r"output\s+(\w+)\s*[,)]", body) if p not in ("reg", "wire", "logic")]
+        for name in ports:
+            body = re.sub(rf"^[ \t]*wire\s+{name}\s*;[ \t]*\n", "", body, flags=re.M)
+        return body
+    for root, _, files in os.walk(dst_dir):
+        for fn in files:
+            if not fn.endswith((".v", ".sv")):
+                continue
+            path = os.path.join(root, fn)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            text = re.sub(r"module\b.*?endmodule", fix_module, text, flags=re.S)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+    return dst_dir
+
+def build_sim_nes(gateware_dir, threads=1, trace=False, trace_cpu=False):
+    # Sanitize the NES RTL into the build dir for Verilator (repo files untouched), and point the NES
+    # integration at it for this build.
+    import chromatix.gateware.cores.nes as nesmod
+    rtl = sanitize_nes_rtl(nesmod.NES_RTL_PATH, os.path.join(gateware_dir, "nes_src"))
+    saved, nesmod.NES_RTL_PATH = nesmod.NES_RTL_PATH, rtl
+    try:
+        platform = SimPlatform("SIM", _io)
+        platform.add_source(os.path.join(SIM_VERILOG_PATH, "gb_lcd_capture.v"))
+        if trace_cpu:
+            platform.add_source(os.path.join(SIM_VERILOG_PATH, "nes_trace.v"))
+        sim_config = SimConfig()
+        freq = 1e12/(2*round(1e12/(2*NES4X_FREQ)/2)) # Even-ps period (simulation timebase).
+        sim_config.add_clocker("sys_clk", freq_hz=freq)
+        top = SimTopNES(platform, trace_cpu=trace_cpu)
+        platform.build(top, build_dir=gateware_dir, sim_config=sim_config, opt_level="O3",
+            threads=threads, trace=trace, run=False)
+        compile_sim(gateware_dir)
+    finally:
+        nesmod.NES_RTL_PATH = saved
+
+def run_sim_nes(gateware_dir, frames=6, every=1):
+    for ppm in glob.glob(os.path.join(gateware_dir, "*_*.ppm")):
+        os.remove(ppm)
+    log = os.path.join(gateware_dir, "nes_trace.log")
+    if os.path.exists(log):
+        os.remove(log)
+    subprocess.run(["obj_dir/Vsim", f"+frames={frames}", f"+every={every}"], cwd=gateware_dir, check=True)
+    return sorted(glob.glob(os.path.join(gateware_dir, "frame_*.ppm")))
 
 def main():
     parser = argparse.ArgumentParser(description="ChromatiX simulation (Verilator): Game Boy core + cartridge + LCD capture.")
