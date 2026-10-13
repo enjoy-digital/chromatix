@@ -290,7 +290,7 @@ writes-not-arriving theory, and the `ce_cpu`/`ce_vdp` coincidence. The RTL is co
 were the CRAM memory inference and the mode mismatch.
 
 **Full BG pipeline on hardware (PSRAM cache, runtime ROM load).** A tile test ROM
-(`scratchpad/make_sms_tiles.py`: four solid-colour tiles in the pattern table, a 4-colour palette, a
+(`test/sms_test_rom.py tiles.sms`: four solid-colour tiles in the pattern table, a 4-colour palette, a
 nametable of diagonal colour blocks) loaded over the debug bridge with `scripts/chromatic.py sms-load`
 into the plain `--core sms` (PSRAM-cache) build — no rebuild per ROM — renders the diagonal
 black/red/green/blue block pattern over UVC, **pixel-identical to the sim** (`build_sim_sms` now takes
