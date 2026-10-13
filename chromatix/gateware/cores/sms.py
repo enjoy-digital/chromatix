@@ -331,7 +331,9 @@ class SMSCore(LiteXModule):
         # Video: raster color -> CoreVideo stream -> downscaler (160x144 identity for GG, 256x192 for
         # SMS) -> Game Boy LCD interface. color is BGR 4:4:4 -> RGB555 (top bits replicated).
         in_w, in_h = (160, 144) if game_gear else (256, 192)
-        self.video = ds = CoreVideoDownscaler(in_w=in_w, in_h=in_h, write_cd="sms")
+        # color_bits=3 (RGB333 frame buffer, ~12 BSRAM vs ~20 for RGB555): the SMS fills the
+        # GW5A-25's BSRAM, and a smaller frame buffer is what gives the design routing headroom.
+        self.video = ds = CoreVideoDownscaler(in_w=in_w, in_h=in_h, write_cd="sms", color_bits=3)
         r4, g4, b4 = color[0:4], color[4:8], color[8:12]
         self.comb += [
             ds.video.ce.eq(ce_pix),

@@ -203,7 +203,12 @@ class CoreVideoDownscaler(LiteXModule):
     color correction / LCD / UVC work unchanged. Single buffered (the input and output frames are
     asynchronous: minor tearing, acceptable for a bring-up/first version).
     """
-    def __init__(self, in_w=256, in_h=224, out_w=160, out_h=144, write_cd="hclk"):
+    def __init__(self, in_w=256, in_h=224, out_w=160, out_h=144, write_cd="hclk", color_bits=5):
+        # color_bits = bits stored per channel in the frame buffer (5 = full RGB555). A smaller value
+        # shrinks the BRAM frame buffer (BSRAM-bound builds, e.g. --core sms): 5 -> 16-bit word
+        # (~20 BSRAM at 160x144), 3 -> 9-bit word (~12 BSRAM), the top bits kept and replicated back
+        # to RGB555 on read.
+        assert 1 <= color_bits <= 5
         self.video = video = CoreVideo() # Input (write_cd domain).
         # Output: Game Boy LCD interface (hClk).
         self.gb_clkena = Signal()
@@ -214,7 +219,7 @@ class CoreVideoDownscaler(LiteXModule):
 
         # # #
 
-        fb    = Memory(16, out_w*out_h)
+        fb    = Memory(3*color_bits, out_w*out_h)
         fb_wr = fb.get_port(write_capable=True, clock_domain=write_cd)
         fb_rd = fb.get_port(clock_domain="hclk")
         self.specials += fb, fb_wr, fb_rd
@@ -256,7 +261,8 @@ class CoreVideoDownscaler(LiteXModule):
                     If((x_out < out_w) & (y_out < out_h),
                         fb_wr.we.eq(1),
                         fb_wr.adr.eq(row_base + x_out),
-                        fb_wr.dat_w.eq(Cat(video.r, video.g, video.b)),
+                        fb_wr.dat_w.eq(Cat(video.r[5 - color_bits:5], video.g[5 - color_bits:5],
+                                           video.b[5 - color_bits:5])),
                         x_out.eq(x_out + 1),
                     ),
                 ).Else(
@@ -279,11 +285,22 @@ class CoreVideoDownscaler(LiteXModule):
         ]
 
         # Read side (hClk): scan the frame buffer out as the Game Boy LCD interface ----------------
+        # Each stored channel (color_bits) is replicated back to 5 bits (MSBs into the low bits).
+        def expand(c):
+            if color_bits == 5:
+                return c
+            return (c << (5 - color_bits)) | (c >> (2*color_bits - 5)) if (2*color_bits > 5) \
+                else (c << (5 - color_bits))
+        sr = fb_rd.dat_r[0*color_bits:1*color_bits]
+        sg = fb_rd.dat_r[1*color_bits:2*color_bits]
+        sb = fb_rd.dat_r[2*color_bits:3*color_bits]
+        r5, g5, b5 = Signal(5), Signal(5), Signal(5)
         self.timing = timing = GBLCDTiming()
         self.comb += [
+            r5.eq(expand(sr)), g5.eq(expand(sg)), b5.eq(expand(sb)),
             fb_rd.adr.eq(timing.line*out_w + timing.x),
             self.gb_clkena.eq(timing.gb_clkena),
-            self.gb_data.eq(fb_rd.dat_r[:15]),
+            self.gb_data.eq(Cat(r5, g5, b5)),
             self.gb_mode.eq(timing.gb_mode),
             self.gb_vsync.eq(timing.gb_vsync),
             self.gb_on.eq(1),
