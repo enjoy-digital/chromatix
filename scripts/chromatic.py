@@ -261,6 +261,23 @@ class Chromatic:
         reg.nes_loader_control.write(self._nes_ctrl(hold=0, sel_chr=0, **cfg))
         return dict(prg_kb=len(prg)//1024, chr_kb=len(chr)//1024, **cfg)
 
+    # SMS/Game Gear cartridge loader (--core sms --with-debug-bridge): ROM uploaded to the PSRAM,
+    # served to the core through a cache (chromatix/gateware/cores/rom_cache.py).
+    SMS_ROM_BASE = 0x400000 # Must match SMS_ROM_BASE in chromatix/gateware/cores/sms.py.
+
+    def sms_load(self, rom):
+        """Upload an SMS/Game Gear ROM into the PSRAM and boot it: hold the core, write the ROM,
+        flush the cartridge cache, release. A 512-byte copier header (odd ROM size) is stripped."""
+        if len(rom) % 1024 == 512:
+            rom = rom[512:] # Strip the 512-byte header some SMS dumps carry.
+        reg = self.bus.regs
+        reg.sms_loader_control.write(0b01)       # hold = 1.
+        self.write_psram(self.SMS_ROM_BASE, rom)
+        reg.sms_loader_control.write(0b11)       # hold = 1 + flush (pulse).
+        time.sleep(0.01)
+        reg.sms_loader_control.write(0b00)       # release.
+        return dict(kb=len(rom)//1024)
+
 # Helpers ------------------------------------------------------------------------------------------
 
 def _read_file(filename):
@@ -384,6 +401,9 @@ def main():
     p = subparsers.add_parser("nes-load", help="Upload an NROM game to a --core nes --with-debug-bridge build (runtime, no rebuild).")
     p.add_argument("rom", help="iNES ROM file (.nes/.hex, NROM/mapper 0).")
 
+    p = subparsers.add_parser("sms-load", help="Upload an SMS/Game Gear game to a --core sms --with-debug-bridge build (runtime, no rebuild).")
+    p.add_argument("rom", help="SMS/GG ROM file (.sms/.gg/.bin).")
+
     p = subparsers.add_parser("run", help="Load and start a firmware (--with-app build).")
     p.add_argument("firmware",                         help="Firmware binary (ex: firmware/fbtest/fbtest.bin).")
     p.add_argument("--file",      default=[],          help="Data file at a main RAM offset.", nargs=2, action="append", metavar=("FILE", "OFFSET"))
@@ -438,6 +458,11 @@ def main():
             print(f"NES ROM loaded in {time.time() - t0:.1f}s: PRG {cfg['prg_kb']}KB, "
                   f"CHR {cfg['chr_kb']}KB, {'vertical' if cfg['mirror_v'] else 'horizontal'} mirror"
                   + (", CHR-RAM" if cfg['chr_ram'] else "") + ".")
+        elif args.command == "sms-load":
+            rom = _read_file(args.rom)
+            t0  = time.time()
+            cfg = chromatic.sms_load(rom)
+            print(f"SMS/GG ROM loaded in {time.time() - t0:.1f}s: {cfg['kb']}KB.")
         elif args.command == "run":
             firmware = _read_file(args.firmware)
             files    = [(int(offset, 0), _read_file(name)) for name, offset in args.file]
