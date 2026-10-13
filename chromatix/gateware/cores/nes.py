@@ -89,33 +89,33 @@ class NESVideoAdapter(LiteXModule):
             video.b.eq(pixel[10:15]),
         ]
 
-# NES Memory (PRG + CHR in BRAM) -------------------------------------------------------------------
+# NES Memory (PRG/CHR ROM + CPU RAM + nametable CIRAM, in BRAM) ------------------------------------
 
 class NESMemory(LiteXModule):
     """
-    PRG + CHR ROM in BRAM for a hosted NROM-class NES core (single-cycle, so the core's "pre-fetch a
-    few cycles ahead" is trivially met, unlike PSRAM), pre-loaded at build time (prg_init/chr_init).
-    The NES presents a unified 22-bit space: PRG at 0x000000.., CHR at 0x200000.. (bit 21). Channel B
-    = CPU reads PRG, channel A = PPU reads CHR. `prg_mask` mirrors a 16 KB PRG into the 32 KB CPU
-    window. Read-only (NROM PRG-ROM + CHR-ROM): Gowin BRAM cannot do read-before-write on a read+write
-    port, and a CHR-RAM / runtime-loader variant would use separate write ports.
-
-    All ports are in the `cd` (NES) domain; reads are registered (1 cycle). The write-side signals are
-    kept on the interface (ignored) so the NES core's cpumem/ppumem write ports can connect.
+    The NES core's external memory in BRAM for a hosted NROM-class cartridge (single-cycle, so the
+    core's "pre-fetch a few cycles ahead" is trivially met, unlike PSRAM). The core maps everything
+    into a unified 22-bit space (see cart.sv):
+    - PRG-ROM at 0x000000 (read-only, prg_init; prg_mask mirrors a 16 KB PRG into the 32 KB window),
+    - CHR-ROM at 0x200000 (read-only, chr_init),
+    - the 2 KB CPU RAM (incl. the stack $0100-$01FF) at 0x380000 (read/WRITE) -- cart.sv routes CPU
+      $0000-$1FFF here; without a writable RAM the stack is lost and the first RTS crashes the CPU,
+    - the 2 KB nametable CIRAM at 0x300000 (read/WRITE) -- cart.sv routes PPU VRAM here.
+    Channel B = CPU (PRG + CPU RAM), channel A = PPU (CHR + CIRAM). Reads are registered on `read_cd`
+    (a faster clock gives fresh data within one core cycle); RAM writes are on `cd`.
     """
     def __init__(self, prg_kb=32, chr_kb=8, cd="nes", read_cd=None, prg_init=None, chr_init=None):
-        read_cd = read_cd or cd # Read clock: a faster domain gives fresh data within one core cycle
-                                # (the core samples cpumem_din the next core edge), as nestang's SDRAM.
-        # Channel B: CPU (reads PRG).
+        read_cd = read_cd or cd
+        # Channel B: CPU (PRG-ROM reads, CPU-RAM reads/writes).
         self.b_addr  = Signal(22)
         self.b_read  = Signal()
-        self.b_write = Signal() # Ignored (read-only ROM).
-        self.b_din   = Signal(8)
-        self.b_dout  = Signal(8)
-        # Channel A: PPU (reads CHR).
+        self.b_write = Signal()
+        self.b_din   = Signal(8) # Data from the CPU (writes).
+        self.b_dout  = Signal(8) # Data to the CPU (reads).
+        # Channel A: PPU (CHR-ROM reads, CIRAM reads/writes).
         self.a_addr  = Signal(22)
         self.a_read  = Signal()
-        self.a_write = Signal() # Ignored (read-only ROM).
+        self.a_write = Signal()
         self.a_din   = Signal(8)
         self.a_dout  = Signal(8)
         # PRG size mask (0x3FFF for 16 KB, 0x7FFF for 32 KB), from the mapper flags.
@@ -123,19 +123,39 @@ class NESMemory(LiteXModule):
 
         # # #
 
-        prg = Memory(8, prg_kb*1024, init=prg_init)
-        chr = Memory(8, chr_kb*1024, init=chr_init)
-        prg_rd = prg.get_port(clock_domain=read_cd) # Read-only, fast clock.
-        chr_rd = chr.get_port(clock_domain=read_cd) # Read-only, fast clock.
-        self.specials += prg, prg_rd, chr, chr_rd
-        self.prg = prg # Exposed for simulation.
-        self.chr = chr
+        prg    = Memory(8, prg_kb*1024, init=prg_init)
+        chr    = Memory(8, chr_kb*1024, init=chr_init)
+        cpuram = Memory(8, 2048) # CPU RAM (0x380000), read/write.
+        ciram  = Memory(8, 2048) # Nametable CIRAM (0x300000), read/write.
+        prg_rd    = prg.get_port(clock_domain=read_cd)
+        chr_rd    = chr.get_port(clock_domain=read_cd)
+        cpuram_rd = cpuram.get_port(clock_domain=read_cd)
+        cpuram_wr = cpuram.get_port(write_capable=True, clock_domain=cd)
+        ciram_rd  = ciram.get_port(clock_domain=read_cd)
+        ciram_wr  = ciram.get_port(write_capable=True, clock_domain=cd)
+        self.specials += prg, chr, cpuram, ciram
+        self.specials += prg_rd, chr_rd, cpuram_rd, cpuram_wr, ciram_rd, ciram_wr
+        self.prg, self.chr = prg, chr # Exposed for simulation.
 
+        # Region select: CPU RAM at 0x380000 (b_addr[21:19]==0b111), else PRG; CIRAM at 0x300000
+        # (a_addr[20] set within the PPU's 0x2.. space), else CHR.
+        b_is_ram   = self.b_addr[21] & self.b_addr[20] & self.b_addr[19]
+        a_is_ciram = self.a_addr[20]
         self.comb += [
-            prg_rd.adr.eq(self.b_addr[:15] & self.prg_mask), # PRG, mirrored.
-            self.b_dout.eq(prg_rd.dat_r),
-            chr_rd.adr.eq(self.a_addr[:13]),                 # CHR.
-            self.a_dout.eq(chr_rd.dat_r),
+            # ROM reads (b_addr/a_addr stable for the whole core cycle -> the select tracks the data).
+            prg_rd.adr.eq(self.b_addr[:15] & self.prg_mask),
+            chr_rd.adr.eq(self.a_addr[:13]),
+            cpuram_rd.adr.eq(self.b_addr[:11]),
+            ciram_rd.adr.eq(self.a_addr[:11]),
+            self.b_dout.eq(Mux(b_is_ram,   cpuram_rd.dat_r, prg_rd.dat_r)),
+            self.a_dout.eq(Mux(a_is_ciram, ciram_rd.dat_r,  chr_rd.dat_r)),
+            # RAM writes.
+            cpuram_wr.adr.eq(self.b_addr[:11]),
+            cpuram_wr.dat_w.eq(self.b_din),
+            cpuram_wr.we.eq(self.b_write & b_is_ram),
+            ciram_wr.adr.eq(self.a_addr[:11]),
+            ciram_wr.dat_w.eq(self.a_din),
+            ciram_wr.we.eq(self.a_write & a_is_ciram),
         ]
 
 # NES Joypad (standard controller serial protocol) ------------------------------------------------

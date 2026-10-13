@@ -29,9 +29,13 @@ module nes_trace(
     reg        varied   = 0;   // Pixel varied within a frame (rendering active).
 
     integer    nes_ticks = 800000;
+    integer    rd_lo = 0;
+    integer    rd_hi = 32'h7fffffff;
     initial begin
         f = $fopen("nes_trace.log", "w");
         if (!$value$plusargs("nes_ticks=%d", nes_ticks)) nes_ticks = 800000;
+        if ($value$plusargs("rd_lo=%d", rd_lo)) rd_lo = rd_lo;
+        if ($value$plusargs("rd_hi=%d", rd_hi)) rd_hi = rd_hi;
     end
 
     always @(posedge clk) begin
@@ -43,16 +47,19 @@ module nes_trace(
             prev_color <= color;
         end
 
-        // First CPU PRG reads (the init path; a tight loop shows as repeated addresses).
-        if (cpu_read && n_reads < 4000) begin
-            $fwrite(f, "r %0d %05x %02x\n", n_reads, cpu_addr, cpu_din);
+        // CPU PRG reads in a tick window (skip the long vblank wait; capture the exit + init + any
+        // jump to garbage). The window is overridable via +rd_lo / +rd_hi.
+        if (cpu_read && ticks > rd_lo && ticks < rd_hi && n_reads < 16000) begin
+            $fwrite(f, "r %0d t=%0d %05x %02x\n", n_reads, ticks, cpu_addr, cpu_din);
             n_reads = n_reads + 1;
         end
 
-        // Periodic raster + PC snapshot.
-        if (ticks[13:0] == 0)
+        // Periodic raster + PC snapshot (flushed so a timed-out run still yields a partial log).
+        if (ticks[13:0] == 0) begin
             $fwrite(f, "raster t=%0d scan=%0d cyc=%0d pc=%05x color=%0d max_scan=%0d varied=%0d\n",
                 ticks, scanline, cycle, last_pc, color, max_scan, varied);
+            $fflush(f);
+        end
 
         // Self-terminate.
         if (ticks > nes_ticks) begin
