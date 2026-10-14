@@ -16,6 +16,13 @@ Status: two cores run **commercial games on hardware**, loaded from the PC at ru
   Alex Kidd in Miracle World, Fantasy Zone, Castle of Illusion, OutRun, R-Type (512 KB), Shinobi,
   Wonder Boy boot to title/attract. Downscaled 256×192 → 160×144.
 
+**UVC streams the native resolution** (NES 256×240, SMS 256×192; Game Gear is already 160×144):
+the downscale is only for the 160×144 panel. UVC captures the core's native raster (`native_video`,
+a `CoreVideo` in the core's clock domain) straight into `UVCVideo`'s line buffers — no PSRAM, no
+extra BSRAM — at 60 fps (NES, high-bandwidth isochronous). Capture with
+`scripts/chromatic.py capture shot.png --size 256x240`; scale up on the host (nearest-neighbor).
+`--uvc-lcd` streams the LCD copy instead (with the OSD and color correction).
+
 Scripted play-testing works end-to-end: `scripts/chromatic.py sequence "press:start@0.2 wait:3
 buttons:dpad_right+a wait:1 capture:shot.png"` (virtual buttons are OR'ed with the console's; hold
 everything in one `sequence` — the script releases all buttons on exit). This document is the
