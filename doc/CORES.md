@@ -9,8 +9,8 @@ Status: two cores run **commercial games on hardware**, loaded from the PC at ru
   line cache, CHR ≤ 32 KB or CHR-RAM in BRAM, larger CHR-ROM (≤ 256 KB) from the PSRAM through a
   **CHR bank cache** (the console freezes only on a miss, for either), 8 KB PRG-RAM; mappers NROM,
   MMC1, UxROM, CNROM, MMC3, AxROM, GxROM (a synthesis-time mask: all mappers do not fit) — **636 of a
-  706-game library** (the rest: other mappers). Super Mario Bros. and Super Mario Bros. 3 (World 1-1,
-  59.5 fps) playable; Kirby's Adventure, Mega Man III/IV, Zelda II, SMB2, Ninja Gaiden, Castlevania
+  706-game library** (the rest: other mappers). Super Mario Bros., Super Mario Bros. 3 (World 1-1,
+  59.5 fps) and Mega Man III (Top Man stage, 58.8 fps) playable; Kirby's Adventure, Mega Man IV, Zelda II, SMB2, Ninja Gaiden, Castlevania
   II, Double Dragon II, Zelda (file select / PRG-RAM), Metroid, Kid Icarus, Mega Man, Castlevania,
   Contra, Duck Tales, Battletoads, Arkanoid… render title/menus. Downscaled 256×240 → 160×144 on the
   panel.
@@ -412,6 +412,11 @@ Bugs found running real games (all fixed; worth checking in any new port):
   start points), rather than lowering the clock (the SMS ran 11% slow at 48 MHz before).
 - **NES joypad shift edge.** nes.v holds `joypad_clock` high for the whole `$4016` read; shift on
   its *falling* edge or every read returns the next button (Start seen as Select).
+- **UVC must survive skipped micro-frames.** Isochronous IN has no retry: a capture closing the
+  stream can leave the frame-end (EOF) transfer uncollected. UVCVideo used to drop it, so the replay
+  waited for that EOF forever and UVC stopped until a USB reset (the core kept running: audio was
+  fine). It is now offered again until it is collected (`test_uvc_video_skipped_microframes`);
+  40 back-to-back captures in a Mega Man III stage pass.
 
 The combined build is GPL; the shell/glue stays BSD (upstreamable).
 

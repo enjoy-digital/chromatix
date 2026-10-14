@@ -973,10 +973,14 @@ class UVCVideo(LiteXModule):
         p_image_eof = Signal()
         self.sync += eof_sr.eq(Cat(h_image_eof, eof_sr[:3]))
         self.comb += p_image_eof.eq(eof_sr[2:4] == 0b01)
+        # Kept until the EOF transfer is actually done: if the host does not collect that micro-frame
+        # (isochronous: no retry, ex a capture closing the stream), it is offered again at the next
+        # SOF. Clearing it once latched lost the EOF for good: eof_pending stayed set, the replay
+        # waited for it forever and UVC stopped until a USB reset (seen on hardware).
         self.sync += [
             If(p_image_eof,
                 last_packet.eq(1),
-            ).Elif(~self.sof & last_read,
+            ).Elif(txact_fall & last_read,
                 last_packet.eq(0),
             )
         ]

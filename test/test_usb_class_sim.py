@@ -844,3 +844,78 @@ def test_uvc_video_native_ce():
             current = []
     expected = [sum([yuyv_model(line) for line in frame], []) for frame in src_frames]
     assert payloads == expected, (len(payloads), [len(p) for p in payloads])
+
+def test_uvc_video_skipped_microframes():
+    """The host does not collect every micro-frame (ex a capture closing the stream, or isochronous
+    polling gaps): a skipped transfer must be retried, never lost -- in particular the frame end (EOF):
+    were it dropped, eof_pending would stay set, the replay wait for it forever and UVC stop for
+    good (seen on hardware). Every frame must still arrive complete and exact."""
+    src_w, src_h, hblank, vblank = 24, 5, 8, 12
+    dut = UVCVideo(frames=[(src_w, src_h)], src_w=src_w, src_h=src_h, with_ce=True)
+    dut.cd_video = ClockDomain(reset_less=True)
+    random.seed(3)
+    src_frames = [[[tuple(random.randrange(64) for _ in range(3)) for _ in range(src_w)]
+        for _ in range(src_h)] for _ in range(4)]
+    transfers = []
+    done      = []
+
+    def video():
+        for _ in range(20):
+            yield
+        for frame in src_frames + [None]:
+            rows = (frame or []) + [None]*vblank
+            for y, line in enumerate(rows):
+                for x in range(src_w + hblank):
+                    active = (line is not None) and (x < src_w)
+                    p      = line[x] if active else (0, 0, 0)
+                    yield dut.frame_valid.eq(line is not None)
+                    yield dut.enable.eq(active)
+                    yield dut.data.eq(p[0] | (p[1] << 6) | (p[2] << 12))
+                    yield dut.ce.eq(1)
+                    yield
+                    yield dut.ce.eq(0)
+                    for _ in range(3):
+                        yield
+        done.append(1)
+
+    def controller():
+        yield dut.frame_index.eq(1)
+        yield dut.reset.eq(1)
+        for _ in range(8):
+            yield
+        yield dut.reset.eq(0)
+        extra = 12
+        n     = 0
+        while extra:
+            if done:
+                extra -= 1
+            for _ in range(1500):
+                yield
+            yield dut.sof.eq(1)
+            yield
+            yield dut.sof.eq(0)
+            for _ in range(4):
+                yield
+            n += 1
+            if n % 3 == 1:
+                continue # Micro-frame not collected by the host (no IN token).
+            length = (yield dut.txdat_len)
+            yield dut.txact.eq(1)
+            yield
+            data = yield from pop(dut, length)
+            yield
+            yield dut.txact.eq(0)
+            for _ in range(8):
+                yield
+            transfers.append(data)
+
+    run_simulation(dut, {"sys": controller(), "video": video()}, clocks={"sys": 10, "video": 20})
+
+    payloads, current = [], []
+    for t in transfers:
+        current += t[UVC_HEADER_SIZE:]
+        if t[1] & 0x02:
+            payloads.append(current)
+            current = []
+    expected = [sum([yuyv_model(line) for line in frame], []) for frame in src_frames]
+    assert payloads == expected, (len(payloads), [len(p) for p in payloads])
