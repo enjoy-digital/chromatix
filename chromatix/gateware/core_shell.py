@@ -125,6 +125,24 @@ class CoreTestPattern(LiteXModule):
 
 # Core Video Interface -----------------------------------------------------------------------------
 
+def add_core_clock_constraints(platform, pll, n, name, clkin="clk_24"):
+    """Timing constraints of a hosted core's PLL output `n`: a named generated clock on the PLL pin
+    (Gowin can't refer to its derived PLL clock names in constraints), asynchronous to the USB clock
+    (PHY_CLKOUT: the native UVC capture crosses through synchronizers). Appended to the SDC via
+    platform.extra_timing_constraints (no-op on platforms without it, ex the simulator)."""
+    extra = getattr(platform, "extra_timing_constraints", None)
+    if extra is None:
+        return
+    def generated_clock():
+        config = pll.compute_config()
+        return (f"create_generated_clock -name {name} -source [get_ports {{{clkin}}}] "
+            f"-master_clock {clkin} -divide_by {config['idiv']*config[f'odiv{n}']} "
+            f"-multiply_by {config['fdiv']*config['mdiv']} [get_pins {{{pll.name}/CLKOUT{n}}}]")
+    extra += [
+        generated_clock,
+        f"set_clock_groups -asynchronous -group [get_clocks {{{name}}}] -group [get_clocks {{PHY_CLKOUT}}]",
+    ]
+
 class CoreVideo:
     """The generic "core video" interface a hosted core presents (its native resolution clock domain):
     a pixel clock-enable, 5:5:5 color, and horizontal/vertical blanking. Active pixel = ce & ~hblank &

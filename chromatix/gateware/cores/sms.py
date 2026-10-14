@@ -35,17 +35,17 @@ from litex.gen import *
 from litex.soc.interconnect.csr      import CSRStorage, CSRField, CSRStatus
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
 
-from chromatix.gateware.core_shell     import CoreVideo, CoreVideoDownscaler, rgb555
+from chromatix.gateware.core_shell     import CoreVideo, CoreVideoDownscaler, rgb555, add_core_clock_constraints
 from chromatix.gateware.cores.rom_cache import CoreROMCache
 
 SMS_RTL_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "verilog", "cores", "sms")
 
-SMS_CLK_FREQ = 48e6 # clk_sys. Ideal SMS is 53.69 MHz (15x the ~3.58 MHz Z80), but the near-full
-                    # GW5A-25 only closes timing at ~51 MHz (Fmax 50.97, 21 setup-violated endpoints
-                    # at 53.69); 48 MHz meets timing with margin. Video runs ~11% slow (the PSRAM
-                    # framebuffer + panel decouple the rate). Raising it back needs timing closure on
-                    # the critical path. (The white screen during bring-up was NOT this -- it was the
-                    # VDP CRAM, see _sms_lower_rtl_for_gowin; the register writes latch fine at 48 MHz.)
+SMS_CLK_FREQ = 53.693175e6 # clk_sys: 15x the ~3.58 MHz Z80 (correct NTSC speed; 60 Hz video). Its
+                    # critical path (T80 microcode pROM -> ALU -> ACC, ~48 MHz single-cycle) is
+                    # a multicycle path (the Z80 advances every 15 clocks): constrained as such (see
+                    # the set_multicycle_path below), timing closes at ~60 MHz. (Was 48 MHz, 11% slow,
+                    # before; the white screen during bring-up was NOT timing -- it was the VDP CRAM,
+                    # see _sms_lower_rtl_for_gowin.)
 SMS_ROM_BASE = 0x400000    # Cartridge ROM placed here in the PSRAM (host upload); upper half, clear
                            # of the framebuffers/OSD/BIST in the low PSRAM.
 
@@ -255,6 +255,22 @@ class SMSCore(LiteXModule):
             pll.register_clkin(clk, clk_freq)
             pll.create_clkout(self.cd_sms, SMS_CLK_FREQ)
             locked = pll.locked
+            add_core_clock_constraints(platform, pll, 0, "sms_clk")
+            # The Z80 (T80) only advances on ce_cpu (every 15+ clocks; all its registers are
+            # CEN-gated): paths inside it are multicycle (2 cycles, the real budget is 15). Gowin
+            # only accepts FFs (get_regs) as start points -- not the T80 microcode block-ROM outputs
+            # (its critical path: microcode pROM -> ALU -> ACC) -- so those paths are covered by their
+            # endpoints instead: ACC/IncDecZ are only fed from inside the T80 (Save_Mux = BusB/DI_Reg/
+            # ALU, Ap/I/R; the external bus DInst only reaches IR), hence also multicycle.
+            mc = []
+            for frm, to in [
+                ("get_regs {system/z80_inst/*}", "get_regs {system/z80_inst/*}"),
+                ("get_clocks {sms_clk}",         "get_regs {system/z80_inst/u0/ACC*}"),
+                ("get_clocks {sms_clk}",         "get_regs {system/z80_inst/u0/IncDecZ*}"),
+            ]:
+                mc += [f"set_multicycle_path -from [{frm}] -to [{to}] -setup -end 2",
+                       f"set_multicycle_path -from [{frm}] -to [{to}] -hold -end 1"]
+            getattr(platform, "extra_timing_constraints", []).extend(mc)
         else:
             locked = Signal(reset=1)
 

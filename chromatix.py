@@ -95,13 +95,18 @@ APP_RAM_OFFSET = 0x080000
 APP_RAM_SIZE   = 8*MB - APP_RAM_OFFSET
 
 def add_timing_constraints(platform):
+    # platform.extra_timing_constraints: SDC lines added during elaboration (ex by a hosted core:
+    # its clock groups / multicycle paths), appended when the SDC is written; an entry can be a
+    # callable (evaluated then, ex once a PLL config is known).
+    platform.extra_timing_constraints = []
     constraints = [c.replace("{{{usb_sclk}}}", "{" + USB_SCLK_NET + "}") for c in TIMING_CONSTRAINTS]
     original_build_timing_constraints = platform.toolchain.build_timing_constraints
 
     def build_timing_constraints(toolchain, vns):
         sdc = original_build_timing_constraints(vns)
         with open(sdc[0], "a", encoding="utf-8") as f:
-            f.write("\n" + "\n".join(constraints) + "\n")
+            extra = [c() if callable(c) else c for c in platform.extra_timing_constraints]
+            f.write("\n" + "\n".join(constraints + extra) + "\n")
         return sdc
 
     platform.toolchain.build_timing_constraints = MethodType(build_timing_constraints, platform.toolchain)
