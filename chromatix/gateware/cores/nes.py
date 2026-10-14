@@ -342,10 +342,14 @@ class NESVideoDownscaler(LiteXModule):
             ),
             If(hblank & ~hbl_d, # End of line.
                 x_out.eq(0), hacc.eq(in_w),
-                vacc.eq(vacc + out_h),
-                If((vacc + out_h) >= in_h,
-                    vacc.eq(vacc + out_h - in_h),
-                    If(y_out < out_h, y_out.eq(y_out + 1), row_base.eq(row_base + out_w)),
+                # Only visible lines advance the output row (hblank also toggles on the vblank lines,
+                # which would otherwise push the picture down by ~vblank*out_h/in_h rows).
+                If(~vblank,
+                    vacc.eq(vacc + out_h),
+                    If((vacc + out_h) >= in_h,
+                        vacc.eq(vacc + out_h - in_h),
+                        If(y_out < out_h, y_out.eq(y_out + 1), row_base.eq(row_base + out_w)),
+                    ),
                 ),
             ),
         ]

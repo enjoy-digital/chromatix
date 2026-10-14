@@ -104,3 +104,44 @@ def test_core_video_downscaler():
             assert gs == sorted(gs), (xo, gs)        # g non-decreasing down the column.
 
     run_simulation(dut, {"sys": gen()}, clocks={"sys": 10, "hclk": 10})
+
+def test_core_video_downscaler_vblank_lines():
+    """Real rasters keep toggling hblank during vertical blanking (e.g. the SMS/GG VDP): those lines
+    must not advance the output row. At 1:1 (the Game Gear path), input line y lands on output row y
+    even with many blanked lines between the vblank rising edge and the first active line."""
+    w_, h_ = 8, 6
+    dut    = CoreVideoDownscaler(in_w=w_, in_h=h_, out_w=w_, out_h=h_, write_cd="sys")
+    writes = {}
+
+    def line(active, y=0):
+        v = dut.video
+        yield v.hblank.eq(0)
+        for x in range(w_):
+            yield v.r.eq(x); yield v.g.eq(y)
+            yield
+            if (yield dut.fb_wr.we):
+                writes[(yield dut.fb_wr.adr)] = (yield dut.fb_wr.dat_w)
+        yield v.hblank.eq(1)
+        for _ in range(4):
+            yield
+            if (yield dut.fb_wr.we):
+                writes[(yield dut.fb_wr.adr)] = (yield dut.fb_wr.dat_w)
+
+    def gen():
+        v = dut.video
+        yield v.ce.eq(1); yield v.hblank.eq(1); yield v.vblank.eq(0)
+        yield
+        yield v.vblank.eq(1) # Frame start, then 10 blanked lines (hblank still toggling).
+        for _ in range(10):
+            yield from line(active=False)
+        yield v.vblank.eq(0)
+        for y in range(h_):
+            yield from line(active=True, y=y)
+
+        assert set(writes.keys()) == set(range(w_*h_)), sorted(writes.keys())
+        for yo in range(h_):
+            for xo in range(w_):
+                c = writes[yo*w_ + xo]
+                assert (c & 0x1f, (c >> 5) & 0x1f) == (xo, yo), (xo, yo, c)
+
+    run_simulation(dut, {"sys": gen()}, clocks={"sys": 10, "hclk": 10})

@@ -238,6 +238,7 @@ class CoreVideoDownscaler(LiteXModule):
         hacc     = Signal(max=in_w + out_w + 1)
         vacc     = Signal(max=in_h + out_h + 1)
         active   = Signal()
+        line_act = Signal() # Current line carried active pixels (blanked lines don't advance rows).
         wsync    = getattr(self.sync, write_cd)
         self.comb += active.eq(video.ce & ~video.hblank & ~video.vblank)
         # Frame buffer write port driven registered (adr/dat_w/we move together, 1 cycle after the
@@ -256,6 +257,7 @@ class CoreVideoDownscaler(LiteXModule):
             ),
             # Active pixel: horizontal Bresenham pick.
             If(active,
+                line_act.eq(1),
                 If(hacc >= in_w,
                     hacc.eq(hacc - in_w + out_w),
                     If((x_out < out_w) & (y_out < out_h),
@@ -269,16 +271,21 @@ class CoreVideoDownscaler(LiteXModule):
                     hacc.eq(hacc + out_w),
                 ),
             ),
-            # End of line (hblank rising): vertical accumulate, reset horizontal.
+            # End of line (hblank rising): reset horizontal; vertical accumulate only for lines that
+            # carried active pixels -- hblank also toggles on the vertical-blanking lines, which must
+            # not advance the output row (else the picture is pushed down by the vblank line count).
             If(video.hblank & ~hblank_d,
                 x_out.eq(0),
                 hacc.eq(in_w), # So the first pixel of the next line is written.
-                vacc.eq(vacc + out_h),
-                If((vacc + out_h) >= in_h,
-                    vacc.eq(vacc + out_h - in_h),
-                    If(y_out < out_h,
-                        y_out.eq(y_out + 1),
-                        row_base.eq(row_base + out_w),
+                line_act.eq(0),
+                If(line_act,
+                    vacc.eq(vacc + out_h),
+                    If((vacc + out_h) >= in_h,
+                        vacc.eq(vacc + out_h - in_h),
+                        If(y_out < out_h,
+                            y_out.eq(y_out + 1),
+                            row_base.eq(row_base + out_w),
+                        ),
                     ),
                 ),
             ),
