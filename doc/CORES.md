@@ -5,16 +5,22 @@ Sega Master System / Game Gear, ...) on the Chromatic (Gowin **GW5A-25**), in pl
 core, reusing the video pipeline, PSRAM, audio and buttons unchanged.
 
 Status: two cores run **commercial games on hardware**, loaded from the PC at runtime (no rebuild):
-- **NES** (`--core nes --with-debug-bridge`, `nes-load`): NROM / mapper-0 games (32 KB PRG + 8 KB
-  CHR window). Super Mario Bros. is playable (Start → World 1-1, run/jump/scroll); Donkey Kong,
-  Galaga, Excitebike, Ice Climber, Pac-Man, Balloon Fight, Xevious render their title/attract modes.
-  Downscaled 256×240 → 160×144.
+- **NES** (`--core nes --with-debug-bridge`, `nes-load`): PRG (up to 2 MB) from the PSRAM through a
+  cache (the console freezes only on a miss), CHR ≤ 32 KB or CHR-RAM in BRAM, 8 KB PRG-RAM; mappers
+  NROM, MMC1, UxROM, CNROM, MMC3, AxROM, GxROM (a synthesis-time mask: all mappers do not fit) —
+  ~305 of a 706-game library (large-CHR MMC1/MMC3 titles are next). Super Mario Bros. playable;
+  Zelda (file select / PRG-RAM), Metroid, Kid Icarus, Mega Man, Castlevania, Contra, Duck Tales,
+  Battletoads, Arkanoid, Donkey Kong, Galaga… render title/attract modes. Downscaled 256×240 →
+  160×144 on the panel.
 - **Game Gear** (`--core sms --sms-game-gear --with-debug-bridge`, `sms-load`): Sega-mapper ROMs
   from the PSRAM cartridge cache. Sonic the Hedgehog is playable (title → Green Hill, rings,
   enemies); Columns, Aleste, Fantasy Zone Gear, Bubble Bobble boot. Native 160×144, 1:1.
 - **Master System** (`--core sms --with-debug-bridge`, `sms-load`): Sonic the Hedgehog is playable;
   Alex Kidd in Miracle World, Fantasy Zone, Castle of Illusion, OutRun, R-Type (512 KB), Shinobi,
-  Wonder Boy boot to title/attract. Downscaled 256×192 → 160×144.
+  Wonder Boy boot to title/attract. Downscaled 256×192 → 160×144. Runs at the real 53.69 MHz
+  (60 fps).
+
+Audio verified over USB audio (UAC) for SMS (PSG music) and NES (APU).
 
 **UVC streams the native resolution** (NES 256×240, SMS 256×192; Game Gear is already 160×144):
 the downscale is only for the 160×144 panel. UVC captures the core's native raster (`native_video`,
@@ -377,6 +383,20 @@ Bugs found running real games (all fixed; worth checking in any new port):
   them; MiSTer/smstang AND the cartridge address with the ROM size. Without it, games that write
   out-of-range banks (Alex Kidd, Fantasy Zone) read past the ROM and hang. `sms-load` now writes
   `sms_loader_mask` (ROM size rounded up to a power of 2, minus 1).
+- **A core without a wait input can still use a PSRAM cartridge.** nes.v assumes fixed-latency SDRAM;
+  a build-time patch (`nes_rtl_lowered`: never edit the vendored tree) adds a `stall` input gating its
+  clock-enables, and the memory glue only asserts it for a read still unserved when the core is about
+  to sample it (nes.v issues PRG reads ~4 clocks early) — hits cost nothing.
+- **Read the mappers' address map, don't assume it.** CHR-RAM is the CHR space (0x200000) made
+  writable (`chr_allow`), not a separate region: a read-only CHR BRAM silently dropped the patterns.
+- **Unsigned audio.** MiSTer cores flag signedness (`AUDIO_S`); the NES APU sample is unsigned — fed
+  as signed, every mid-scale crossing wraps (harsh distortion).
+- **Timing: name the core clocks and describe their relations.** Gowin rejects its derived PLL clock
+  names in constraints: declare `create_generated_clock` on the PLL pins
+  (`core_shell.add_core_clock_constraints`), asynchronous to the USB clock. Clock-enabled cores are
+  full of multicycle paths (Z80 every 15 clocks; NES BRAM reads on a 4x clock): constrain them
+  (`get_regs`/`get_clocks` — Gowin accepts neither block-RAM data pins nor glob brackets `[*]` as
+  start points), rather than lowering the clock (the SMS ran 11% slow at 48 MHz before).
 - **NES joypad shift edge.** nes.v holds `joypad_clock` high for the whole `$4016` read; shift on
   its *falling* edge or every read returns the next button (Start seen as Select).
 

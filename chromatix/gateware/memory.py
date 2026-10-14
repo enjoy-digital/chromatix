@@ -820,7 +820,7 @@ class MemorySystem(LiteXModule):
     (QSPI_CLK rising/falling edges, created here).
     """
     def __init__(self, qspi_pads, psram_pads, with_bus=False, bus_base=0x400000, bus_data_width=64,
-        with_vcart=False, with_sms_cart=False, with_frame_blend=True, with_lcd_framebuffer=False,
+        with_vcart=False, with_core_cart=False, with_frame_blend=True, with_lcd_framebuffer=False,
         bus_synchronous=False, bus_fetch=1, bus_buffers=0, psram_factory=None):
         self.reset       = Signal()
         self.menu_init   = Signal()
@@ -860,7 +860,7 @@ class MemorySystem(LiteXModule):
             self.cd_psram.rst.eq(self.reset),
             self.cd_psram2x.clk.eq(ClockSignal("fclk")),
         ]
-        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus + with_vcart + with_sms_cart))
+        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus + with_vcart + with_core_cart))
         cd_psram = {"sys": "psram", "sys2x": "psram2x"}
         if psram_factory is None:
             self.phy   = phy   = ClockDomainsRenamer(cd_psram)(OPIPSRAMPHY(psram_pads))
@@ -946,11 +946,12 @@ class MemorySystem(LiteXModule):
             self.fb_write_port = port # CPU framebuffer writes (LCDPSRAMFramebuffer).
 
         # Virtual Cartridge / SMS cartridge cache (optional): extra ports after the bus, highest
-        # priority. with_vcart (Game Boy) and with_sms_cart (SMS/GG ROM cache) are mutually exclusive.
+        # priority. with_vcart (Game Boy) and with_core_cart (a hosted core's ROM cache: SMS/GG, NES)
+        # are mutually exclusive.
         if with_vcart:
             self.vcart_port = ports[PORT_COUNT + with_bus]
-        if with_sms_cart:
-            self.sms_cart_port = ports[PORT_COUNT + with_bus + with_vcart]
+        if with_core_cart:
+            self.core_cart_port = ports[PORT_COUNT + with_bus + with_vcart]
 
         # CPU Main RAM (optional) ------------------------------------------------------------------
         if with_bus:

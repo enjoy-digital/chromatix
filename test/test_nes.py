@@ -79,6 +79,99 @@ def test_nes_memory():
 
     run_simulation(dut, gen())
 
+class _FakeCache(Module):
+    """CoreROMCache stand-in: `data` = rom[addr]; `stall` while a new address is looked up, for
+    `latency` cycles (1 = a hit's lookup, more = a miss being filled)."""
+    def __init__(self, rom, latency):
+        self.addr  = Signal(21)
+        self.rd    = Signal()
+        self.data  = Signal(8)
+        self.stall = Signal()
+        self.flush = Signal()
+        self.latency = Signal(8, reset=latency)
+        mem  = Memory(8, len(rom), init=rom)
+        port = mem.get_port(async_read=True)
+        self.specials += mem, port
+        last = Signal(21, reset=2**21 - 1)
+        cnt  = Signal(8)
+        self.comb += [port.adr.eq(self.addr), self.data.eq(port.dat_r)]
+        self.sync += If(self.rd & (self.addr != last),
+            last.eq(self.addr), cnt.eq(self.latency - 1),
+        ).Elif(cnt != 0, cnt.eq(cnt - 1))
+        self.comb += self.stall.eq(self.rd & ((self.addr != last) | (cnt != 0)))
+
+def test_nes_memory_prg_cache():
+    """PRG through a cache: a read (cpumem_read held 4 cycles, as cart_pre) is served without freezing
+    the NES on a hit; a miss freezes it (`stall`) until the data is there; the byte is right either
+    way."""
+    prg   = [(a*13 + 7) & 0xff for a in range(4096)]
+    cache = _FakeCache(prg, latency=1)
+    dut   = NESMemory(chr_kb=8, cd="sys", prg_cache=cache, with_ram=True)
+    dut.submodules.cache = cache
+
+    def cpu_read(addr):
+        """One CPU PRG read: returns (data at the end of the access, cycles frozen)."""
+        frozen = 0
+        yield dut.b_addr.eq(addr); yield dut.b_read.eq(1)
+        n = 0
+        while n < 4:                      # cart_pre lasts 4 cycles -- extended while frozen.
+            yield
+            if (yield dut.stall):
+                frozen += 1
+            else:
+                n += 1
+        yield dut.b_read.eq(0)
+        for _ in range(4):
+            yield
+        return (yield dut.b_dout), frozen
+
+    def gen():
+        for a in [0x10, 0x11, 0x200, 0x10]:
+            data, frozen = yield from cpu_read(a)
+            assert data == prg[a] and frozen == 0, (hex(a), data, frozen)    # Hits: no freeze.
+        yield cache.latency.eq(30)
+        data, frozen = yield from cpu_read(0x345)
+        assert data == prg[0x345] and frozen > 20, (data, frozen)            # Miss: frozen.
+
+    run_simulation(dut, gen())
+
+def test_nes_memory_rams():
+    """with_ram: CHR-RAM is the CHR space (0x200000) made PPU-writable (as the mappers address it),
+    distinct from CIRAM (0x300000; it used to alias the 2 KB CIRAM); PRG-RAM (0x3C0000) and CPU RAM
+    (0x380000) are distinct; all read/write."""
+    cache = _FakeCache([0]*16, latency=1)
+    dut   = NESMemory(chr_kb=8, cd="sys", prg_cache=cache, with_ram=True)
+    dut.submodules.cache = cache
+
+    def write(ch, addr, data):
+        if ch == "a":
+            yield dut.a_addr.eq(addr); yield dut.a_din.eq(data); yield dut.a_write.eq(1)
+            yield
+            yield dut.a_write.eq(0)
+        else:
+            yield dut.b_addr.eq(addr); yield dut.b_din.eq(data); yield dut.b_write.eq(1)
+            yield
+            yield dut.b_write.eq(0)
+        yield
+
+    def read(ch, addr):
+        yield (dut.a_addr if ch == "a" else dut.b_addr).eq(addr); yield; yield
+        return (yield (dut.a_dout if ch == "a" else dut.b_dout))
+
+    def gen():
+        yield from write("a", 0x300010, 0x11) # CIRAM.
+        yield from write("a", 0x200010, 0x22) # CHR-RAM (same low address bits).
+        yield from write("a", 0x201810, 0x33) # CHR-RAM beyond 2 KB.
+        yield from write("b", 0x380005, 0x44) # CPU RAM.
+        yield from write("b", 0x3C0005, 0x55) # PRG-RAM.
+        assert (yield from read("a", 0x300010)) == 0x11
+        assert (yield from read("a", 0x200010)) == 0x22
+        assert (yield from read("a", 0x201810)) == 0x33
+        assert (yield from read("b", 0x380005)) == 0x44
+        assert (yield from read("b", 0x3C0005)) == 0x55
+
+    run_simulation(dut, gen())
+
 # Joypad -------------------------------------------------------------------------------------------
 
 def test_nes_joypad():

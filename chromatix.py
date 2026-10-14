@@ -157,11 +157,12 @@ class BaseSoC(SoCMini):
         # Virtual cartridge (Game Boy ROM over the debug bridge) -- not for the core shell, which
         # has no Game Boy core; --core nes uses the debug bridge for its own NES ROM loader instead.
         with_vcart = with_debug_bridge and not with_core
-        # SMS cartridge cache: --core sms serves its ROM from the PSRAM behind a cache (CoreROMCache),
-        # the host uploads it over the debug bridge -- this needs a dedicated PSRAM arbiter port.
-        # --sms-bram bakes a (small) ROM into BRAM instead (no cache), to isolate the PSRAM-cache path
-        # from the rest on hardware.
-        with_sms_cart = with_core and (core == "sms") and with_debug_bridge and not sms_bram
+        # Hosted-core cartridge cache: --core sms (ROM) / --core nes (PRG) served from the PSRAM behind
+        # a cache (CoreROMCache), the host uploads it over the debug bridge -- this needs a dedicated
+        # PSRAM arbiter port. --sms-bram bakes a (small) SMS ROM into BRAM instead (no cache), to
+        # isolate the PSRAM-cache path from the rest on hardware.
+        with_core_cart = with_core and with_debug_bridge and (
+            (core == "sms" and not sms_bram) or (core == "nes"))
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
@@ -509,7 +510,7 @@ class BaseSoC(SoCMini):
             bus_base       = main_ram_offset,
             bus_data_width = 64 if with_cpu else 32,
             with_vcart     = with_vcart,
-            with_sms_cart  = with_sms_cart,
+            with_core_cart = with_core_cart,
             # Frame blending only for the Game Boy (CPU builds: PSRAM bandwidth for the CPU).
             with_frame_blend = not with_cpu,
             # Application: LCD frame buffers in the PSRAM (CPU line writes, framebuffer reads).
@@ -653,11 +654,15 @@ class BaseSoC(SoCMini):
                     left   = btns.dpad_left  | mcu_buttons[6],
                     right  = btns.dpad_right | mcu_buttons[5],
                 )
-                # With the debug bridge, enable the runtime ROM loader: PRG/CHR become host-writable
-                # (32 KB/8 KB, seeded with --nes-rom) and a NESLoaderCSR uploads any NROM game at
-                # runtime (scripts/chromatic.py nes-load) with no rebuild.
+                # With the debug bridge, enable the runtime ROM loader: PRG from the PSRAM (cache), CHR
+                # in BRAM, a runtime mapper among the build's subset (NROM/MMC1/UxROM/CNROM/MMC3/
+                # AxROM/GxROM); a NESLoaderCSR uploads a game at runtime (scripts/chromatic.py
+                # nes-load) with no rebuild.
                 self.core = lcd_source = NESCore(platform, clk_24, int(24e6), nes_buttons,
-                    rom=nes_rom, with_loader=with_debug_bridge)
+                    rom=nes_rom, with_loader=with_debug_bridge,
+                    cart_port      = memory.core_cart_port if with_core_cart else None,
+                    cart_port_dout = memory.ctrl.dout      if with_core_cart else None,
+                    cart_ready     = memory.bist_done      if with_core_cart else None)
                 if with_debug_bridge:
                     self.nes_loader = NESLoaderCSR(lcd_source)
                 self.sync.hclk += [ # NES audio (nes domain) -> shared bus (quasi-static).
@@ -683,9 +688,9 @@ class BaseSoC(SoCMini):
                 # the video path; it then boots a cartridge uploaded over the debug bridge (sms-load).
                 self.core = lcd_source = SMSCore(platform, clk_24, int(24e6), sms_buttons,
                     rom=sms_rom, game_gear=sms_game_gear, bios_en=False,
-                    cart_port      = memory.sms_cart_port if with_sms_cart else None,
-                    cart_port_dout = memory.ctrl.dout     if with_sms_cart else None,
-                    cart_ready     = memory.bist_done     if with_sms_cart else None,
+                    cart_port      = memory.core_cart_port if with_core_cart else None,
+                    cart_port_dout = memory.ctrl.dout      if with_core_cart else None,
+                    cart_ready     = memory.bist_done      if with_core_cart else None,
                     cart_bram_kb   = 16 if sms_bram else 64,
                     # Diagnostic builds: expose a debug output. --sms-hw-debug {io,vdp} selects the
                     # probe (vdp = whether the VDP latches register writes); else --sms-bram -> "io".

@@ -228,38 +228,88 @@ class Chromatic:
         return ((hold    << 0) | (sel_chr  << 1) | (prg32k << 2) |
                 (mirror_v << 3) | (chr_ram << 4) | (addr_rst << 5))
 
+    # NES cartridge (--core nes --with-debug-bridge): PRG uploaded to the PSRAM (served to the core
+    # through a cache, as the SMS), CHR (<= 32 KB, or CHR-RAM) to BRAM via the loader, mapper_flags
+    # computed as nestang's game_loader.v. Mappers: the subset synthesized in the build.
+    NES_PRG_BASE = 0x400000 # Must match NES_PRG_BASE in chromatix/gateware/cores/nes.py.
+    NES_MAPPERS  = {0: "NROM", 1: "MMC1", 2: "UxROM", 3: "CNROM", 4: "MMC3", 7: "AxROM", 66: "GxROM"}
+    NES_CHR_MAX  = 32*1024
+
+    @staticmethod
+    def nes_mapper_flags(rom):
+        """iNES header -> the core's mapper_flags[31:0] (as game_loader.v; NES 2.0 submapper forced
+        to 0: the build's mapper-subset mask only covers submapper 0)."""
+        prg_n, chr_n = rom[4], rom[5]
+        is_nes20 = (rom[7] & 0x0c) == 0x08
+        is_dirty = (not is_nes20) and any(rom[9:16][i] & (0xfe if i == 0 else 0xff) for i in range(7))
+        mapper   = ((0 if is_dirty else (rom[7] & 0xf0)) | (rom[6] >> 4))
+        def size_code(n):
+            for i, lim in enumerate([1, 2, 4, 8, 16, 32, 64]):
+                if n <= lim:
+                    return i
+            return 7
+        flags  = mapper
+        flags |= size_code(prg_n)       << 8
+        flags |= size_code(chr_n)       << 11
+        flags |= (rom[6] & 1)           << 14 # Mirroring (1 = vertical).
+        flags |= (1 if chr_n == 0 else 0) << 15 # CHR-RAM.
+        flags |= ((rom[6] >> 3) & 1)    << 16 # Four-screen.
+        flags |= ((rom[6] >> 1) & 1)    << 25 # Battery-backed saves.
+        return mapper, flags
+
     def nes_load(self, rom):
-        """Upload an NROM (mapper 0) iNES ROM into the hosted NES core's PRG/CHR BRAM at runtime
-        (no rebuild): hold the core, set config, stream PRG then CHR as 32-bit words, release."""
+        """Upload an iNES ROM to the hosted NES core at runtime (no rebuild): hold the core, PRG to
+        the PSRAM, CHR to BRAM, set mapper_flags, flush the PRG cache, release. Older bitstreams
+        (BRAM PRG, no nes_loader_flags CSR) take the NROM-only path."""
         if rom[:4] != b"NES\x1a":
             raise ValueError("Not an iNES ROM (bad magic).")
-        prg_n, chr_n, flag6, flag7 = rom[4], rom[5], rom[6], rom[7]
-        mapper = (flag6 >> 4) | (flag7 & 0xf0)
-        if mapper != 0:
-            raise ValueError(f"Runtime loader supports NROM (mapper 0) only, got mapper {mapper}.")
-        if prg_n > 2 or chr_n > 1:
-            raise ValueError(f"NROM out of range (PRG {prg_n}x16KB, CHR {chr_n}x8KB; max 2/1).")
-        prg = rom[16:16 + prg_n*16384]
-        chr = rom[16 + prg_n*16384:16 + prg_n*16384 + chr_n*8192]
-        cfg = dict(prg32k=1 if prg_n >= 2 else 0, mirror_v=flag6 & 1, chr_ram=1 if chr_n == 0 else 0)
+        prg_n, chr_n, flag6 = rom[4], rom[5], rom[6]
+        trainer = 512 if (flag6 & 0x04) else 0
+        prg = rom[16 + trainer:16 + trainer + prg_n*16384]
+        chr = rom[16 + trainer + prg_n*16384:16 + trainer + prg_n*16384 + chr_n*8192]
+        mapper, flags = self.nes_mapper_flags(rom)
+        reg = self.bus.regs
 
         def words(data):
             data = bytes(data) + bytes(-len(data) % 4)
             return [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
 
-        reg = self.bus.regs
-        # PRG: hold + reset address + target PRG, then stream.
-        reg.nes_loader_control.write(self._nes_ctrl(hold=1, sel_chr=0, addr_rst=1, **cfg))
-        for w in words(prg):
-            reg.nes_loader_data.write(w)
-        # CHR: reset address + target CHR, then stream.
+        if not hasattr(reg, "nes_loader_flags"):
+            # Older bitstream: PRG/CHR in BRAM, NROM only.
+            if mapper != 0:
+                raise ValueError(f"This bitstream supports NROM (mapper 0) only, got mapper {mapper}.")
+            if prg_n > 2 or chr_n > 1:
+                raise ValueError(f"NROM out of range (PRG {prg_n}x16KB, CHR {chr_n}x8KB; max 2/1).")
+            cfg = dict(prg32k=1 if prg_n >= 2 else 0, mirror_v=flag6 & 1, chr_ram=1 if chr_n == 0 else 0)
+            reg.nes_loader_control.write(self._nes_ctrl(hold=1, sel_chr=0, addr_rst=1, **cfg))
+            for w in words(prg):
+                reg.nes_loader_data.write(w)
+            if chr:
+                reg.nes_loader_control.write(self._nes_ctrl(hold=1, sel_chr=1, addr_rst=1, **cfg))
+                for w in words(chr):
+                    reg.nes_loader_data.write(w)
+            reg.nes_loader_control.write(self._nes_ctrl(hold=0, sel_chr=0, **cfg))
+            return dict(mapper="NROM", prg_kb=len(prg)//1024, chr_kb=len(chr)//1024,
+                chr_ram=bool(cfg["chr_ram"]), mirror_v=bool(cfg["mirror_v"]))
+
+        if mapper not in self.NES_MAPPERS:
+            names = ", ".join(f"{n} ({m})" for m, n in self.NES_MAPPERS.items())
+            raise ValueError(f"Mapper {mapper} not in this build (supported: {names}).")
+        if len(chr) > self.NES_CHR_MAX:
+            raise ValueError(f"CHR-ROM {len(chr)//1024} KB > {self.NES_CHR_MAX//1024} KB (not supported yet).")
+        HOLD, SEL_CHR, ADDR_RST, FLUSH = 1 << 0, 1 << 1, 1 << 5, 1 << 6
+        reg.nes_loader_control.write(HOLD)
+        self.write_psram(self.NES_PRG_BASE, prg)
         if chr:
-            reg.nes_loader_control.write(self._nes_ctrl(hold=1, sel_chr=1, addr_rst=1, **cfg))
+            reg.nes_loader_control.write(HOLD | SEL_CHR | ADDR_RST)
             for w in words(chr):
                 reg.nes_loader_data.write(w)
-        # Release: the core resets fresh and runs the new ROM.
-        reg.nes_loader_control.write(self._nes_ctrl(hold=0, sel_chr=0, **cfg))
-        return dict(prg_kb=len(prg)//1024, chr_kb=len(chr)//1024, **cfg)
+        reg.nes_loader_flags.write(flags)
+        reg.nes_loader_control.write(HOLD | FLUSH)
+        time.sleep(0.01)
+        reg.nes_loader_control.write(0) # Release: the core resets fresh and runs the new ROM.
+        return dict(mapper=self.NES_MAPPERS[mapper], prg_kb=len(prg)//1024, chr_kb=len(chr)//1024,
+            chr_ram=bool(flags & (1 << 15)), mirror_v=bool(flags & (1 << 14)))
 
     # SMS/Game Gear cartridge loader (--core sms --with-debug-bridge): ROM uploaded to the PSRAM,
     # served to the core through a cache (chromatix/gateware/cores/rom_cache.py).
@@ -400,7 +450,7 @@ def main():
 
     subparsers.add_parser("unload", help="Back to the physical cartridge.")
 
-    p = subparsers.add_parser("nes-load", help="Upload an NROM game to a --core nes --with-debug-bridge build (runtime, no rebuild).")
+    p = subparsers.add_parser("nes-load", help="Upload a NES game (NROM/MMC1/UxROM/CNROM/MMC3/AxROM/GxROM, CHR <= 32 KB) to a --core nes --with-debug-bridge build (runtime, no rebuild).")
     p.add_argument("rom", help="iNES ROM file (.nes/.hex, NROM/mapper 0).")
 
     p = subparsers.add_parser("sms-load", help="Upload an SMS/Game Gear game to a --core sms --with-debug-bridge build (runtime, no rebuild).")
@@ -457,7 +507,7 @@ def main():
                 rom = _read_file(args.rom)
             t0  = time.time()
             cfg = chromatic.nes_load(rom)
-            print(f"NES ROM loaded in {time.time() - t0:.1f}s: PRG {cfg['prg_kb']}KB, "
+            print(f"NES ROM loaded in {time.time() - t0:.1f}s: {cfg['mapper']}, PRG {cfg['prg_kb']}KB, "
                   f"CHR {cfg['chr_kb']}KB, {'vertical' if cfg['mirror_v'] else 'horizontal'} mirror"
                   + (", CHR-RAM" if cfg['chr_ram'] else "") + ".")
         elif args.command == "sms-load":
