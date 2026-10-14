@@ -43,15 +43,18 @@ class USBDevice(LiteXModule):
     "usb_960"), LUNA USB 2.0 device core and LiteX UTMI PHY (USB2PHY).
     """
     def __init__(self, platform, clk_24, pads, uvc_frames=VIDEO_FRAMES, with_utmi_monitor=False,
-        with_cdc_stream=False):
+        with_cdc_stream=False, uvc_native=None):
+        # uvc_native: None (UVC = the 160x144 LCD copy, gClk) or (clock_domain, width, height): UVC
+        # fed by a native raster in that domain (video/enable/frame_valid + video_ce pixel strobe).
         self.reset       = Signal() # Held in reset (PLL too) when 1 (async).
         self.locked      = Signal()
         self.player_num  = Signal(8)
-        # Video (gClk).
+        # Video (gClk, or the uvc_native domain).
         self.line_valid  = Signal()
         self.enable      = Signal()
         self.frame_valid = Signal()
         self.video       = Signal(18)
+        self.video_ce    = Signal() # Pixel strobe (uvc_native only).
         # Audio (gClk).
         self.left        = Signal(16)
         self.right       = Signal(16)
@@ -202,7 +205,14 @@ class USBDevice(LiteXModule):
         })
 
         # UVC (EP2) --------------------------------------------------------------------------------
-        self.uvc = uvc = ClockDomainsRenamer({"sys": "phy", "video": "gclk"})(UVCVideo(frames=uvc_frames))
+        self.uvc_frames = uvc_frames
+        if uvc_native is None:
+            uvc = UVCVideo(frames=uvc_frames)
+            uvc_cd = "gclk"
+        else:
+            uvc_cd, src_w, src_h = uvc_native
+            uvc = UVCVideo(frames=uvc_frames, src_w=src_w, src_h=src_h, with_ce=True)
+        self.uvc = uvc = ClockDomainsRenamer({"sys": "phy", "video": uvc_cd})(uvc)
         uvc_txact = Signal()
         self.sync.phy += If(luna.ep2_requested, uvc_txact.eq(1)).Elif(luna.ep2_finished, uvc_txact.eq(0))
         self.comb += [
@@ -213,6 +223,7 @@ class USBDevice(LiteXModule):
             uvc.enable.eq(self.enable),
             uvc.frame_valid.eq(self.frame_valid),
             uvc.data.eq(self.video),
+            uvc.ce.eq(self.video_ce),
             uvc.sof.eq(luna.sof),
             uvc.txact.eq(uvc_txact),
             uvc.txpop.eq(luna.ep2_ready),

@@ -461,6 +461,8 @@ class SMSCore(LiteXModule):
         # color_bits=3 (RGB333 frame buffer, ~12 BSRAM vs ~20 for RGB555): the SMS fills the
         # GW5A-25's BSRAM, and a smaller frame buffer is what gives the design routing headroom.
         self.video = ds = CoreVideoDownscaler(in_w=in_w, in_h=in_h, write_cd="sms", color_bits=3)
+        # Native raster (CoreVideo, "sms" domain), ex for a native-resolution UVC stream.
+        self.native_video, self.native_cd, self.native_size = ds.video, "sms", (in_w, in_h)
         r4, g4, b4 = color[0:4], color[4:8], color[8:12]
         self.comb += [
             ds.video.ce.eq(ce_pix),

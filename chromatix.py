@@ -129,6 +129,7 @@ class BaseSoC(SoCMini):
         sms_bram              = False,
         sms_hw_debug          = None,
         sms_game_gear         = False,
+        uvc_lcd               = False,
         with_utmi_monitor     = False):
         gclk_freq = int(33.55432e6 / 4)
         pclk_freq = int(33.55432e6)
@@ -876,9 +877,20 @@ class BaseSoC(SoCMini):
 
         # USB UVC+UAC+UART System ------------------------------------------------------------------
 
+        # A hosted core with a native raster other than 160x144 (NES 256x240, SMS 256x192): UVC streams
+        # it at its native resolution (no downscale; the LCD still shows the 160x144 downscale), fed
+        # directly from the core's clock domain. --uvc-lcd keeps the LCD copy (with OSD/color
+        # correction) instead.
+        uvc_native = None
+        native     = getattr(getattr(self, "core", None), "native_video", None)
+        if (native is not None) and (self.core.native_size != (160, 144)) and not uvc_lcd:
+            native_w, native_h = self.core.native_size
+            uvc_native = (self.core.native_cd, native_w, native_h)
+            uvc_frames = [(native_w, native_h)]
         self.usb = usb_dev = USBDevice(platform, clk_24, usb,
             with_utmi_monitor = with_debug_bridge and with_utmi_monitor,
             with_cdc_stream   = with_debug_bridge or with_app,
+            uvc_native        = uvc_native,
             **({} if uvc_frames is None else {"uvc_frames": uvc_frames}))
         if with_debug_bridge or with_app:
             self.comb += [
@@ -905,12 +917,23 @@ class BaseSoC(SoCMini):
             # Audio.
             usb_dev.left.eq(g_left),
             usb_dev.right.eq(g_right),
-            # UVC Video.
-            usb_dev.line_valid.eq(hr1),
-            usb_dev.enable.eq(he1),
-            usb_dev.frame_valid.eq(vr1),
-            usb_dev.video.eq(d1),
         ]
+        if uvc_native is None:
+            # UVC Video: the LCD copy (gClk).
+            self.comb += [
+                usb_dev.line_valid.eq(hr1),
+                usb_dev.enable.eq(he1),
+                usb_dev.frame_valid.eq(vr1),
+                usb_dev.video.eq(d1),
+            ]
+        else:
+            # UVC Video: the core's native raster (its clock domain), RGB555 -> RGB666.
+            self.comb += [
+                usb_dev.video_ce.eq(native.ce),
+                usb_dev.enable.eq(~native.hblank & ~native.vblank),
+                usb_dev.frame_valid.eq(~native.vblank),
+                usb_dev.video.eq(Cat(native.r[4], native.r, native.g[4], native.g, native.b[4], native.b)),
+            ]
 
         # Battery ADC (gClk domain) ----------------------------------------------------------------
 
@@ -1074,6 +1097,7 @@ def main():
     parser.add_argument("--with-debug-bridge",     action="store_true",       help="Replace the USB CDC <-> ESP32 UART passthrough with a LiteX UARTBone debug bridge.")
     parser.add_argument("--debug-bridge-baudrate", default=115200, type=int,  help="Debug bridge baudrate.")
     parser.add_argument("--uvc-sizes",             default="320x288,160x144", help="UVC frame sizes (1st: default), ex: 160x144 or 320x288,160x144.")
+    parser.add_argument("--uvc-lcd",               action="store_true",       help="Hosted core: UVC streams the 160x144 LCD copy instead of the core's native resolution.")
     parser.add_argument("--with-bios",             action="store_true",       help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
     parser.add_argument("--with-app",              action="store_true",       help="CPU application SoC (VexRiscv) in place of the Game Boy core: PSRAM framebuffer, PCM audio, ESP32 UART, firmware loaded over USB.")
     parser.add_argument("--with-core",             action="store_true",       help="MiSTer-core shell in place of the Game Boy core (bring-up: a 160x144 test pattern on the LCD/UVC).")
@@ -1112,6 +1136,7 @@ def main():
         sms_bram              = args.sms_bram,
         sms_hw_debug          = args.sms_hw_debug,
         sms_game_gear         = args.sms_game_gear,
+        uvc_lcd               = args.uvc_lcd,
         with_utmi_monitor     = args.with_utmi_monitor,
         debug_bridge_baudrate = args.debug_bridge_baudrate,
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],

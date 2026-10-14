@@ -177,7 +177,7 @@ class UVCControl(_ControlHandler):
         s = setup
         # Probe/commit control (UVC 1.1, 34 bytes) of each frame.
         def probe(index, width, height):
-            payload_size = UVC_PAYLOAD_SIZE*(video_transactions(width, height) if len(frames) > 1 else 1)
+            payload_size = UVC_PAYLOAD_SIZE*video_transactions(width, height)
             probe = []
             probe += [0, 0]                                                       # bmHint.
             probe += [1]                                                          # bFormatIndex.
@@ -486,25 +486,30 @@ class UVCVideo(LiteXModule):
     integer upscaling and high-bandwidth transfers).
 
     "video" domain (hClk): the LCD copy (160x144 RGB666, 1 pixel every 3 clocks while enable) is
-    captured in ping-pong line buffers.
+    captured in ping-pong line buffers. With `with_ce`, the source is instead any src_w x src_h raster
+    (ex a hosted core's native video, the "video" domain then being the core's clock domain): one
+    pixel per `ce` while enable (the line), frame_valid low during vertical blanking.
     "sys" domain (60MHz UTMI clock): lines are replayed at the committed frame geometry (160x144
     or 320x288: each pixel/line repeated, so YUY2 chroma pairs are single source pixels), converted
     to YCbCr, packed as YUYV in a FIFO and sent with one micro-frame transfer of up to 1024 bytes, or
     2048 bytes (high-bandwidth, alt setting >= 2: split in DATA1/DATA0 packets by the USB core), each
     with a 12-byte UVC payload header.
     """
-    def __init__(self, frames=VIDEO_FRAMES, n_buffers=4, fifo_depth=4096):
-        assert all((w % UVC_WIDTH == 0) and (h % UVC_HEIGHT == 0) and (w//UVC_WIDTH == h//UVC_HEIGHT)
-            for w, h in frames)
-        max_scale = max(w//UVC_WIDTH for w, h in frames)
+    def __init__(self, frames=VIDEO_FRAMES, n_buffers=4, fifo_depth=4096,
+        src_w=None, src_h=None, with_ce=False):
+        src_w = UVC_WIDTH  if src_w is None else src_w # Resolved at call time (tests patch these).
+        src_h = UVC_HEIGHT if src_h is None else src_h
+        assert all((w % src_w == 0) and (h % src_h == 0) and (w//src_w == h//src_h) for w, h in frames)
+        max_scale = max(w//src_w for w, h in frames)
         # The FIFO must be able to buffer 2 transactions (+ header) with room for a whole line.
-        assert fifo_depth - (2*UVC_WIDTH*max_scale + 64) >= 2*UVC_PACKET_SIZE - UVC_HEADER_SIZE
+        assert fifo_depth - (2*src_w*max_scale + 64) >= 2*UVC_PACKET_SIZE - UVC_HEADER_SIZE
         self.reset       = Signal() # sys.
         # Video input ("video" domain).
         self.line_valid  = Signal() # Unused.
         self.enable      = Signal()
         self.frame_valid = Signal()
         self.data        = Signal(18) # {B, G, R}, 6-bit each.
+        self.ce          = Signal()   # Pixel strobe (with_ce).
         # Control (sys).
         self.frame_index = Signal(8, reset=1) # Committed bFrameIndex.
         self.hbw         = Signal()           # High-bandwidth alternate setting selected.
@@ -530,7 +535,7 @@ class UVCVideo(LiteXModule):
         # a complete line is published with a toggle (and freed by the replay with another toggle)
         # so only single-bit signals cross clock domains.
         sel_bits   = log2_int(n_buffers)
-        line_bits  = log2_int(UVC_WIDTH, need_pow2=False)
+        line_bits  = log2_int(src_w, need_pow2=False)
         stride     = 2**line_bits
         storage    = Memory(18, n_buffers*stride)
         wrport     = storage.get_port(write_capable=True, clock_domain="video")
@@ -555,11 +560,24 @@ class UVCVideo(LiteXModule):
             MultiReg(r_tog,  r_tog_v,  odomain="video"),
             MultiReg(r_busy, r_busy_v, odomain="video"),
         ]
-        self.comb += [
-            wrport.adr.eq(Cat(w_idx[:line_bits], w_sel)),
-            wrport.dat_w.eq(self.data),
-            wrport.we.eq(self.enable & (w_phase == 1) & (w_idx < UVC_WIDTH) & ~w_drop & ~w_skip),
-        ]
+        if with_ce:
+            # Pixel strobe: the pixel (data, ce) is registered so the line start (enable rising,
+            # which can coincide with the first ce) is decoded before its first write.
+            ce_r   = Signal()
+            data_r = Signal(18)
+            self.sync.video += [ce_r.eq(self.ce), data_r.eq(self.data)]
+            self.comb += [
+                wrport.adr.eq(Cat(w_idx[:line_bits], w_sel)),
+                wrport.dat_w.eq(data_r),
+                wrport.we.eq(w_enable_d & ce_r & (w_idx < src_w) & ~w_drop & ~w_skip),
+            ]
+            self.sync.video += If(w_enable_d & ce_r & (w_idx < src_w), w_idx.eq(w_idx + 1))
+        else:
+            self.comb += [
+                wrport.adr.eq(Cat(w_idx[:line_bits], w_sel)),
+                wrport.dat_w.eq(self.data),
+                wrport.we.eq(self.enable & (w_phase == 1) & (w_idx < src_w) & ~w_drop & ~w_skip),
+            ]
         self.sync.video += [
             w_enable_d.eq(self.enable),
             w_fv_d.eq(self.frame_valid),
@@ -590,12 +608,12 @@ class UVCVideo(LiteXModule):
                         w_drop.eq(0),
                     )
                 ),
-                If(w_phase == 2,
+                *([] if with_ce else [If(w_phase == 2,
                     w_phase.eq(0),
-                    If(w_idx < UVC_WIDTH, w_idx.eq(w_idx + 1)),
+                    If(w_idx < src_w, w_idx.eq(w_idx + 1)),
                 ).Else(
                     w_phase.eq(w_phase + 1),
-                )
+                )]),
             ).Elif(w_enable_d,
                 # Line end: publish it.
                 If(~w_drop & ~w_skip,
@@ -621,12 +639,12 @@ class UVCVideo(LiteXModule):
 
         # Frame geometry, latched at frame start.
         scale      = Signal(max=max_scale + 1, reset=1)
-        width      = Signal(10, reset=UVC_WIDTH)
-        height     = Signal(10, reset=UVC_HEIGHT)
+        width      = Signal(10, reset=src_w)
+        height     = Signal(10, reset=src_h)
         scale_next = Signal(max=max_scale + 1)
         self.comb += Case(self.frame_index, {
-            **{i: scale_next.eq(w//UVC_WIDTH) for i, (w, h) in enumerate(frames, start=1)},
-            "default": scale_next.eq(frames[0][0]//UVC_WIDTH),
+            **{i: scale_next.eq(w//src_w) for i, (w, h) in enumerate(frames, start=1)},
+            "default": scale_next.eq(frames[0][0]//src_w),
         })
 
         r_sel         = Signal(sel_bits)
@@ -668,8 +686,8 @@ class UVCVideo(LiteXModule):
                 r_pass.eq(0),
                 r_gap.eq(0),
                 scale.eq(scale_next),
-                width.eq(UVC_WIDTH*scale_next),
-                height.eq(UVC_HEIGHT*scale_next),
+                width.eq(src_w*scale_next),
+                height.eq(src_h*scale_next),
             ).Else(
                 Case(r_state, {
                     R_LEAD: [
@@ -709,7 +727,7 @@ class UVCVideo(LiteXModule):
                             If(r_dup == (scale - 1),
                                 r_dup.eq(0),
                                 r_px.eq(r_px + 1),
-                                If(r_px == (UVC_WIDTH - 1),
+                                If(r_px == (src_w - 1),
                                     r_state.eq(R_GAP),
                                 )
                             )
@@ -850,7 +868,7 @@ class UVCVideo(LiteXModule):
             fifo.RdEn.eq(rden),
             fifo.AlmostFullTh.eq(UVC_PACKET_SIZE - UVC_HEADER_SIZE),
             # Room for a whole output line (+ margin for the level latency).
-            fifo_room.eq(fifo.Rnum <= (fifo_depth - 2*UVC_WIDTH*max_scale - 64)),
+            fifo_room.eq(fifo.Rnum <= (fifo_depth - 2*src_w*max_scale - 64)),
         ]
 
         # USB: Packetizer (sys) --------------------------------------------------------------------

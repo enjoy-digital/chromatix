@@ -580,6 +580,15 @@ class NESCore(LiteXModule):
             self.gb_on.eq(video.gb_on),
             self.gb_vsync.eq(video.gb_vsync),
         ]
+        # Native 256x240 raster (CoreVideo, "nes" domain), ex for a native-resolution UVC stream
+        # (pruned by synthesis when unused).
+        self.native = native = NESVideoAdapter(cd="nes")
+        self.native_video, self.native_cd, self.native_size = native.video, "nes", (256, 240)
+        self.comb += [
+            native.color.eq(video.color),
+            native.cycle.eq(video.cycle),
+            native.scanline.eq(video.scanline),
+        ]
 
         # NES core (constant mapper number prunes the unused mappers). With the loader, only the
         # size/mirror/CHR-RAM fields are made runtime; the mapper number (bits 7:0) stays a constant 0

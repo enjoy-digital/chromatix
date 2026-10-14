@@ -149,6 +149,7 @@ def test_soc_core_nes_loader_elaboration(tmp_path):
     platform = Platform()
     target.add_timing_constraints(platform)
     soc      = target.BaseSoC(platform, with_core=True, core="nes", with_debug_bridge=True)
+    assert soc.usb.uvc_frames == [(256, 240)] # UVC streams the NES native raster (no downscale).
     csr_csv  = os.path.join(tmp_path, "csr.csv")
     builder  = Builder(soc, output_dir=str(tmp_path), csr_csv=csr_csv, compile_software=False)
     builder.build(build_name="chromatic", run=False)
@@ -174,6 +175,7 @@ def test_soc_core_sms_elaboration(tmp_path):
     platform = Platform()
     target.add_timing_constraints(platform)
     soc      = target.BaseSoC(platform, with_core=True, core="sms")
+    assert soc.usb.uvc_frames == [(256, 192)] # UVC streams the SMS native raster (no downscale).
     builder  = Builder(soc, output_dir=str(tmp_path), csr_csv=os.path.join(tmp_path, "csr.csv"),
                        compile_software=False)
     builder.build(build_name="chromatic", run=False)

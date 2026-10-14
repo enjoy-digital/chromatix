@@ -74,8 +74,9 @@ def video_frame_size(width, height):
     return width*height*VIDEO_BITS_PER_PIXEL//8
 
 def video_transactions(width, height):
-    """Isochronous transactions per micro-frame (1024 bytes each) required by a frame size."""
-    return 1 if video_frame_size(width, height)*VIDEO_FPS_MAX <= 1012*8000 else 2
+    """Isochronous transactions per micro-frame (1024 bytes each) required by a frame size. 15%
+    margin: lines arrive in bursts (the source's active lines), not spread over the frame period."""
+    return 1 if video_frame_size(width, height)*VIDEO_FPS_MAX <= 0.85*1012*8000 else 2
 
 YUY2_GUID                      = [0x59, 0x55, 0x59, 0x32, 0x00, 0x00, 0x10, 0x00,
                                   0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71]
