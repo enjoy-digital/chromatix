@@ -603,7 +603,7 @@ class SimTopSMS(LiteXModule):
     system.v so the Z80 <-> VDP register-write handshake is visible in the run log. with_cache uses
     the real PSRAM cartridge cache (CoreROMCache) + SimSMSPSRAMPort (to reproduce/debug the hardware
     cache path); otherwise a plain BRAM cartridge."""
-    def __init__(self, rom, with_cache=False, game_gear=False):
+    def __init__(self, rom, with_cache=False, game_gear=False, cart_bram_kb=64):
         self.cd_sms  = ClockDomain("sms",  reset_less=True)
         self.cd_hclk = ClockDomain("hclk", reset_less=True)
         self.cd_xclk = ClockDomain("xclk", reset_less=True)
@@ -632,7 +632,7 @@ class SimTopSMS(LiteXModule):
                 SimSMSPSRAMPort(cart_port, cart_dout, rom_bytes, base=SMS_ROM_BASE))
         self.sms = sms = SMSCore(platform, clk=None, clk_freq=None, buttons=buttons,
             rom=(None if with_cache else rom), game_gear=game_gear, bios_en=False, with_pll=False,
-            cart_port=cart_port, cart_port_dout=cart_dout)
+            cart_port=cart_port, cart_port_dout=cart_dout, cart_bram_kb=cart_bram_kb)
 
         self.specials += Instance("gb_lcd_capture",
             i_clk    = ClockSignal("hclk"),
@@ -683,7 +683,7 @@ def sanitize_sms_rtl(src_dir, dst_dir):
     return dst_dir
 
 def build_sim_sms(gateware_dir, threads=1, trace=False, with_cache=False, game_gear=False,
-                  rom_bytes=None):
+                  rom_bytes=None, cart_bram_kb=64):
     import chromatix.gateware.cores.sms as smsmod
     rtl = sanitize_sms_rtl(smsmod.SMS_RTL_PATH, os.path.join(gateware_dir, "sms_src"))
     # Test ROM for the cartridge (BRAM or PSRAM-cache model); rom_bytes overrides the built-in one.
@@ -694,7 +694,7 @@ def build_sim_sms(gateware_dir, threads=1, trace=False, with_cache=False, game_g
         f.write(rom)
     saved, smsmod.SMS_RTL_PATH = smsmod.SMS_RTL_PATH, rtl
     try:
-        top = SimTopSMS(rom_path, with_cache=with_cache, game_gear=game_gear)
+        top = SimTopSMS(rom_path, with_cache=with_cache, game_gear=game_gear, cart_bram_kb=cart_bram_kb)
         platform = top._platform
         platform.add_source(os.path.join(SIM_VERILOG_PATH, "gb_lcd_capture.v"))
         sim_config = SimConfig()

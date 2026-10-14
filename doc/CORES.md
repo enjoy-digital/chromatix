@@ -12,7 +12,9 @@ Status: two cores run **commercial games on hardware**, loaded from the PC at ru
 - **Game Gear** (`--core sms --sms-game-gear --with-debug-bridge`, `sms-load`): Sega-mapper ROMs
   from the PSRAM cartridge cache. Sonic the Hedgehog is playable (title → Green Hill, rings,
   enemies); Columns, Aleste, Fantasy Zone Gear, Bubble Bobble boot. Native 160×144, 1:1.
-- **Master System** (`--core sms`): BG tile pipeline verified with test ROMs; commercial games next.
+- **Master System** (`--core sms --with-debug-bridge`, `sms-load`): Sonic the Hedgehog is playable;
+  Alex Kidd in Miracle World, Fantasy Zone, Castle of Illusion, OutRun, R-Type (512 KB), Shinobi,
+  Wonder Boy boot to title/attract. Downscaled 256×192 → 160×144.
 
 Scripted play-testing works end-to-end: `scripts/chromatic.py sequence "press:start@0.2 wait:3
 buttons:dpad_right+a wait:1 capture:shot.png"` (virtual buttons are OR'ed with the console's; hold
@@ -364,6 +366,10 @@ Bugs found running real games (all fixed; worth checking in any new port):
 - **Game Gear Start is `pause`, not `j1_start`.** Port `$00` bit 7 reads system.v's active-low
   `pause` (also the SMS Pause/NMI). Tied to 0 it is "Start held": games skip the title, then stay
   paused.
+- **Cartridge address mask.** The SMS mapper's bank registers are 8-bit and system.v doesn't mask
+  them; MiSTer/smstang AND the cartridge address with the ROM size. Without it, games that write
+  out-of-range banks (Alex Kidd, Fantasy Zone) read past the ROM and hang. `sms-load` now writes
+  `sms_loader_mask` (ROM size rounded up to a power of 2, minus 1).
 - **NES joypad shift edge.** nes.v holds `joypad_clock` high for the whole `$4016` read; shift on
   its *falling* edge or every read returns the next button (Start seen as Select).
 

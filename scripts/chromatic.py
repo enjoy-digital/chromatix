@@ -272,6 +272,8 @@ class Chromatic:
             rom = rom[512:] # Strip the 512-byte header some SMS dumps carry.
         reg = self.bus.regs
         reg.sms_loader_control.write(0b01)       # hold = 1.
+        if hasattr(reg, "sms_loader_mask"):      # ROM-size mask: out-of-range banks wrap.
+            reg.sms_loader_mask.write((1 << max(len(rom) - 1, 0x3fff).bit_length()) - 1)
         self.write_psram(self.SMS_ROM_BASE, rom)
         reg.sms_loader_control.write(0b11)       # hold = 1 + flush (pulse).
         time.sleep(0.01)

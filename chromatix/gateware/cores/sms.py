@@ -181,6 +181,7 @@ class SMSLoaderCSR(LiteXModule):
             CSRField("hold",  size=1, offset=0,             description="Hold the SMS in reset while loading."),
             CSRField("flush", size=1, offset=1, pulse=True, description="Invalidate the cartridge cache."),
         ])
+        self.mask = CSRStorage(22, reset=2**22 - 1, description="Cartridge address mask (ROM size - 1, power of 2).")
 
         # # #
 
@@ -188,6 +189,7 @@ class SMSLoaderCSR(LiteXModule):
         self.comb += [
             core.ld_hold.eq(self.control.fields.hold),
             core.cart_flush.eq(self.control.fields.flush),
+            core.cart_mask.eq(self.mask.storage), # Quasi-static: written while the core is held.
         ]
         # Cache debug/stats CSRs: off by default -- the design fills the GW5A-25's BSRAM (56/56) and
         # is routing-bound, so the extra CSR nets fail to route. Enable only for bring-up debugging
@@ -225,6 +227,7 @@ class SMSCore(LiteXModule):
         # in reset while the host uploads the ROM into the PSRAM, and flush the cache afterwards.
         self.ld_hold    = Signal()
         self.cart_flush = Signal()
+        self.cart_mask  = Signal(22, reset=2**22 - 1) # ROM-size address mask (host-set, like MiSTer).
         self.dbg        = Signal(32) # Debug CSR payload (color+raster, or the VDP I/O handshake when hw_debug).
 
         # # #
@@ -306,7 +309,9 @@ class SMSCore(LiteXModule):
             self.cart = cart = CoreROMCache(cart_port, cart_port_dout, base=SMS_ROM_BASE,
                 addr_width=22, lines=128, core_cd="sms")
             self.comb += [
-                cart.addr.eq(rom_a),
+                # Mask by the ROM size (power of 2): bank numbers past the end wrap like on a real
+                # cartridge (e.g. Alex Kidd, Fantasy Zone) instead of reading PSRAM past the ROM.
+                cart.addr.eq(rom_a & self.cart_mask),
                 cart.rd.eq(rom_rd & ~reset), # Only fault in lines for real cartridge reads.
                 cart.flush.eq(self.cart_flush),
                 rom_do.eq(cart.data),
