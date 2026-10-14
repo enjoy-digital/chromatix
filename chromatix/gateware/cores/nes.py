@@ -189,8 +189,8 @@ class NESMemory(LiteXModule):
 class NESJoypad(LiteXModule):
     """
     The console buttons -> the NES standard controller serial protocol. While `strobe` (joypad_out[0])
-    is high, the button state is (re)latched; each `clock` (joypad_clock[0]) rising edge then shifts
-    out the next button. Report order: A, B, Select, Start, Up, Down, Left, Right. `data` is
+    is high, the button state is (re)latched; each `clock` (joypad_clock[0]) falling edge (end of the
+    $4016 read) then shifts out the next button. Report order: A, B, Select, Start, Up, Down, Left, Right. `data` is
     joypad1_data[0] (1 = pressed, the MiSTer NES convention).
     """
     def __init__(self, cd="nes"):
@@ -218,7 +218,10 @@ class NESJoypad(LiteXModule):
             clock_d.eq(self.clock),
             If(self.strobe,
                 shift.eq(buttons),
-            ).Elif(self.clock & ~clock_d, # Clock rising edge.
+            # Shift on the clock FALLING edge: nes.v holds joypad_clock high for the whole $4016 read
+            # and the CPU samples the data during it -- shifting on the rising edge made each read
+            # return the next button (Start seen as Select...). Same as nestang's top.
+            ).Elif(~self.clock & clock_d,
                 shift.eq(Cat(shift[1:], 1)), # Shift; official controllers return 1 after 8 reads.
             ),
         ]

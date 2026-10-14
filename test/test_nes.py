@@ -97,9 +97,13 @@ def test_nes_joypad():
         yield dut.strobe.eq(0); yield
         for i, name in enumerate(order):
             assert (yield dut.data) == pressed[name], name
-            # Clock rising edge -> next button.
+            # A $4016 read: nes.v holds the clock high while the CPU samples the data, which must
+            # still be this button; the shift to the next one happens on the falling edge.
             yield dut.clock.eq(1); yield
-            yield dut.clock.eq(0); yield
+            for _ in range(3):
+                yield
+                assert (yield dut.data) == pressed[name], (name, "during read")
+            yield dut.clock.eq(0); yield; yield # Falling edge, then the registered shift.
         # After 8 reads, official controllers return 1.
         assert (yield dut.data) == 1
 
