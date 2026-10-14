@@ -4,9 +4,20 @@ A reusable LiteX "shell" to host a third-party FPGA core (a MiSTer / Tang-lineag
 Sega Master System / Game Gear, ...) on the Chromatic (Gowin **GW5A-25**), in place of the Game Boy
 core, reusing the video pipeline, PSRAM, audio and buttons unchanged.
 
-Status (incremental): the shell, the downscaler and a first worked core (**NES**) are implemented and
-**verified on hardware** — a NES game (the bundled `nes15`) renders and is playable on the Chromatic,
-downscaled to 160×144 and shown over UVC. This document is the methodology to port another.
+Status: two cores run **commercial games on hardware**, loaded from the PC at runtime (no rebuild):
+- **NES** (`--core nes --with-debug-bridge`, `nes-load`): NROM / mapper-0 games (32 KB PRG + 8 KB
+  CHR window). Super Mario Bros. is playable (Start → World 1-1, run/jump/scroll); Donkey Kong,
+  Galaga, Excitebike, Ice Climber, Pac-Man, Balloon Fight, Xevious render their title/attract modes.
+  Downscaled 256×240 → 160×144.
+- **Game Gear** (`--core sms --sms-game-gear --with-debug-bridge`, `sms-load`): Sega-mapper ROMs
+  from the PSRAM cartridge cache. Sonic the Hedgehog is playable (title → Green Hill, rings,
+  enemies); Columns, Aleste, Fantasy Zone Gear, Bubble Bobble boot. Native 160×144, 1:1.
+- **Master System** (`--core sms`): BG tile pipeline verified with test ROMs; commercial games next.
+
+Scripted play-testing works end-to-end: `scripts/chromatic.py sequence "press:start@0.2 wait:3
+buttons:dpad_right+a wait:1 capture:shot.png"` (virtual buttons are OR'ed with the console's; hold
+everything in one `sequence` — the script releases all buttons on exit). This document is the
+methodology to port another core.
 
 ## Why this is a "MiST-class", not a "MiSTer-class", target
 
@@ -344,6 +355,17 @@ Why SMS/GG is a good second target and what is *new* vs. the NES:
 - **Work RAM** `ram_*` (8 KB) → inferred BRAM; VDP VRAM (16 KB) is internal. **Audio** `audioL/R`
   (jt89 PSG + optional VM2413 FM — disable FM to save area) → the shared bus. **Input** `j1_*` ←
   console buttons.
+
+Bugs found running real games (all fixed; worth checking in any new port):
+- **Downscaler row advance on blanked lines.** hblank keeps toggling during vertical blanking; a
+  downscaler that advances its output row on every hblank pushes the picture down by
+  `vblank_lines*out_h/in_h` (Game Gear 1:1: ~118 rows, only the top of the game visible at the
+  bottom; SMS ~52; NES ~13). Only lines that carried active pixels may advance the row.
+- **Game Gear Start is `pause`, not `j1_start`.** Port `$00` bit 7 reads system.v's active-low
+  `pause` (also the SMS Pause/NMI). Tied to 0 it is "Start held": games skip the title, then stay
+  paused.
+- **NES joypad shift edge.** nes.v holds `joypad_clock` high for the whole `$4016` read; shift on
+  its *falling* edge or every read returns the next button (Start seen as Select).
 
 The combined build is GPL; the shell/glue stays BSD (upstreamable).
 
