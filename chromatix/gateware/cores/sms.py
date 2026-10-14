@@ -401,7 +401,9 @@ class SMSCore(LiteXModule):
             # Controller 2 (idle, active low).
             i_j2_up = 1, i_j2_down = 1, i_j2_left = 1, i_j2_right = 1, i_j2_tl = 1, i_j2_tr = 1,
             i_j2_th = 1, i_j2_start = 1, i_j2_coin = 1, i_j2_a3 = 1,
-            i_pause           = 0,
+            # Active low: the Game Gear Start button (port $00 bit 7) / the SMS Pause button (NMI).
+            # Tying it to 0 reads as Start held forever (GG games skip the title, then stay paused).
+            i_pause           = ~buttons.start,
             # Peripherals / DIP (inactive).
             i_E0Type = 0, i_E1Use = 0, i_E2Use = 0, i_E0 = 0xff, i_F2 = 0xff, i_F3 = 0xff,
             i_has_paddle = 0, i_has_pedal = 0, i_paddle = 0, i_paddle2 = 0, i_pedal = 0,
