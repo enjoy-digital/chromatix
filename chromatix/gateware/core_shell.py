@@ -143,6 +143,45 @@ def add_core_clock_constraints(platform, pll, n, name, clkin="clk_24"):
         f"set_clock_groups -asynchronous -group [get_clocks {{{name}}}] -group [get_clocks {{PHY_CLKOUT}}]",
     ]
 
+# Core Audio DC Blocker ----------------------------------------------------------------------------
+
+class CoreAudioDCBlocker(LiteXModule):
+    """Removes the DC offset of a core's audio (ex the NES APU mixer, unipolar: its output idles far
+    from mid-scale and wastes half the headroom). One-pole high-pass on a strobe every `div` cycles:
+    dc += (x - dc) >> shift, y = sat16(x - dc). With the NES clock (21.48 MHz), div=512, shift=10:
+    fs ~ 42 kHz, cutoff ~ fs/(2*pi*2**shift) ~ 6.5 Hz (inaudible), settles in ~25 ms. `sink`/`source`
+    are signed 16-bit, in the domain the module is clocked in."""
+    def __init__(self, div=512, shift=10):
+        self.sink   = Signal((16, True))
+        self.source = Signal((16, True))
+
+        # # #
+
+        strobe = Signal()
+        count  = Signal(max=div)
+        self.sync += [
+            strobe.eq(count == 0),
+            count.eq(Mux(count == div - 1, 0, count + 1)),
+        ]
+
+        acc  = Signal((16 + shift + 1, True)) # dc << shift.
+        dc   = Signal((17, True))
+        diff = Signal((18, True))
+        self.comb += [
+            dc.eq(acc >> shift),
+            diff.eq(self.sink - dc),
+        ]
+        self.sync += [
+            If(strobe, acc.eq(acc + diff)),
+            If(diff > 32767,
+                self.source.eq(32767),
+            ).Elif(diff < -32768,
+                self.source.eq(-32768),
+            ).Else(
+                self.source.eq(diff),
+            ),
+        ]
+
 class CoreVideo:
     """The generic "core video" interface a hosted core presents (its native resolution clock domain):
     a pixel clock-enable, 5:5:5 color, and horizontal/vertical blanking. Active pixel = ce & ~hblank &

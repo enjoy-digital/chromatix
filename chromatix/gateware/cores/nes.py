@@ -33,7 +33,7 @@ from litex.gen import *
 from litex.soc.interconnect.csr      import CSRStorage, CSRField
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
 
-from chromatix.gateware.core_shell import CoreVideo, rgb555, add_core_clock_constraints
+from chromatix.gateware.core_shell import CoreVideo, CoreAudioDCBlocker, rgb555, add_core_clock_constraints
 from chromatix.gateware.framebuffer import GBLCDTiming
 from chromatix.gateware.cores.rom_cache import CoreROMCache
 
@@ -876,11 +876,12 @@ class NESCore(LiteXModule):
             i_gg_reset       = 0,
         )
         # APU sample: unsigned (MiSTer NES: AUDIO_S = 0) -> signed for the shared bus (it was fed as
-        # signed: every crossing of mid-scale wrapped -- loud distortion), halved for headroom (as
-        # nestang's sample >> 1): (sample ^ 0x8000) >>> 1.
-        audio = Signal(16)
+        # signed: every crossing of mid-scale wrapped -- loud distortion): sample ^ 0x8000. The mixer
+        # is unipolar (idles near the bottom, measured 3032..16383), so its DC is removed (instead of
+        # the former >>> 1 headroom halving): centered, the full 16-bit range is available.
+        self.dc_blocker = dc_blocker = ClockDomainsRenamer("nes")(CoreAudioDCBlocker())
         self.comb += [
-            audio.eq(Cat(sample[1:15], ~sample[15], ~sample[15])),
-            self.left.eq(audio),
-            self.right.eq(audio),
+            dc_blocker.sink.eq(Cat(sample[:15], ~sample[15])),
+            self.left.eq(dc_blocker.source),
+            self.right.eq(dc_blocker.source),
         ]

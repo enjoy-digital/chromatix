@@ -8,7 +8,7 @@ from migen import *
 
 from litex.gen.sim import run_simulation
 
-from chromatix.gateware.core_shell import CoreTestPattern, CoreVideoDownscaler, COLOR_BARS, rgb555
+from chromatix.gateware.core_shell import CoreTestPattern, CoreVideoDownscaler, CoreAudioDCBlocker, COLOR_BARS, rgb555
 
 # CoreTestPattern ----------------------------------------------------------------------------------
 
@@ -145,3 +145,24 @@ def test_core_video_downscaler_vblank_lines():
                 assert (c & 0x1f, (c >> 5) & 0x1f) == (xo, yo), (xo, yo, c)
 
     run_simulation(dut, {"sys": gen()}, clocks={"sys": 10, "hclk": 10})
+
+def test_core_audio_dc_blocker():
+    # Square wave around a large negative offset (NES-like unipolar mixer): after settling, the
+    # output is centered (mean ~0) with the same peak-to-peak; saturation is checked at the start.
+    dut = CoreAudioDCBlocker(div=4, shift=6)
+    outputs = []
+    def gen():
+        yield dut.sink.eq(-30000)
+        yield
+        yield
+        assert (yield dut.source) == -30000 # No DC estimate yet.
+        for i in range(8000):
+            yield dut.sink.eq(-20000 + (4000 if (i//64) % 2 else -4000))
+            yield
+            outputs.append((yield dut.source))
+    run_simulation(dut, gen())
+    tail = outputs[-1024:]
+    mean = sum(tail)/len(tail)
+    assert abs(mean) < 400
+    assert max(tail) - min(tail) > 7000
+    assert max(tail) < 6000 and min(tail) > -6000
