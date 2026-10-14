@@ -30,15 +30,17 @@ from migen.genlib.cdc     import MultiReg
 
 from litex.gen import *
 
-from litex.soc.interconnect.csr      import CSRStorage, CSRField
+from litex.soc.interconnect.csr      import CSRStorage, CSRStatus, CSRField
 from litex.soc.cores.clock.gowin_gw5a import GW5APLL
 
 from chromatix.gateware.core_shell import CoreVideo, CoreAudioDCBlocker, rgb555, add_core_clock_constraints
 from chromatix.gateware.framebuffer import GBLCDTiming
-from chromatix.gateware.cores.rom_cache import CoreROMCache
+from chromatix.gateware.cores.rom_cache import CoreROMCache, CoreBankCache
 
 NES_RTL_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "verilog", "cores", "nes")
 NES_PRG_BASE = 0x400000 # PRG-ROM placed here in the PSRAM (host upload, PSRAM-cartridge builds).
+NES_CHR_BASE = 0x600000 # Large CHR-ROM placed here in the PSRAM (CHR bank cache), after 2 MB of PRG.
+NES_CHR_BANK_BITS = 8   # CHR bank cache: up to 256 x 1 KB banks (256 KB: the MMC3 maximum).
 NES_MAPPERS  = [0, 1, 2, 3, 4, 7, 66] # Mapper subset of the PSRAM-cartridge builds: NROM, MMC1, UxROM,
                                       # CNROM, MMC3, AxROM, GxROM (all mappers do not fit the GW5A-25).
 NES_CHR_KB   = 32 # CHR-ROM window (BRAM) of the PSRAM-cartridge builds (CNROM, small MMC1/MMC3).
@@ -123,7 +125,7 @@ class NESMemory(LiteXModule):
     So hits cost nothing and a miss pauses the NES coherently (the video path is decoupled).
     """
     def __init__(self, prg_kb=32, chr_kb=8, cd="nes", read_cd=None, prg_init=None, chr_init=None,
-                 with_load=False, load_cd="sys", prg_cache=None, with_ram=False):
+                 with_load=False, load_cd="sys", prg_cache=None, with_ram=False, chr_cache=None):
         read_cd = read_cd or cd
         # Channel B: CPU (PRG-ROM reads, CPU-RAM/PRG-RAM reads/writes).
         self.b_addr  = Signal(22)
@@ -154,7 +156,10 @@ class NESMemory(LiteXModule):
         # # #
 
         sync   = getattr(self.sync, cd)
-        chr    = Memory(8, chr_kb*1024, init=chr_init)
+        # With chr_cache, CHR is 16-bit wide (a bank fill writes one PSRAM word per cycle), bytes
+        # selected by address bit 0 (and byte write enables).
+        chr_w  = 16 if chr_cache is not None else 8
+        chr    = Memory(chr_w, chr_kb*1024*8//chr_w, init=chr_init)
         cpuram = Memory(8, 2048) # CPU RAM (0x380000), read/write.
         ciram  = Memory(8, 2048) # Nametable CIRAM (0x300000), read/write.
         chr_rd    = chr.get_port(clock_domain=read_cd)
@@ -170,7 +175,29 @@ class NESMemory(LiteXModule):
         # registers: "DFF exceeds the resource limit").
 
         a_is_chr = (self.a_addr[20:22] == 0b10) # 0x200000: CHR (ROM, or RAM if the mapper allows).
-        if with_ram:
+        if chr_cache is not None:
+            # One write port (read_cd: the cache fill runs there) shared by the bank fills, the
+            # loader (core held in reset) and the PPU (CHR-RAM). The loader/PPU writes last a whole
+            # core cycle, so they are just repeated on the faster read_cd clock.
+            assert with_ram and load_cd == cd
+            chr_wr = chr.get_port(write_capable=True, we_granularity=8, clock_domain=read_cd)
+            self.specials += chr_wr
+            ld_chr  = self.load_we & self.load_sel
+            wr_addr = Mux(ld_chr, self.load_addr, self.a_addr)
+            wr_data = Mux(ld_chr, self.load_data, self.a_din)
+            wr_we   = ld_chr | (self.a_write & a_is_chr)
+            self.comb += [
+                If(chr_cache.fill_we,
+                    chr_wr.adr.eq(chr_cache.fill_adr),
+                    chr_wr.dat_w.eq(chr_cache.fill_data),
+                    chr_wr.we.eq(0b11),
+                ).Else(
+                    chr_wr.adr.eq(wr_addr[1:1 + len(chr_wr.adr)]),
+                    chr_wr.dat_w.eq(Cat(wr_data, wr_data)),
+                    chr_wr.we.eq(Mux(wr_addr[0], 0b10, 0b01) & Replicate(wr_we, 2)),
+                ),
+            ]
+        elif with_ram:
             # One write port (cd) shared by the loader (core held in reset) and the PPU (CHR-RAM).
             assert load_cd == cd
             chr_wr = chr.get_port(write_capable=True, clock_domain=cd)
@@ -200,7 +227,9 @@ class NESMemory(LiteXModule):
             a_is_ciram  = self.a_addr[20]
 
         # PRG-ROM.
-        prg_data = Signal(8)
+        prg_data  = Signal(8)
+        prg_stall = Signal()
+        self.comb += self.stall.eq(prg_stall | (chr_cache.stall if chr_cache is not None else 0))
         if prg_cache is None:
             prg    = Memory(8, prg_kb*1024, init=prg_init)
             prg_rd = prg.get_port(clock_domain=read_cd)
@@ -228,7 +257,7 @@ class NESMemory(LiteXModule):
                 c.addr.eq(addr_l),
                 c.rd.eq(pending),
                 # Freeze only a read that is still unserved 2 cycles in (a hit is served by then).
-                self.stall.eq(pending & age[1]),
+                prg_stall.eq(pending & age[1]),
             ]
             sync += [
                 rd_d.eq(rd_prg),
@@ -247,11 +276,27 @@ class NESMemory(LiteXModule):
                 ),
             ]
 
+        # CHR reads: direct (CHR <= chr_kb, or CHR-RAM), or through the bank cache (large CHR-ROM:
+        # bank -> slot, the core frozen on a miss).
+        if chr_cache is not None:
+            self.comb += [
+                chr_cache.addr.eq(self.a_addr),
+                chr_cache.rd.eq(self.a_read & a_is_chr),
+                If(chr_cache.enable,
+                    chr_rd.adr.eq(Cat(self.a_addr[1:chr_cache.offset_bits], chr_cache.slot)),
+                ).Else(
+                    chr_rd.adr.eq(self.a_addr[1:1 + len(chr_rd.adr)]),
+                ),
+            ]
+            chr_data = Mux(self.a_addr[0], chr_rd.dat_r[8:16], chr_rd.dat_r[0:8])
+        else:
+            self.comb += chr_rd.adr.eq(self.a_addr[:len(chr_rd.adr)])
+            chr_data = chr_rd.dat_r
+
         # CPU reads, PPU reads, RAM writes.
         b_read_mux = Mux(b_is_ram, cpuram_rd.dat_r, prg_data)
-        a_read_mux = Mux(a_is_ciram, ciram_rd.dat_r, chr_rd.dat_r)
+        a_read_mux = Mux(a_is_ciram, ciram_rd.dat_r, chr_data)
         self.comb += [
-            chr_rd.adr.eq(self.a_addr[:len(chr_rd.adr)]),
             cpuram_rd.adr.eq(self.b_addr[:11]),
             ciram_rd.adr.eq(self.a_addr[:11]),
             cpuram_wr.adr.eq(self.b_addr[:11]),
@@ -567,13 +612,18 @@ class NESLoaderCSR(LiteXModule):
                 CSRField("hold",     size=1, offset=0,             description="Hold the NES in reset while loading."),
                 CSRField("sel",      size=1, offset=1,             description="Load target: 1 = CHR (PRG is in the PSRAM)."),
                 CSRField("addr_rst", size=1, offset=5, pulse=True, description="Reset the load address to 0 (before each section)."),
-                CSRField("flush",    size=1, offset=6, pulse=True, description="Invalidate the PRG cache."),
+                CSRField("flush",    size=1, offset=6, pulse=True, description="Invalidate the PRG (and CHR) caches."),
+                CSRField("chr_cache", size=1, offset=7,            description="CHR-ROM in the PSRAM (NES_CHR_BASE) through the CHR bank cache."),
             ])
             self.flags = CSRStorage(32, reset=core.ld_default_flags, description="mapper_flags[31:0] (iNES header, as game_loader.v).")
+            if getattr(core, "chr_cache", None) is not None:
+                self.chr_misses = CSRStatus(32, description="CHR bank cache misses (nes4x, debug: approximate read).")
+                self.specials += MultiReg(core.chr_cache.misses, self.chr_misses.status)
             self.comb += [
                 core.cfg_flags.eq(self.flags.storage),
                 # As the SMS loader: the sys (gClk) pulse spans 2+ nes cycles, seen by the cache.
                 core.cart_flush.eq(self.control.fields.flush),
+                core.cfg_chr_cache.eq(self.control.fields.chr_cache),
             ]
         else:
             self.control = CSRStorage(fields=[
@@ -617,7 +667,8 @@ class NESCore(LiteXModule):
     up to NES_CHR_KB in BRAM, plus CHR-RAM and PRG-RAM (see NESMemory).
     """
     def __init__(self, platform, clk, clk_freq, buttons, rom="nes15.hex", with_pll=True,
-                 with_loader=False, cart_port=None, cart_port_dout=None, cart_ready=None):
+                 with_loader=False, cart_port=None, cart_port_dout=None, cart_ready=None,
+                 chr_port=None):
         self.gb_clkena = Signal()
         self.gb_data   = Signal(15)
         self.gb_mode   = Signal(2)
@@ -639,7 +690,9 @@ class NESCore(LiteXModule):
         # PSRAM-cartridge loader (cart_port): mapper_flags[31:0] and the PRG cache flush (pulse).
         self.cfg_flags   = Signal(32)
         self.cart_flush  = Signal()
+        self.cfg_chr_cache = Signal() # 1 = CHR-ROM > NES_CHR_KB: served through the CHR bank cache.
         self.prg_cache   = None
+        self.chr_cache   = None
 
         # # #
 
@@ -715,8 +768,21 @@ class NESCore(LiteXModule):
             self.prg_cache = cache = CoreROMCache(cart_port, cart_port_dout, base=NES_PRG_BASE,
                 addr_width=21, lines=128, core_cd="nes")
             self.comb += cache.flush.eq(self.cart_flush)
+            # Large CHR-ROM (MMC1/MMC3: 64-256 KB, the host uploads it at NES_CHR_BASE): the CHR BRAM
+            # becomes NES_CHR_KB 1 KB slots of a bank cache (the console freezes on a bank miss).
+            if chr_port is not None:
+                self.chr_cache = chr_cache = CoreBankCache(chr_port, cart_port_dout,
+                    base=NES_CHR_BASE, bank_bits=NES_CHR_BANK_BITS, bank_size=1024,
+                    slots=NES_CHR_KB, cd="nes4x")
+                chr_cache_en = Signal()
+                self.specials += MultiReg(self.cfg_chr_cache, chr_cache_en, "nes4x")
+                self.comb += [
+                    chr_cache.enable.eq(chr_cache_en),
+                    chr_cache.flush.eq(self.cart_flush),
+                ]
             self.mem = mem = NESMemory(chr_kb=NES_CHR_KB, cd="nes", read_cd="nes4x",
-                with_load=True, load_cd="nes", prg_cache=cache, with_ram=True)
+                with_load=True, load_cd="nes", prg_cache=cache, with_ram=True,
+                chr_cache=self.chr_cache)
         else:
             if with_loader:
                 prg_kb, chr_kb = 32, 8

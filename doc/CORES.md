@@ -6,12 +6,14 @@ core, reusing the video pipeline, PSRAM, audio and buttons unchanged.
 
 Status: two cores run **commercial games on hardware**, loaded from the PC at runtime (no rebuild):
 - **NES** (`--core nes --with-debug-bridge`, `nes-load`): PRG (up to 2 MB) from the PSRAM through a
-  cache (the console freezes only on a miss), CHR ≤ 32 KB or CHR-RAM in BRAM, 8 KB PRG-RAM; mappers
-  NROM, MMC1, UxROM, CNROM, MMC3, AxROM, GxROM (a synthesis-time mask: all mappers do not fit) —
-  ~305 of a 706-game library (large-CHR MMC1/MMC3 titles are next). Super Mario Bros. playable;
-  Zelda (file select / PRG-RAM), Metroid, Kid Icarus, Mega Man, Castlevania, Contra, Duck Tales,
-  Battletoads, Arkanoid, Donkey Kong, Galaga… render title/attract modes. Downscaled 256×240 →
-  160×144 on the panel.
+  line cache, CHR ≤ 32 KB or CHR-RAM in BRAM, larger CHR-ROM (≤ 256 KB) from the PSRAM through a
+  **CHR bank cache** (the console freezes only on a miss, for either), 8 KB PRG-RAM; mappers NROM,
+  MMC1, UxROM, CNROM, MMC3, AxROM, GxROM (a synthesis-time mask: all mappers do not fit) — **636 of a
+  706-game library** (the rest: other mappers). Super Mario Bros. and Super Mario Bros. 3 (World 1-1,
+  59.5 fps) playable; Kirby's Adventure, Mega Man III/IV, Zelda II, SMB2, Ninja Gaiden, Castlevania
+  II, Double Dragon II, Zelda (file select / PRG-RAM), Metroid, Kid Icarus, Mega Man, Castlevania,
+  Contra, Duck Tales, Battletoads, Arkanoid… render title/menus. Downscaled 256×240 → 160×144 on the
+  panel.
 - **Game Gear** (`--core sms --sms-game-gear --with-debug-bridge`, `sms-load`): Sega-mapper ROMs
   from the PSRAM cartridge cache. Sonic the Hedgehog is playable (title → Green Hill, rings,
   enemies); Columns, Aleste, Fantasy Zone Gear, Bubble Bobble boot. Native 160×144, 1:1.
@@ -109,6 +111,14 @@ read. So:
 - **ROM** → **BRAM** for a small game (NROM ≤ 40 KB fits once the frame buffer is on PSRAM), or
   **PSRAM behind a cache** (reuse `VirtualCart`'s direct-mapped 16-byte-line cache, freezing the core
   on a miss) for larger ROMs/mappers.
+- A **large ROM read at video rate** (NES CHR-ROM: the PPU fetches every few cycles, random over a
+  128–256 KB ROM) → **PSRAM behind a bank cache** (`CoreBankCache`): the BRAM holds N 1 KB banks
+  ("slots"), a bank → slot map (distributed RAM) translates each read combinationally, a miss freezes
+  the core while the whole bank arrives in one 1 KB PSRAM burst (second-chance eviction). The PPU sees
+  only 8 KB at once, so 32 slots hold the working set and bank switches (MMC3 status bars, CHR
+  animation) are free after the warm-up. Generic: it translates the physical ROM address the mapper
+  outputs, no mapper knowledge. Cost: ~2K LUT (the 256-entry map lands in registers), no extra BSRAM
+  (it reuses the 32 KB CHR BRAM).
 - The **frame buffer** → **PSRAM** (triple-buffered, the `LCDPSRAMFramebuffer` reader), to keep BRAM
   for the core and remove tearing.
 
@@ -135,7 +145,10 @@ ESP32/SD QSPI 1 KB upload) is a later step.
 - **Input**: the console buttons (`Buttons`/`ButtonsCSR`, D-pad + A/B + Start/Select, plus the ESP32
   `mcu_buttons`) map to the core's joystick (`CoreInput`).
 - **Audio**: the core's 16-bit samples drive the shared `left/right` bus → `CodecI2S` → TLV320 (as
-  the Game Boy audio does); no PWM.
+  the Game Boy audio does); no PWM. Samples are signed: convert an unsigned core output
+  (`x ^ 0x8000`), else every mid-scale crossing wraps. A unipolar mixer (NES APU: idles near the
+  bottom of the range) goes through `CoreAudioDCBlocker` (one-pole high-pass, ~6.5 Hz), which
+  centres it and frees the headroom: measured on SMB, mean −23K → ~0 and peaks ±18K, no clipping.
 
 ## Build, flash, test
 
@@ -409,6 +422,19 @@ The combined build is GPL; the shell/glue stays BSD (upstreamable).
   integer multiple of the core clock, assert "ready" a cycle early for sequential bursts, put slow
   sub-CPUs (Z80) on a clock-enable, and rebuild cycle-counting cores as low-clock replicas (Gowin
   Fmax is modest).
+- **What else fits the GW5A-25** (Gowin synthesis of each core alone, measured 2026-10; the shell
+  itself is ~8.3K LUT + 12 BSRAM with USB/UVC/UAC, PSRAM, LCD and the debug bridge):
+
+  | Core (nand2mario)      | Logic (LUT+ALU) | BSRAM | Verdict |
+  |------------------------|-----------------|-------|---------|
+  | `nestang` (NES)        | ~5.4K (build − shell) | ~36 (incl. 32 KB CHR, FB) | ported  |
+  | `smstang` (SMS/GG)     | ~8K (build − shell)   | ~33   | ported  |
+  | `snestang` (SNES, `main`) | 13.8K        | 17 (+32 for the 64 KB VRAM) | no: logic ~96% with the shell; VRAM+WRAM+ARAM (256 KB) need 3 low-latency channels (SDRAM CL2 at 4× mclk on the Tang boards), the PSRAM has one, ~3.4 µs |
+  | `mdtang` (Mega Drive, `system`) | 15.9K  | 57    | no: over 56 BSRAM alone, >100% logic with the shell |
+  | `pctang` (PC/XT, full top) | 8.3K       | 69    | no: BSRAM; and a PC needs a keyboard/disk images |
+  | `gbatang` (GBA)        | —               | —     | no: targets the 60K/138K parts only |
+
+  NES and SMS/GG are the cores this silicon can host; SNES is the closest miss.
 - **Harbaum / MiSTle**: `MiSTeryNano` (has a GW5A-25 + LCD build), `FPGA-Companion` (an MCU — incl.
   ESP32 — replaces the MiSTer HPS over SPI: `mcu_spi`/`sysctrl`/`hid`/`sd_card`/`osd_u8g2`). The
   reference for the later ESP32-as-host step.

@@ -173,3 +173,174 @@ class CoreROMCache(LiteXModule):
                 busy.eq(0), done_toggle.eq(~done_toggle),
             ),
         ]
+
+# Core Bank Cache ----------------------------------------------------------------------------------
+
+class CoreBankCache(LiteXModule):
+    """
+    Read-only bank cache for a core whose data must be served every few cycles from a window of a
+    large ROM, ex the NES PPU reading a 128/256 KB MMC1/MMC3 CHR-ROM: far too large for BRAM, and the
+    PSRAM's ~3.4 us latency excludes a line cache on such a fetch rate. The ROM (in the PSRAM at
+    `base`) is split in `bank_size`-byte banks; `slots` of them are held in a BRAM owned by the caller
+    (the core reads it at Cat(addr[:offset], slot)). A bank -> slot map (distributed RAM) translates
+    each read combinationally; a read of an absent bank asserts `stall` (the core must freeze), the
+    bank is fetched in one PSRAM burst (`fill_*` writes, `cd` domain) into a victim slot (second chance:
+    slots read since the last pass are spared), the map is updated, then the core is released. A
+    console only sees a few banks at once (the NES PPU: 8 KB), so after a warm-up switching banks is
+    free. Generic: the translation is on the ROM address the core (its mapper) presents, so no mapper
+    knowledge is needed.
+
+    All in `cd` (a fast clock synchronous to the core's, ex nes4x: the core's addr/rd are stable for
+    a core cycle). `port` is a MultiPortRAMCtrl port (xClk), `port_dout` its shared read data.
+    """
+    def __init__(self, port, port_dout, base=0, bank_bits=8, bank_size=1024, slots=32, cd="nes4x"):
+        offset_bits = log2_int(bank_size)
+        slot_bits   = log2_int(slots)
+        words       = bank_size//2
+        self.addr       = Signal(bank_bits + offset_bits) # Byte address into the ROM.
+        self.rd         = Signal()                        # ROM read active.
+        self.enable     = Signal()                        # 0: no lookup, no stall (direct mapping).
+        self.slot       = Signal(slot_bits)               # Slot of addr's bank (valid on a hit).
+        self.stall      = Signal()
+        self.flush      = Signal()                        # Invalidate all the slots.
+        self.fill_we    = Signal()                        # Fill write (cd): 16-bit word...
+        self.fill_adr   = Signal(slot_bits + offset_bits - 1) # ... at this word address of the BRAM.
+        self.fill_data  = Signal(16)
+        self.misses     = Signal(32)
+        self.offset_bits = offset_bits
+
+        # # #
+
+        sync = getattr(self.sync, cd)
+
+        # Bank -> (valid, slot) map and slot -> bank owner table (distributed RAM, async read).
+        bmap     = Memory(1 + slot_bits, 2**bank_bits)
+        owner    = Memory(bank_bits, slots)
+        bmap_rd  = bmap.get_port(async_read=True)
+        bmap_wr  = bmap.get_port(write_capable=True, clock_domain=cd)
+        owner_rd = owner.get_port(async_read=True)
+        owner_wr = owner.get_port(write_capable=True, clock_domain=cd)
+        self.specials += bmap, owner, bmap_rd, bmap_wr, owner_rd, owner_wr
+        owner_valid = Signal(slots)
+        referenced  = Signal(slots)
+
+        bank = self.addr[offset_bits:]
+        hit  = Signal()
+        self.comb += [
+            bmap_rd.adr.eq(bank),
+            hit.eq(bmap_rd.dat_r[0]),
+            self.slot.eq(bmap_rd.dat_r[1:]),
+        ]
+
+        # Fill words (xClk -> cd).
+        self.fill_cdc = fill_cdc = stream.ClockDomainCrossing([("data", 16)],
+            cd_from = "xclk", cd_to = cd, depth = 16)
+
+        req_bank    = Signal(bank_bits)
+        victim      = Signal(slot_bits)
+        fill_word   = Signal(offset_bits - 1)
+        flush_index = Signal(bank_bits)
+        settle      = Signal(2)
+        req_toggle  = Signal()
+        done_toggle = Signal()
+        done_sync   = Signal()
+        done_seen   = Signal()
+        self.specials += MultiReg(done_toggle, done_sync, cd)
+
+        sync += If(self.enable & self.rd & hit & ~self.stall,
+            referenced.eq(referenced | (1 << self.slot)))
+
+        self.fsm = fsm = ClockDomainsRenamer(cd)(FSM(reset_state="FLUSH"))
+        fsm.act("FLUSH",
+            self.stall.eq(self.enable),
+            bmap_wr.adr.eq(flush_index), bmap_wr.dat_w.eq(0), bmap_wr.we.eq(1),
+            NextValue(flush_index, flush_index + 1),
+            NextValue(owner_valid, 0),
+            NextValue(referenced, 0),
+            If(flush_index == (2**bank_bits - 1), NextState("IDLE")),
+        )
+        fsm.act("IDLE",
+            If(self.flush,
+                NextValue(flush_index, 0), NextState("FLUSH"),
+            ).Elif(self.enable & self.rd & ~hit,
+                self.stall.eq(1),
+                NextValue(req_bank, bank),
+                NextState("VICTIM"),
+            ),
+        )
+        # Second chance: skip (and clear) the slots read since the last pass.
+        fsm.act("VICTIM",
+            self.stall.eq(1),
+            If(Array(referenced[i] for i in range(slots))[victim],
+                NextValue(referenced, referenced & ~(1 << victim)),
+                NextValue(victim, victim + 1),
+            ).Else(
+                NextState("EVICT"),
+            ),
+        )
+        fsm.act("EVICT",
+            self.stall.eq(1),
+            owner_rd.adr.eq(victim),
+            bmap_wr.adr.eq(owner_rd.dat_r), bmap_wr.dat_w.eq(0),
+            bmap_wr.we.eq(Array(owner_valid[i] for i in range(slots))[victim]),
+            NextValue(fill_word, 0),
+            NextValue(req_toggle, ~req_toggle),
+            NextState("FILL"),
+        )
+        fsm.act("FILL",
+            self.stall.eq(1),
+            fill_cdc.source.ready.eq(1),
+            If(fill_cdc.source.valid,
+                NextValue(fill_word, fill_word + 1),
+                If(fill_word == (words - 1), NextState("FILL-DONE")),
+            ),
+        )
+        fsm.act("FILL-DONE",
+            self.stall.eq(1),
+            If(done_sync != done_seen, NextValue(done_seen, done_sync), NextState("MAP")),
+        )
+        fsm.act("MAP",
+            self.stall.eq(1),
+            bmap_wr.adr.eq(req_bank), bmap_wr.dat_w.eq(Cat(1, victim)), bmap_wr.we.eq(1),
+            owner_wr.adr.eq(victim), owner_wr.dat_w.eq(req_bank), owner_wr.we.eq(1),
+            NextValue(owner_valid, owner_valid | (1 << victim)),
+            NextValue(referenced, referenced | (1 << victim)),
+            NextValue(victim, victim + 1),
+            NextValue(settle, 0),
+            NextState("SETTLE"),
+        )
+        fsm.act("SETTLE",
+            self.stall.eq(1), # The caller's BRAM read (registered) settles on the new slot.
+            NextValue(settle, settle + 1),
+            If(settle == 3, NextState("IDLE")),
+        )
+        self.comb += [
+            self.fill_we.eq(fsm.ongoing("FILL") & fill_cdc.source.valid),
+            self.fill_adr.eq(Cat(fill_word, victim)),
+            self.fill_data.eq(fill_cdc.source.data),
+        ]
+        sync += If(fsm.ongoing("IDLE") & self.enable & self.rd & ~hit & ~self.flush,
+            self.misses.eq(self.misses + 1))
+
+        # xClk: PSRAM port (one read burst per bank).
+        req_sync = Signal()
+        req_seen = Signal()
+        busy     = Signal()
+        self.specials += MultiReg(req_toggle, req_sync, "xclk")
+        self.comb += [
+            port.rnw.eq(1),
+            port.addr.eq(base + Cat(Constant(0, offset_bits), req_bank)),
+            port.burst_length.eq(bank_size),
+            port.din.eq(0),
+            fill_cdc.sink.valid.eq(port.dout_valid & busy),
+            fill_cdc.sink.data.eq(port_dout),
+        ]
+        self.sync.xclk += [
+            port.request.eq(0),
+            If(~busy & (req_sync != req_seen),
+                busy.eq(1), req_seen.eq(req_sync), port.request.eq(1),
+            ),
+            If(busy & port.done,
+                busy.eq(0), done_toggle.eq(~done_toggle),
+            ),
+        ]

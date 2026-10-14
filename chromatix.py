@@ -161,8 +161,11 @@ class BaseSoC(SoCMini):
         # a cache (CoreROMCache), the host uploads it over the debug bridge -- this needs a dedicated
         # PSRAM arbiter port. --sms-bram bakes a (small) SMS ROM into BRAM instead (no cache), to
         # isolate the PSRAM-cache path from the rest on hardware.
+        # Port count: the NES uses 2 (PRG line cache + CHR bank cache).
         with_core_cart = with_core and with_debug_bridge and (
             (core == "sms" and not sms_bram) or (core == "nes"))
+        if with_core_cart and core == "nes":
+            with_core_cart = 2
 
         # SoCMini (CSR bus in the sys domain: gClk, or pClk for the BIOS demo) ---------------------
 
@@ -660,8 +663,9 @@ class BaseSoC(SoCMini):
                 # nes-load) with no rebuild.
                 self.core = lcd_source = NESCore(platform, clk_24, int(24e6), nes_buttons,
                     rom=nes_rom, with_loader=with_debug_bridge,
-                    cart_port      = memory.core_cart_port if with_core_cart else None,
-                    cart_port_dout = memory.ctrl.dout      if with_core_cart else None,
+                    cart_port      = memory.core_cart_port     if with_core_cart else None,
+                    chr_port       = memory.core_cart_ports[1] if with_core_cart else None,
+                    cart_port_dout = memory.ctrl.dout          if with_core_cart else None,
                     cart_ready     = memory.bist_done      if with_core_cart else None)
                 if with_debug_bridge:
                     self.nes_loader = NESLoaderCSR(lcd_source)

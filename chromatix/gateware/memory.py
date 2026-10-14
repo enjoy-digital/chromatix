@@ -860,7 +860,7 @@ class MemorySystem(LiteXModule):
             self.cd_psram.rst.eq(self.reset),
             self.cd_psram2x.clk.eq(ClockSignal("fclk")),
         ]
-        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus + with_vcart + with_core_cart))
+        self.ctrl  = ctrl  = ClockDomainsRenamer("xclk")(MultiPortRAMCtrl(nports=PORT_COUNT + with_bus + with_vcart + int(with_core_cart)))
         cd_psram = {"sys": "psram", "sys2x": "psram2x"}
         if psram_factory is None:
             self.phy   = phy   = ClockDomainsRenamer(cd_psram)(OPIPSRAMPHY(psram_pads))
@@ -947,11 +947,14 @@ class MemorySystem(LiteXModule):
 
         # Virtual Cartridge / SMS cartridge cache (optional): extra ports after the bus, highest
         # priority. with_vcart (Game Boy) and with_core_cart (a hosted core's ROM cache: SMS/GG, NES)
-        # are mutually exclusive.
+        # are mutually exclusive. with_core_cart is a port count (ex 2 for the NES: PRG cache + CHR bank
+        # cache): core_cart_ports, core_cart_port = the first.
         if with_vcart:
             self.vcart_port = ports[PORT_COUNT + with_bus]
         if with_core_cart:
-            self.core_cart_port = ports[PORT_COUNT + with_bus + with_vcart]
+            first = PORT_COUNT + with_bus + with_vcart
+            self.core_cart_ports = ports[first:first + int(with_core_cart)]
+            self.core_cart_port  = self.core_cart_ports[0]
 
         # CPU Main RAM (optional) ------------------------------------------------------------------
         if with_bus:

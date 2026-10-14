@@ -232,8 +232,10 @@ class Chromatic:
     # through a cache, as the SMS), CHR (<= 32 KB, or CHR-RAM) to BRAM via the loader, mapper_flags
     # computed as nestang's game_loader.v. Mappers: the subset synthesized in the build.
     NES_PRG_BASE = 0x400000 # Must match NES_PRG_BASE in chromatix/gateware/cores/nes.py.
+    NES_CHR_BASE = 0x600000 # Must match NES_CHR_BASE (CHR bank cache builds).
     NES_MAPPERS  = {0: "NROM", 1: "MMC1", 2: "UxROM", 3: "CNROM", 4: "MMC3", 7: "AxROM", 66: "GxROM"}
-    NES_CHR_MAX  = 32*1024
+    NES_CHR_MAX  = 32*1024  # CHR in BRAM (direct).
+    NES_CHR_BANKED_MAX = 256*1024 # CHR in the PSRAM through the CHR bank cache (the MMC3 maximum).
 
     @staticmethod
     def nes_mapper_flags(rom):
@@ -295,19 +297,27 @@ class Chromatic:
         if mapper not in self.NES_MAPPERS:
             names = ", ".join(f"{n} ({m})" for m, n in self.NES_MAPPERS.items())
             raise ValueError(f"Mapper {mapper} not in this build (supported: {names}).")
-        if len(chr) > self.NES_CHR_MAX:
-            raise ValueError(f"CHR-ROM {len(chr)//1024} KB > {self.NES_CHR_MAX//1024} KB (not supported yet).")
-        HOLD, SEL_CHR, ADDR_RST, FLUSH = 1 << 0, 1 << 1, 1 << 5, 1 << 6
-        reg.nes_loader_control.write(HOLD)
+        # Large CHR-ROM: in the PSRAM, through the CHR bank cache (builds with nes_loader_chr_misses).
+        chr_banked = len(chr) > self.NES_CHR_MAX
+        if chr_banked and not hasattr(reg, "nes_loader_chr_misses"):
+            raise ValueError(f"CHR-ROM {len(chr)//1024} KB > {self.NES_CHR_MAX//1024} KB "
+                "(this bitstream has no CHR bank cache).")
+        if len(chr) > self.NES_CHR_BANKED_MAX:
+            raise ValueError(f"CHR-ROM {len(chr)//1024} KB > {self.NES_CHR_BANKED_MAX//1024} KB.")
+        HOLD, SEL_CHR, ADDR_RST, FLUSH, CHR_CACHE = 1 << 0, 1 << 1, 1 << 5, 1 << 6, 1 << 7
+        mode = CHR_CACHE if chr_banked else 0
+        reg.nes_loader_control.write(HOLD | mode)
         self.write_psram(self.NES_PRG_BASE, prg)
-        if chr:
+        if chr_banked:
+            self.write_psram(self.NES_CHR_BASE, chr)
+        elif chr:
             reg.nes_loader_control.write(HOLD | SEL_CHR | ADDR_RST)
             for w in words(chr):
                 reg.nes_loader_data.write(w)
         reg.nes_loader_flags.write(flags)
-        reg.nes_loader_control.write(HOLD | FLUSH)
+        reg.nes_loader_control.write(HOLD | FLUSH | mode)
         time.sleep(0.01)
-        reg.nes_loader_control.write(0) # Release: the core resets fresh and runs the new ROM.
+        reg.nes_loader_control.write(mode) # Release: the core resets fresh and runs the new ROM.
         return dict(mapper=self.NES_MAPPERS[mapper], prg_kb=len(prg)//1024, chr_kb=len(chr)//1024,
             chr_ram=bool(flags & (1 << 15)), mirror_v=bool(flags & (1 << 14)))
 
