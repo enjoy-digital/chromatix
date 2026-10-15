@@ -615,3 +615,45 @@ def test_psram_wishbone_fetch_buffers():
     assert res["errors"] == []
     assert res["seq_requests"] == 64//4 # One PSRAM read per 4-word block.
 
+
+def test_psram_wishbone_partial_writes():
+    """Partial writes (no L2 cache in front: CPU stores through a 32 -> 64-bit converter): random
+    byte/16-bit/32-bit/full writes (16-bit words: shorter bursts, bytes: read-modify-write) checked
+    against a reference, with block fetch and buffers (buffered copies updated per byte)."""
+    import random
+    random.seed(5)
+    base = 0x080000
+    dut  = PSRAMWishboneDUT(base, data_width=64, synchronous=True, fetch=4, buffers=2)
+    ref  = {}
+    res  = {"errors": []}
+
+    def main():
+        bus = dut.bridge.bus
+        for adr in range(16):
+            ref[adr] = random.getrandbits(64)
+            yield from bus.write(adr, ref[adr])
+        for _ in range(300):
+            adr = random.randrange(16)
+            if random.random() < 0.5:
+                size = random.choice([1, 2, 4, 8])
+                off  = random.randrange(0, 8, size)
+                sel  = ((1 << size) - 1) << off
+                data = random.getrandbits(64)
+                mask = sum(0xff << 8*b for b in range(8) if sel & (1 << b))
+                ref[adr] = (ref[adr] & ~mask) | (data & mask)
+                yield from bus.write(adr, data, sel=sel)
+            else:
+                v = yield from bus.read(adr)
+                if v != ref[adr]: res["errors"].append((adr, hex(v), hex(ref[adr])))
+        for adr in range(16):
+            v = yield from bus.read(adr)
+            if v != ref[adr]: res["errors"].append(("final", adr, hex(v), hex(ref[adr])))
+
+    run_simulation(dut, {"sys": main(), "xclk": dut.psram.generator(gap=1)},
+        clocks={"sys": 10, "xclk": 10})
+    assert res["errors"] == []
+    assert dut.psram.errors == []
+    # Memory content (outside of the buffers).
+    for adr in range(16):
+        words = [dut.psram.mem.get((base + 8*adr)//2 + i, 0) for i in range(4)]
+        assert sum(w << 16*i for i, w in enumerate(words)) == ref[adr], adr

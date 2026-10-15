@@ -188,13 +188,17 @@ class LCDPSRAMFramebuffer(LiteXModule):
       buffer can be written again once copied (status busy).
     - Pixels ("hclk" domain): Game Boy LCD interface (GBLCDTiming), pixel data from a PSRAM line
       reader of the displayed buffer (fb_base, fb_data: the video pipeline's frame buffer reader).
+    - with_hw_port: lines also written by hardware ("sys" domain, ex: VoxelRenderer) in its own line
+      buffers (same slots, 32-bit words): hw_wr (word write), hw_line (line copy request, as the
+      `line` CSR, copied from the hardware line buffer) and busy (line buffers being copied). The
+      CPU and the hardware must not use the same slot at the same time.
     """
     LINE_PIXELS    = 160
     LINE_WORDS     = 40    # 32-bit words of a line buffer.
     PALETTE_OFFSET = 0x400 # Words (byte offset 0x1000).
 
     def __init__(self, port, base=0x10000, nbuffers=3, buffer_stride=0xc000, nslots=4,
-        line_dots=456, h_start=80, frame_lines=154):
+        line_dots=456, h_start=80, frame_lines=154, with_hw_port=False):
         assert nbuffers <= 4
         assert nslots in [2, 4]
         assert nslots*self.LINE_WORDS <= self.PALETTE_OFFSET
@@ -223,6 +227,10 @@ class LCDPSRAMFramebuffer(LiteXModule):
             CSRField("busy",  size=4, description="Line buffers being copied (1 bit per buffer)."),
         ])
         self._frame = CSRStatus(32, description="Frames counter (incremented at each vsync).")
+        # Hardware line buffers writer.
+        self.busy    = Signal(nslots)
+        self.hw_wr   = Record([("we", 1), ("adr", bits_for(nslots*self.LINE_WORDS - 1)), ("dat", 32)])
+        self.hw_line = Record([("valid", 1), ("line", 8), ("buffer", 2), ("slot", 2)])
 
         # # #
 
@@ -264,6 +272,20 @@ class LCDPSRAMFramebuffer(LiteXModule):
             )
         ]
 
+        # Hardware line buffers (separate memory: a shared write port would no longer be mapped to
+        # BSRAM by Gowin).
+        hw_src = Signal(nslots) # Line buffer to copy from (per slot): 1: hardware.
+        if with_hw_port:
+            hw_lines    = Memory(32, nslots*self.LINE_WORDS)
+            hw_lines_wr = hw_lines.get_port(write_capable=True, clock_domain="sys")
+            hw_lines_rd = hw_lines.get_port(clock_domain="xclk")
+            self.specials += hw_lines, hw_lines_wr, hw_lines_rd
+            self.comb += [
+                hw_lines_wr.adr.eq(self.hw_wr.adr),
+                hw_lines_wr.dat_w.eq(self.hw_wr.dat),
+                hw_lines_wr.we.eq(self.hw_wr.we),
+            ]
+
         # Line copies (sys -> xClk: request/acknowledge toggles per line buffer) -------------------
         req_toggle = Signal(nslots)
         ack_toggle = Signal(nslots)
@@ -274,12 +296,23 @@ class LCDPSRAMFramebuffer(LiteXModule):
             MultiReg(req_toggle, req_sync, "xclk"),
             MultiReg(ack_toggle, ack_sync),
         ]
-        self.comb += self.status.fields.busy.eq(req_toggle ^ ack_sync)
-        self.sync += If(self.line.re,
-            req_toggle.eq(req_toggle ^ (1 << self.line.fields.slot)),
-            addr[self.line.fields.slot].eq(base +
-                Array(n*buffer_stride for n in range(4))[self.line.fields.buffer] +
-                self.line.fields.line*(2*self.LINE_PIXELS)),
+        line_req = Record([("valid", 1), ("line", 8), ("buffer", 2), ("slot", 2)])
+        self.comb += [
+            self.busy.eq(req_toggle ^ ack_sync),
+            self.status.fields.busy.eq(self.busy),
+            line_req.valid.eq(self.line.re),
+            line_req.line.eq(self.line.fields.line),
+            line_req.buffer.eq(self.line.fields.buffer),
+            line_req.slot.eq(self.line.fields.slot),
+        ]
+        if with_hw_port:
+            self.comb += If(self.hw_line.valid, line_req.eq(self.hw_line))
+        self.sync += If(line_req.valid,
+            req_toggle.eq(req_toggle ^ (1 << line_req.slot)),
+            hw_src.eq(Mux(self.hw_line.valid, hw_src | (1 << line_req.slot), hw_src & ~(1 << line_req.slot))),
+            addr[line_req.slot].eq(base +
+                Array(n*buffer_stride for n in range(4))[line_req.buffer] +
+                line_req.line*(2*self.LINE_PIXELS)),
         )
 
         # xClk: line buffers copied in order. Palette lookup of the line to the staging buffer (1
@@ -293,10 +326,19 @@ class LCDPSRAMFramebuffer(LiteXModule):
         dst   = Array(Signal(8, name=f"dst{i}") for i in range(2))
         pops  = Signal(max=self.LINE_PIXELS + 2)
         pop   = Signal()
+        line_dat = Signal(32)
+        self.comb += line_dat.eq(lines_rd.dat_r)
+        if with_hw_port:
+            hw_src_x = Signal(nslots)
+            self.specials += MultiReg(hw_src, hw_src_x, "xclk") # Stable when the copy starts.
+            self.comb += [
+                hw_lines_rd.adr.eq(lines_rd.adr),
+                If(Array(hw_src_x[i] for i in range(nslots))[slot], line_dat.eq(hw_lines_rd.dat_r)),
+            ]
         self.comb += [
             pend.eq(req_sync ^ ack_toggle),
             lines_rd.adr.eq(slot*self.LINE_WORDS + index[2:]),
-            pal_rd.adr.eq(Array(lines_rd.dat_r[8*i:8*(i + 1)] for i in range(4))[byte]),
+            pal_rd.adr.eq(Array(line_dat[8*i:8*(i + 1)] for i in range(4))[byte]),
             stage_wr.adr.eq(dst[1]),
             stage_wr.dat_w.eq(pal_rd.dat_r),
             pop.eq(port.request | port.write_next),

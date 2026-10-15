@@ -116,6 +116,23 @@ def test_soc_app_elaboration(tmp_path):
     assert "memory_region,rom," not in csrs
     assert "constant,config_cpu_reset_addr,1073741824" in csrs
 
+def test_soc_voxel_elaboration(tmp_path):
+    """Voxel game: CPU application + VoxelRenderer (memories at 0xa0000000, CSRs) writing the PSRAM
+    framebuffer line buffers through its hardware port."""
+    target   = load_target()
+    platform = Platform()
+    target.add_timing_constraints(platform)
+    soc      = target.BaseSoC(platform, with_voxel=True)
+    csr_csv  = os.path.join(tmp_path, "csr.csv")
+    builder  = Builder(soc, output_dir=str(tmp_path), csr_csv=csr_csv, compile_software=False)
+    builder.build(build_name="chromatic", run=False)
+    with open(csr_csv, encoding="utf-8") as f:
+        csrs = f.read()
+    for name in ["voxel_control", "voxel_rows", "voxel_cell", "voxel_fwd_xy", "voxel_down_z",
+        "voxel_window", "voxel_t_far", "voxel_status", "voxel_cycles", "framebuffer_line"]:
+        assert f"csr_register,{name}," in csrs, name
+    assert "memory_region,voxel,0xa0000000,32768,io" in csrs
+
 def test_soc_core_elaboration(tmp_path):
     """MiSTer-core shell: the Game Boy core is replaced by the core shell (bring-up test pattern),
     not a CPU, and keeps the common peripherals (no debug bridge by default)."""

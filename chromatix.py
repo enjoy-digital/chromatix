@@ -52,6 +52,7 @@ from chromatix.gateware.sysmon      import SystemMonitorUART, SystemMonitorBridg
 from chromatix.gateware.adc         import BatteryADC
 from chromatix.gateware.terminal    import LCDTerminal
 from chromatix.gateware.framebuffer import LCDPSRAMFramebuffer
+from chromatix.gateware.voxel       import VoxelRenderer
 from chromatix.gateware.core_shell  import CoreTestPattern, CoreVideoTestPattern, CoreVideoDownscaler
 from chromatix.gateware.cores.nes   import NESCore, NESLoaderCSR
 from chromatix.gateware.cores.sms   import SMSCore, SMSLoaderCSR
@@ -127,6 +128,7 @@ class BaseSoC(SoCMini):
         uvc_frames            = None,
         with_bios             = False,
         with_app              = False,
+        with_voxel            = False,
         with_core             = False,
         core                  = None,
         nes_rom               = "nes15.hex",
@@ -142,6 +144,7 @@ class BaseSoC(SoCMini):
         xclk_freq = int(33.55432e6 * 2)
         # LiteX "sys" domain: gClk, pClk for the BIOS demo CPU, xClk for CPU applications (CPU and
         # PSRAM controller in the same domain).
+        with_app     = with_app or with_voxel
         with_cpu     = with_bios or with_app
         sys_clk      = "pclk" if with_bios else "xclk" if with_app else "gclk"
         sys_clk_freq = {
@@ -196,7 +199,7 @@ class BaseSoC(SoCMini):
             clk_freq      = sys_clk_freq,
             ident         = "ChromatiX SoC" + {
                 (True,  False): " (LiteX BIOS demo)",
-                (False, True):  " (CPU application)",
+                (False, True):  " (CPU application)" if not with_voxel else " (CPU application: voxel)",
             }.get((with_bios, with_app), ""),
             ident_version = True,
             **cpu_kwargs,
@@ -556,16 +559,21 @@ class BaseSoC(SoCMini):
         # CPU Main RAM (LiteX BIOS demo, application): PSRAM above the framebuffers/BIST, behind a L2
         # cache doing 8-byte line bursts (64-bit lines: the cache data memory is split per byte
         # lane, 1 BSRAM each).
+        # Voxel game: no L2 (its 11 BSRAM go to the VoxelRenderer world/textures), the CPU D$ and
+        # the PSRAM bridge block buffers are enough for the game logic.
         if with_cpu:
-            l2_size  = 16*1024 if with_app else 8*1024
+            l2_size  = 0 if with_voxel else 16*1024 if with_app else 8*1024
             main_ram = wishbone.Interface(data_width=32, address_width=32, addressing="word")
-            self.l2_cache = wishbone.Cache(
-                cachesize = l2_size//4,
-                master    = main_ram,
-                slave     = memory.bus,
-                reverse   = False,
-            )
-            self.add_config("L2_SIZE", l2_size)
+            if l2_size:
+                self.l2_cache = wishbone.Cache(
+                    cachesize = l2_size//4,
+                    master    = main_ram,
+                    slave     = memory.bus,
+                    reverse   = False,
+                )
+                self.add_config("L2_SIZE", l2_size)
+            else:
+                self.main_ram_converter = wishbone.Converter(main_ram, memory.bus)
             # Main RAM statistics (application performance analysis).
             if with_app:
                 self.memory_counters = MemoryCounters(
@@ -612,7 +620,8 @@ class BaseSoC(SoCMini):
             if with_bios:
                 self.terminal = lcd_source = LCDTerminal()
             else:
-                self.framebuffer = lcd_source = LCDPSRAMFramebuffer(memory.fb_write_port)
+                self.framebuffer = lcd_source = LCDPSRAMFramebuffer(memory.fb_write_port,
+                    with_hw_port = with_voxel)
                 self.bus.add_slave(name="framebuffer", slave=lcd_source.bus, region=SoCRegion(
                     origin = 0x90000000,
                     size   = 0x10000,
@@ -623,6 +632,21 @@ class BaseSoC(SoCMini):
                     lcd_source.fb_data.eq(h_wr_burst_q),
                     memory.fb_base.eq(lcd_source.fb_base),
                 ]
+
+                # Voxel game: 3D view rendered in hardware into the frame buffer line buffers.
+                if with_voxel:
+                    self.voxel = voxel = VoxelRenderer(nslots=4, line_words=lcd_source.LINE_WORDS)
+                    self.bus.add_slave(name="voxel", slave=voxel.bus, region=SoCRegion(
+                        origin = 0xa0000000,
+                        size   = 0x8000,
+                        mode   = "rw",
+                        cached = False,
+                    ))
+                    self.comb += [
+                        lcd_source.hw_wr.eq(voxel.fb_wr),
+                        lcd_source.hw_line.eq(voxel.fb_line),
+                        voxel.fb_busy.eq(lcd_source.busy),
+                    ]
 
             # Cartridge/IR/link idle (as when the Game Boy core doesn't access them).
             for pad in [cart.d, cart.rst, link.clk]:
@@ -1105,6 +1129,7 @@ def main():
 
     # Toolchain.
     parser.add_argument("--toolchain",  default="gowin",                    help="FPGA toolchain (gowin).")
+    parser.add_argument("--output-dir", default="build",                    help="Build directory.")
     parser.add_argument("--gowin-path", default=os.environ.get("GOWIN_PATH"), help="Gowin IDE install directory (or GOWIN_PATH env variable, ex: ~/tools/gowin_1.9.12.04/IDE).")
 
     # SoC.
@@ -1114,6 +1139,7 @@ def main():
     parser.add_argument("--uvc-lcd",               action="store_true",       help="Hosted core: UVC streams the 160x144 LCD copy instead of the core's native resolution.")
     parser.add_argument("--with-bios",             action="store_true",       help="LiteX BIOS demo: VexRiscv SoC in place of the Game Boy core, console on USB CDC and LCD/UVC.")
     parser.add_argument("--with-app",              action="store_true",       help="CPU application SoC (VexRiscv) in place of the Game Boy core: PSRAM framebuffer, PCM audio, ESP32 UART, firmware loaded over USB.")
+    parser.add_argument("--with-voxel",            action="store_true",       help="--with-app with the VoxelRenderer (hardware 3D view of the voxel game, firmware/voxel).")
     parser.add_argument("--with-core",             action="store_true",       help="MiSTer-core shell in place of the Game Boy core (bring-up: a 160x144 test pattern on the LCD/UVC).")
     parser.add_argument("--core",                  default=None, choices=["nes", "sms"], help="Hosted core for --with-core (default: the test pattern).")
     parser.add_argument("--nes-rom",               default="nes15.hex",          help="iNES ROM for --core nes (a .nes/.hex path, or a name under cores/nes/roms/; NROM only).")
@@ -1134,6 +1160,8 @@ def main():
         gowin_path = os.path.expanduser(args.gowin_path)
         os.environ["PATH"]            = os.path.join(gowin_path, "bin") + os.pathsep + os.environ["PATH"]
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    if args.with_voxel:
+        args.with_app = True
     if not (args.with_bios or args.with_app or args.with_core):
         add_verilog_sources(platform) # Game Boy core.
     add_timing_constraints(platform)
@@ -1143,6 +1171,7 @@ def main():
         with_debug_bridge     = args.with_debug_bridge,
         with_bios             = args.with_bios,
         with_app              = args.with_app,
+        with_voxel            = args.with_voxel,
         with_core             = args.with_core,
         core                  = args.core,
         nes_rom               = args.nes_rom,
@@ -1156,16 +1185,16 @@ def main():
         uvc_frames            = [tuple(int(v) for v in size.split("x")) for size in args.uvc_sizes.split(",")],
     )
 
-    # A hosted core (especially --core sms) nearly fills the GW5A-25 and is routing-bound: raise the
+    # A hosted core (especially --core sms) or the voxel SoC nearly fills the GW5A-25 and is routing-bound: raise the
     # Gowin place/route effort to help it route.
-    if args.with_core and args.toolchain == "gowin":
+    if (args.with_core or args.with_voxel) and args.toolchain == "gowin":
         platform.toolchain.options.update({
             "place_option": 2, "route_option": 2,
         })
 
     # Build.
     builder = Builder(soc,
-        output_dir = "build",
+        output_dir = args.output_dir,
         csr_csv    = "scripts/csr.csv",
         bios_lto   = True, # BIOS fits the 24KB integrated ROM.
         libc_mode  = "full" if args.with_app else "minimal", # Applications: full picolibc.

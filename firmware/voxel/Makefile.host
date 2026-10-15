@@ -1,0 +1,29 @@
+# ChromatiX voxel game, host build (SDL2 emulation of the Chromatic: 160x144 LCD, buttons, audio).
+#   make -f Makefile.host
+#   ./voxel_host
+
+include sources.mak
+
+CC      ?= gcc
+CFLAGS  += -O2 -g -Wall -Wextra -Wno-unused-parameter $(VOXEL_CFLAGS) $(shell sdl2-config --cflags)
+LDLIBS  += $(shell sdl2-config --libs) -lm
+OBJDIR   = build_host
+OBJS     = $(addprefix $(OBJDIR)/, $(addsuffix .o, $(VOXEL_SRCS) hal_sdl))
+
+voxel_host: $(OBJS)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+# Renderer reference model as a shared library (test/test_voxel.py).
+libvr.so: vr.c vr.h
+	$(CC) -O2 -shared -fPIC -o $@ vr.c
+
+$(OBJDIR)/%.o: %.c *.h sources.mak Makefile.host | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(OBJDIR) voxel_host libvr.so
+
+.PHONY: clean

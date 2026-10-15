@@ -611,10 +611,11 @@ class PSRAMWishbone(LiteXModule):
     """
     Wishbone slave (sys domain) -> PSRAM burst port (xClk domain), for a CPU main RAM.
 
-    Each access is a full burst of the bus data width (ex: 64-bit = an 8-byte line of a L2 cache in
-    front of it) at `base` + adr * bytes. Only full-width writes are supported (sel is ignored), as
-    done by a LiteX L2 cache. The request/acknowledge cross the domains with toggles; the address,
-    data and read data are quasi-static during an access.
+    Each access is a burst of the bus data width (ex: 64-bit = an 8-byte line of a L2 cache in
+    front of it) at `base` + adr * bytes. Partial writes (no L2 cache in front, ex: 32-bit CPU
+    stores through a converter): the selected 16-bit words when contiguous (a shorter burst), else
+    (bytes) a read-modify-write of the bus word. The request/acknowledge cross the domains with
+    toggles; the address, data and read data are quasi-static during an access.
 
     synchronous: sys and xClk from the same PLL (related clocks, timing analyzed): the toggles are
     used directly (no synchronizers: lower latency).
@@ -650,6 +651,9 @@ class PSRAMWishbone(LiteXModule):
         adr        = Signal(23)
         we         = Signal()
         dat_w      = Signal(data_width)
+        length     = Signal(11)               # Burst length (bytes).
+        rmw        = Signal()                 # Read of a read-modify-write.
+        rmw_sel    = Signal(nbytes)
         block      = Signal(data_width*fetch)  # Read data (xClk, quasi-static at the acknowledge).
         slot       = Signal(max=max(fetch, 2)) # Bus word of the request in the block.
         tag        = Signal(len(bus.adr) - fbits)
@@ -687,16 +691,44 @@ class PSRAMWishbone(LiteXModule):
         else:
             self.comb += looked.eq(1)
 
+        # Partial writes: selected 16-bit words (contiguous: first/count), else read-modify-write.
+        pairs      = Signal(nwords)
+        partial    = Signal()
+        contiguous = Signal()
+        first      = Signal(max=nwords)
+        count      = Signal(max=nwords + 1)
+        cases      = {}
+        for v in range(1, 2**nwords):
+            lo = (v & -v).bit_length() - 1
+            n  = bin(v).count("1")
+            if (v >> lo) == (1 << n) - 1:
+                cases[v] = [contiguous.eq(1), first.eq(lo), count.eq(n)]
+        self.comb += [
+            *[pairs[k].eq(bus.sel[2*k] | bus.sel[2*k + 1]) for k in range(nwords)],
+            partial.eq(reduce(or_, [bus.sel[2*k] ^ bus.sel[2*k + 1] for k in range(nwords)])),
+            Case(pairs, cases),
+        ]
+        rmw_merged = Cat(*[Mux(rmw_sel[b], dat_w[8*b:8*(b + 1)], block[8*b:8*(b + 1)])
+            for b in range(nbytes)])
+
         self.comb += [
             miss_ack.eq(pending & (ack_sync != ack_seen)),
-            bus.ack.eq(miss_ack | hit_ack),
+            bus.ack.eq((miss_ack & ~rmw) | hit_ack),
             bus.dat_r.eq(Mux(hit_ack, hit_dat, Array(_slices(block, data_width, fetch))[slot])),
             self.request.eq(access & looked & ~(~bus.we & hit)),
             self.pending.eq(pending),
         ]
         self.sync += [
             hit_ack.eq(access & looked & ~bus.we & hit),
-            If(miss_ack,
+            If(miss_ack & rmw,
+                # Read-modify-write: write the merged bus word.
+                ack_seen.eq(ack_sync),
+                req_toggle.eq(~req_toggle),
+                rmw.eq(0),
+                we.eq(1),
+                length.eq(nbytes),
+                dat_w.eq(rmw_merged),
+            ).Elif(miss_ack,
                 pending.eq(0),
                 ack_seen.eq(ack_sync),
                 # Read: keep the block.
@@ -708,19 +740,32 @@ class PSRAMWishbone(LiteXModule):
             ).Elif(self.request,
                 pending.eq(1),
                 req_toggle.eq(~req_toggle),
-                # Reads: whole aligned block, writes: the bus word.
+                # Reads: whole aligned block, writes: the bus word (selected 16-bit words).
                 adr.eq(base + Mux(bus.we, bus.adr, req_block)*nbytes),
                 we.eq(bus.we),
                 dat_w.eq(bus.dat_w),
+                length.eq(Mux(bus.we, nbytes, nbytes*fetch)),
                 slot.eq(req_slot),
                 tag.eq(req_tag),
+                If(bus.we & (partial | ~contiguous),
+                    # Read-modify-write (bytes): read the bus word first.
+                    we.eq(0),
+                    length.eq(nbytes),
+                    rmw.eq(1),
+                    rmw_sel.eq(bus.sel),
+                ).Elif(bus.we,
+                    adr.eq(base + bus.adr*nbytes + 2*first),
+                    length.eq(2*count),
+                    dat_w.eq(bus.dat_w >> (16*first)),
+                ),
             ),
         ]
-        # Writes: update the buffered copy.
+        # Writes: update the buffered copy (selected bytes).
         for i in range(buffers):
             bwords = _slices(bdata[i], data_width, fetch)
             self.sync += If(self.request & bus.we & hits[i],
-                Case(req_slot, {j: bwords[j].eq(bus.dat_w) for j in range(fetch)}))
+                Case(req_slot, {j: [If(bus.sel[b], bwords[j][8*b:8*(b + 1)].eq(bus.dat_w[8*b:8*(b + 1)]))
+                    for b in range(nbytes)] for j in range(fetch)}))
 
         # xClk: burst.
         req_sync = Signal()
@@ -735,7 +780,7 @@ class PSRAMWishbone(LiteXModule):
         self.comb += [
             port.rnw.eq(~we),
             port.addr.eq(adr),
-            port.burst_length.eq(Mux(we, nbytes, nbytes*fetch)),
+            port.burst_length.eq(length),
             port.din.eq(Array(_slices(dat_w, 16, nwords))[index[:max(log2_int(nwords), 1)]]),
         ]
         self.sync.xclk += [

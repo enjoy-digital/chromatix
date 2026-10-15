@@ -1,0 +1,10 @@
+build_host/
+voxel_host
+libvr.so
+build/
+*.o
+*.d
+*.elf
+*.elf.map
+*.bin
+snap_*.bmp

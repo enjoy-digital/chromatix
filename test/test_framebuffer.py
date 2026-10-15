@@ -92,10 +92,7 @@ def test_framebuffer_frame_counter():
 
 # LCD PSRAM Framebuffer ----------------------------------------------------------------------------
 
-def test_psram_framebuffer():
-    """8-bit lines written in the line buffers, copied to frame buffer 1 in the PSRAM (model)
-    through the palette, displayed after the front buffer change: LCD stream pixels from the PSRAM
-    line reader."""
+def psram_framebuffer(hw_lines=()):
     class DUT(Module):
         def __init__(self):
             xclk = ClockDomainsRenamer("xclk")
@@ -107,6 +104,7 @@ def test_psram_framebuffer():
                 line_dots   = 166,
                 h_start     = 2,
                 frame_lines = 146,
+                with_hw_port = len(hw_lines) > 0,
             )
             ctrl.ports[0].rnw.reset          = 1
             ctrl.ports[0].burst_length.reset = 320
@@ -139,6 +137,22 @@ def test_psram_framebuffer():
             slot = n % 4 # Line buffers used in order.
             while ((yield fb.status.fields.busy) >> slot) & 1:
                 yield
+            if y in hw_lines:
+                # Hardware port: own line buffers, copy request.
+                for i in range(40):
+                    yield fb.hw_wr.we.eq(1)
+                    yield fb.hw_wr.adr.eq(slot*40 + i)
+                    yield fb.hw_wr.dat.eq(sum(p << 8*j for j, p in enumerate(pixels[4*i:4*i + 4])))
+                    yield
+                yield fb.hw_wr.we.eq(0)
+                yield fb.hw_line.valid.eq(1)
+                yield fb.hw_line.line.eq(y)
+                yield fb.hw_line.buffer.eq(1)
+                yield fb.hw_line.slot.eq(slot)
+                yield
+                yield fb.hw_line.valid.eq(0)
+                yield
+                continue
             for i in range(40):
                 word = sum(p << 8*j for j, p in enumerate(pixels[4*i:4*i + 4]))
                 yield from fb.bus.write(region + slot*40 + i, word)
@@ -172,3 +186,14 @@ def test_psram_framebuffer():
         assert screen[y] == [palette[p] for p in pixels], y
     assert screen[2] == [0]*160 # Not written.
     assert res["front"] == 1
+
+def test_psram_framebuffer():
+    """8-bit lines written in the line buffers, copied to frame buffer 1 in the PSRAM (model)
+    through the palette, displayed after the front buffer change: LCD stream pixels from the PSRAM
+    line reader."""
+    psram_framebuffer()
+
+def test_psram_framebuffer_hw_lines():
+    """Lines from the hardware port (ex: VoxelRenderer) mixed with CPU lines, the slots used by both
+    (copy source per slot)."""
+    psram_framebuffer(hw_lines=(1, 143))
