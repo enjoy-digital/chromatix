@@ -6,7 +6,11 @@ view of a Minecraft-like block world into the LCD frame buffers (so also over UV
 (`firmware/voxel`) runs on the CPU: world generation, player physics, block picking/editing, hotbar,
 day/night cycle, sound effects. Creative mode.
 
-Status: see [Performance](#performance) and [Known issues / next](#known-issues--next).
+Status: **runs on the Chromatic at ~52 fps** (hardware 3D view: 18.9ms per frame), playable with the
+console buttons, with sound, captured over UVC; the hardware frames are identical to the software
+renderer's (`--args sw`, 1 fps). Also on the PC (SDL, same game code).
+
+<img src="images/voxel_chromatic.png" width="320" alt="Voxel game on the Chromatic, captured over UVC"> <img src="images/voxel_chromatic_play.png" width="320" alt="Selected block (edges) after walking">
 
 ## Architecture
 
@@ -31,10 +35,20 @@ The 3D view is 160x128 (rows 0-127), the hotbar uses the bottom 16 rows.
 ## Bit exact reference model
 
 `firmware/voxel/vr.c` is the reference model of the gateware and also the software renderer (PC
-build, `--with-app` builds without the renderer, `--args sw`). `test/test_voxel.py` renders rows of
-random scenes/cameras with both (Migen simulation vs `vr.c` through ctypes) and checks every pixel:
-terrain, axis-aligned rays (zero direction components), selection, window across the world wrap,
-sky. Any change of the rendering must be done in both.
+build, `--with-app` builds without the renderer, `--args sw`). `test/test_voxel.py` checks every
+pixel against it:
+- Migen simulation (rows): terrain, axis-aligned rays (zero direction components), selection,
+  window across the world wrap, sky.
+- **The generated Verilog** (Verilator, `test/voxel_tb.cpp` linked with `vr.c`): whole frames of
+  the same scenes with strong fog (all shades), in seconds. Migen's simulation evaluates expressions
+  with Python integers, Verilog with the operands' widths: `(level + fog[:3]) > 7` was a 3-bit
+  comparison in Verilog (the sum wrapped: far leaves not fogged on the hardware, 8 pixels of a
+  frame), which only this test (and the hardware) showed. Sums used in comparisons are computed in
+  their own signals.
+- The tests and `hal_sdl.c` share a scene/camera file format (`VOXEL_DUMP=file`
+  `VOXEL_DUMP_FRAME=n`): a frame of the PC game can be replayed on the gateware.
+
+Any change of the rendering must be done in both.
 
 Formats (`vr.h`):
 
@@ -83,20 +97,48 @@ firmware/voxel/voxel_host` (keys: arrows, X: A, Z: B, Enter: Start, Backspace: S
 
 ## Performance
 
-| Step | fps | Render | Notes |
+Hardware, spawn view (`host` block frames counter, `voxel_cycles` CSR):
+
+| Renderer | fps | 3D view (160x128) | Notes |
 |---|---|---|---|
-| Software renderer (CPU, `vr.c`) | | | |
-| VoxelRenderer | | | 62.5 cycles/pixel in simulation (terrain view) |
+| Software (CPU 67MHz, `vr.c`, `--args sw`) | 1.05 | ~950ms | 3 divisions + a DDA per pixel on the CPU |
+| **VoxelRenderer** | **52.4** | **18.9ms** (62.1 cycles/pixel) | the CPU waits for the render (game logic + HUD: ~0.2ms) |
+
+Next steps if needed: overlap the game logic with the render (render frame n while updating n+1),
+2 rays in flight (the DDA waits for the world RAM 1 cycle out of 2), radix-4 dividers.
 
 ## Resources
 
-| | Logic | BSRAM | DSP |
-|---|---|---|---|
-| `--with-app` (synthesis) | 16751 | 44 | 4 + 21 small |
-| VoxelRenderer alone (synthesis) | 2719 | 10 | 3 + 1 small |
+| | Logic | BSRAM | DSP | xClk Fmax |
+|---|---|---|---|---|
+| `--with-app` (synthesis) | 16751 | 44 | 4 + 21 small | |
+| VoxelRenderer alone (synthesis) | ~2.7K | 10 | 3 + 1 small | 91MHz |
+| **`--with-voxel`** (place and route) | 18698 (82%) | 47/56 | 21/28 | 75.6MHz (67.1MHz) |
 
-The first renderer version used 12 multipliers (setup, hit, row base): with the CPU/shell DSPs the
-GW5A-25's 28 DSP blocks overflowed and the multipliers went to logic (25.2K logic, did not fit).
-The products are now shared (setup and hit never at the same time) and the row base uses shifts.
+What it took to fit (lessons):
+- **Shared multipliers**: the first version used 12 (setup, hit, row base); the products are now
+  shared (setup and hit never at the same time) and the row base uses shifts and adds.
+- **Separate hardware line buffers**: muxing the renderer onto the framebuffer's line buffer write
+  port made Gowin implement that memory (160x32) in flip-flops (8192 registers, +8K logic: 25.2K,
+  did not fit). The renderer has its own line buffer memory (1 BSRAM), the copy engine selects the
+  source per slot. The line buffers are copied in order: the renderer continues the CPU's slot
+  sequence (`control.slot`, 128 lines: a multiple of the 4 slots).
+- **No L2 cache** (its 11 BSRAM go to the world/textures RAMs; 62 BSRAM with it). Without an L2,
+  the CPU's 32-bit (and byte) stores reach the PSRAM bridge as partial 64-bit writes, which it
+  didn't support (sel ignored: neighbors overwritten): `PSRAMWishbone` now writes the selected
+  16-bit words when they start at the bus word, else does a read-modify-write of the bus word. On the
+  hardware, write bursts starting 4 bytes into an 8-byte word were found not to reach the PSRAM
+  (simulation model fine, root cause not found): only bus word aligned bursts are used.
+- **No ESP32 UART/USB link** (`CDCLink`, SDR streaming) in the voxel build: their CSR paths were the
+  critical ones (64.6MHz); without them 18.6K logic and the timing is met with margin.
+- The DDA step selection (nearest boundary, next cell, window/height checks) is precomputed in
+  registers during the world RAM read cycle (was the critical path).
 
 ## Known issues / next
+
+- View distance: the 32x32x32 window, placed up to 8 cells ahead of the camera (fog hides its edges);
+  world height 32.
+- No saves (no filesystem), no mobs/inventory (creative mode only), simple procedural sounds.
+- The CPU idles during the render (see Performance), the CDC port is the debug bridge only (no
+  application UART/DMA link in this build).
+- PSRAM write bursts not aligned on the 8-byte bus word: root cause not found (see Resources).

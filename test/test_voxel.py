@@ -205,3 +205,84 @@ def test_voxel_sky_rows(vr):
     scene = make_scene(5)
     cam   = make_camera(1.0, 0.9, (16.5, 20.5, 16.5))
     check(vr, scene, cam, 0, 2)
+
+# Verilog (Verilator) ------------------------------------------------------------------------------
+
+def write_dump(path, scene, cam):
+    """Scene/camera file (firmware/voxel hal_sdl.c VOXEL_DUMP format)."""
+    import struct
+    c = VRCamera(**{k: (v if not isinstance(v, list) else (ctypes.c_int16*3)(*v)) for k, v in cam.items()})
+    with open(path, "wb") as f:
+        f.write(struct.pack(f"<{WORLD_WORDS}I", *scene["world"]))
+        f.write(struct.pack(f"<{TEXTURE_WORDS}I", *scene["textures"]))
+        f.write(struct.pack("<16H", *scene["blocks"]))
+        f.write(bytes(c))
+
+def build_verilator_tb(build_dir):
+    """VoxelRenderer Verilog (CSR storages as top inputs) + test/voxel_tb.cpp + vr.c."""
+    from migen.fhdl import verilog
+    from litex.soc.interconnect.csr import CSRStorage, CSRStatus
+    dut = VoxelRenderer()
+    dut.clock_domains.cd_sys = ClockDomain()
+    ios = {dut.cd_sys.clk, dut.cd_sys.rst}
+    for c in dut.get_csrs():
+        if isinstance(c, CSRStorage):
+            ios |= {c.storage, c.wr_stb}
+            for f in c.fields.fields if hasattr(c, "fields") else []:
+                v = c.storage[f.offset:f.offset + f.size]
+                dut.comb += getattr(c.fields, f.name).eq(v & c.wr_stb if f.pulse else v)
+        elif isinstance(c, CSRStatus):
+            ios |= {c.status}
+            for f in c.fields.fields if hasattr(c, "fields") else []:
+                dut.comb += c.status[f.offset:f.offset + f.size].eq(getattr(c.fields, f.name))
+    b = dut.bus
+    ios |= {b.adr, b.dat_w, b.dat_r, b.cyc, b.stb, b.we, b.ack, b.sel}
+    ios |= set(dut.fb_wr.flatten()) | set(dut.fb_line.flatten()) | {dut.fb_busy}
+    conv = verilog.convert(dut, ios, name="voxel")
+    conv.write(os.path.join(build_dir, "voxel.v"))
+    n = lambda s: "top->" + conv.ns.get_name(s)
+    ports = {
+        "BUS_ADR": b.adr, "BUS_DAT_W": b.dat_w, "BUS_WE": b.we, "BUS_SEL": b.sel, "BUS_CYC": b.cyc,
+        "BUS_STB": b.stb, "BUS_ACK": b.ack,
+        "ROWS": dut.rows.storage, "CELL": dut.cell.storage, "FRAC": dut.frac.storage,
+        "FWD_XY": dut._fwd_xy.storage, "FWD_Z": dut._fwd_z.storage, "RIGHT_XY": dut._right_xy.storage,
+        "RIGHT_Z": dut._right_z.storage, "DOWN_XY": dut._down_xy.storage, "DOWN_Z": dut._down_z.storage,
+        "WINDOW": dut.window.storage, "T_FAR": dut.t_far.storage, "FOG_START": dut.fog_start.storage,
+        "FOG": dut.fog.storage, "SELECT": dut.select.storage, "COLORS": dut.colors.storage,
+        "CONTROL": dut.control.storage, "CONTROL_RE": dut.control.wr_stb,
+        "FB_WE": dut.fb_wr.we, "FB_ADR": dut.fb_wr.adr, "FB_DAT": dut.fb_wr.dat,
+        "FB_LINE_VALID": dut.fb_line.valid, "FB_LINE_LINE": dut.fb_line.line, "FB_LINE_SLOT": dut.fb_line.slot,
+        "CYCLES": dut.cycles.status,
+    }
+    with open(os.path.join(build_dir, "tb_ports.h"), "w") as f:
+        for k, s in ports.items():
+            f.write(f"#define {k} {n(s)}\n")
+    here = os.path.dirname(os.path.abspath(__file__))
+    subprocess.check_call(["verilator", "--cc", "--exe", "--build", "-O2", "-Wno-fatal", "-Wno-lint",
+        "--top-module", "voxel", "-Mdir", os.path.join(build_dir, "obj"),
+        f"-CFLAGS", f"-I{build_dir} -I{os.path.abspath(VOXEL_DIR)}",
+        os.path.join(build_dir, "voxel.v"), os.path.join(here, "voxel_tb.cpp"),
+        os.path.abspath(os.path.join(VOXEL_DIR, "vr.c"))], stdout=subprocess.DEVNULL)
+    return os.path.join(build_dir, "obj", "Vvoxel")
+
+@pytest.mark.skipif(subprocess.run(["which", "verilator"], capture_output=True).returncode != 0,
+    reason="Verilator not installed")
+def test_voxel_verilog_frames(tmp_path):
+    """Whole frames rendered by the renderer's Verilog (Verilator) == the reference model: catches
+    Verilog vs Migen simulation differences (ex: widths of the expressions in comparisons)."""
+    tb    = build_verilator_tb(str(tmp_path))
+    dumps = []
+    for i, (yaw, pitch, pos, kw) in enumerate([
+            (0.6, -0.3, (16.5, 14.6, 16.3), {}),
+            (0.0,  0.0, (16.0, 13.0,  4.0), {}),
+            (2.4, -1.1, (10.3, 16.2, 20.7), {"select": (10, 12, 18)}),
+            (-2.0, 0.2, (255.5, 15.2, 1.4), {"window": (240, 241)}),
+            (1.0,  0.9, (16.5, 20.5, 16.5), {})]):
+        cam = make_camera(yaw, pitch, pos, **kw)
+        cam.update(fog_start=2 << 12, fog_shift=11) # Strong fog: all shades.
+        path = str(tmp_path / f"scene{i}.bin")
+        write_dump(path, make_scene(i + 1), cam)
+        dumps.append(path)
+    r = subprocess.run([tb, *dumps], capture_output=True, text=True, timeout=1200)
+    print(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr

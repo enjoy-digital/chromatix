@@ -143,6 +143,22 @@ Firmware peripherals: buttons (`demo_buttons_status`), square wave tone generato
 
 <img src="doc/images/litex_bios.png" width="320" alt="LiteX BIOS on the Chromatic LCD, captured over UVC">
 
+## Voxel Game
+
+`--with-voxel`: a Minecraft-like block world (creative mode) at ~52 fps. The game runs on a VexRiscv
+(world generation, physics, block editing, hotbar, day/night, sounds) and a hardware raycaster (the
+VoxelRenderer, bit exact with its C model) draws the 3D view into the LCD frame buffers, so it is also
+streamed over UVC. Same game on the PC (SDL). See [doc/VOXEL.md](doc/VOXEL.md).
+
+```bash
+./chromatix.py --gowin-path ~/tools/gowin_1.9.12.04/IDE --with-voxel --build --output-dir build_voxel
+./scripts/chromatix_flash.py flash build_voxel/gateware/chromatic.fs
+make -C firmware/voxel BUILD_DIR=../../build_voxel
+./scripts/chromatic.py --serial /dev/ttyACM0 run firmware/voxel/voxel.bin
+```
+
+<img src="doc/images/voxel_chromatic.png" width="320" alt="Voxel game on the Chromatic, captured over UVC">
+
 ## Simulation
 
 `chromatix_sim.py` simulates the Game Boy core with Verilator (VHDL parts converted to Verilog

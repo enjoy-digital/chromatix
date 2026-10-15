@@ -253,6 +253,19 @@ void hal_vr_render(const struct vr_camera *cam)
 {
 	const struct vr_scene scene = {vr_world, vr_textures, vr_blocks};
 
+	/* VOXEL_DUMP=file: scene/camera of a frame (VOXEL_DUMP_FRAME, default: the first), gateware checks. */
+	static unsigned dump_frame;
+	if (getenv("VOXEL_DUMP") && ++dump_frame == (getenv("VOXEL_DUMP_FRAME") ? strtoul(getenv("VOXEL_DUMP_FRAME"), NULL, 0) : 1)) {
+		FILE *f = fopen(getenv("VOXEL_DUMP"), "wb");
+		if (f) {
+			fwrite(vr_world, sizeof(vr_world), 1, f);
+			fwrite(vr_textures, sizeof(vr_textures), 1, f);
+			fwrite(vr_blocks, sizeof(vr_blocks), 1, f);
+			fwrite(cam, sizeof(*cam), 1, f);
+			fclose(f);
+		}
+	}
+
 	for (int y = 0; y < VR_HEIGHT; y++)
 		vr_line(&scene, cam, y, lcd[y]);
 }

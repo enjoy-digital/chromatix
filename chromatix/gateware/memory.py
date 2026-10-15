@@ -613,8 +613,10 @@ class PSRAMWishbone(LiteXModule):
 
     Each access is a burst of the bus data width (ex: 64-bit = an 8-byte line of a L2 cache in
     front of it) at `base` + adr * bytes. Partial writes (no L2 cache in front, ex: 32-bit CPU
-    stores through a converter): the selected 16-bit words when contiguous (a shorter burst), else
-    (bytes) a read-modify-write of the bus word. The request/acknowledge cross the domains with
+    stores through a converter): the selected 16-bit words when contiguous from the start of the bus
+    word (a shorter burst), else a read-modify-write of the bus word (on the Chromatic, writes
+    starting 4 bytes into an 8-byte word were found not to reach the PSRAM: only bus word aligned
+    write bursts are used). The request/acknowledge cross the domains with
     toggles; the address, data and read data are quasi-static during an access.
 
     synchronous: sys and xClk from the same PLL (related clocks, timing analyzed): the toggles are
@@ -747,7 +749,7 @@ class PSRAMWishbone(LiteXModule):
                 length.eq(Mux(bus.we, nbytes, nbytes*fetch)),
                 slot.eq(req_slot),
                 tag.eq(req_tag),
-                If(bus.we & (partial | ~contiguous),
+                If(bus.we & (partial | ~contiguous | (first != 0)),
                     # Read-modify-write (bytes): read the bus word first.
                     we.eq(0),
                     length.eq(nbytes),

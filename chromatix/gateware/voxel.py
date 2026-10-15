@@ -17,7 +17,7 @@ Bit exact with the reference model (firmware/voxel/vr.c, see vr.h for the format
 - Hit: position on the face (t*d >> 18 + fraction), texel (texture RAM read), transparent texels
   continue the ray, shade = face level + fog, selected block edges/crosshair.
 
-Memories (bus, write only, 32-bit words): world window (4096 words: 32x32x32 voxels, 4-bit),
+Memories (bus, 32-bit words, reads for checks): world window (4096 words: 32x32x32 voxels, 4-bit),
 textures (1024 words: 16 textures of 16x16 8-bit texels), block textures (16 words: top/side/
 bottom textures).
 """
@@ -123,7 +123,7 @@ class VoxelRenderer(LiteXModule):
         self.specials += world, world_wr, world_rd, tex, tex_wr, tex_rd
         blocks = Array(Signal(12, name=f"block{i}") for i in range(16))
 
-        # Wishbone (writes only, reads return 0).
+        # Wishbone (reads: 1 wait cycle, through the write ports).
         is_world  = Signal()
         is_tex    = Signal()
         is_blocks = Signal()
@@ -140,10 +140,14 @@ class VoxelRenderer(LiteXModule):
             tex_wr.dat_w.eq(bus.dat_w),
             tex_wr.we.eq(write & is_tex),
         ]
+        read_wait = Signal()
         self.sync += [
             If(write & is_blocks, blocks[bus.adr[:4]].eq(bus.dat_w[:12])),
-            bus.ack.eq(bus.cyc & bus.stb & ~bus.ack),
+            read_wait.eq(bus.cyc & bus.stb & ~bus.we & ~bus.ack & ~read_wait),
+            bus.ack.eq(bus.cyc & bus.stb & ~bus.ack & (bus.we | read_wait)),
         ]
+        self.comb += bus.dat_r.eq(Mux(is_world, world_wr.dat_r,
+            Mux(is_tex, tex_wr.dat_r, blocks[bus.adr[:4]]))),
 
         # Parameters -------------------------------------------------------------------------------
         fwd   = [Signal((16, True), name=f"fwd{i}")   for i in range(3)]
@@ -200,6 +204,9 @@ class VoxelRenderer(LiteXModule):
             return Mux(d[i] > 0, 1, Mux(d[i] < 0, -1, 0))
 
         # DDA step (select the nearest boundary, step, checks), from STEP and CHECK/TEXEL (continue).
+        # Precomputed (registered) from tmax/c: valid 1 cycle after a step (READ: world RAM read).
+        sel_c = Signal(2)
+        nc_c  = [Signal(8, name="nc_c0"), Signal((10, True), name="nc_c1"), Signal(8, name="nc_c2")]
         sel   = Signal(2)
         t_sel = Signal(24)
         nc    = [Signal(8, name="nc0"), Signal((10, True), name="nc1"), Signal(8, name="nc2")]
@@ -207,20 +214,26 @@ class VoxelRenderer(LiteXModule):
         ntmax = Signal(25)
         self.comb += [
             If((tmax[0] <= tmax[1]) & (tmax[0] <= tmax[2]),
-                sel.eq(0),
+                sel_c.eq(0),
             ).Elif(tmax[1] <= tmax[2],
-                sel.eq(1),
+                sel_c.eq(1),
             ).Else(
-                sel.eq(2),
+                sel_c.eq(2),
             ),
-            t_sel.eq(Array(tmax)[sel]),
-            ntmax.eq(Array(tmax)[sel] + Array(delta)[sel]),
-            nc[0].eq(c[0] + Mux(sel == 0, step_of(0), 0)),
-            nc[1].eq(c[1] + Mux(sel == 1, step_of(1), 0)),
-            nc[2].eq(c[2] + Mux(sel == 2, step_of(2), 0)),
-            out.eq((nc[1] < 0) | (nc[1] >= VR_WINDOW) |
-                   ((nc[0] - self.window.fields.x)[5:8] != 0) |
-                   ((nc[2] - self.window.fields.z)[5:8] != 0)),
+            nc_c[0].eq(c[0] + Mux(sel_c == 0, step_of(0), 0)),
+            nc_c[1].eq(c[1] + Mux(sel_c == 1, step_of(1), 0)),
+            nc_c[2].eq(c[2] + Mux(sel_c == 2, step_of(2), 0)),
+        ]
+        self.sync += [
+            sel.eq(sel_c),
+            t_sel.eq(Array(tmax)[sel_c]),
+            ntmax.eq(Array(tmax)[sel_c] + Array(delta)[sel_c]),
+            nc[0].eq(nc_c[0]),
+            nc[1].eq(nc_c[1]),
+            nc[2].eq(nc_c[2]),
+            out.eq((nc_c[1] < 0) | (nc_c[1] >= VR_WINDOW) |
+                   ((nc_c[0] - self.window.fields.x)[5:8] != 0) |
+                   ((nc_c[2] - self.window.fields.z)[5:8] != 0)),
         ]
 
         def dda_step():
@@ -277,18 +290,23 @@ class VoxelRenderer(LiteXModule):
         ]
 
         # Shade: face level + fog.
-        texel = Signal(8)
-        fog   = Signal(24)
-        shade = Signal(4)
+        # Note: sums are computed in their own signals (a sum inside a Verilog comparison has the
+        # width of the comparison operands: level + fog[:3] would wrap at 3 bits, not in Migen's
+        # simulation).
+        texel     = Signal(8)
+        fog       = Signal(24)
+        shade_sum = Signal(4)
+        shade     = Signal(4)
         self.comb += [
             texel.eq(Array(tex_rd.dat_r[8*i:8*(i + 1)] for i in range(4))[texel_byte]),
             If(hit_t > self.fog_start.storage,
                 fog.eq((hit_t - self.fog_start.storage) >> self.fog.fields.shift),
             ),
-            If((fog > 7) | ((level + fog[:3]) > 7),
+            shade_sum.eq(level + fog[:3]),
+            If((fog > 7) | (shade_sum > 7),
                 shade.eq(7),
             ).Else(
-                shade.eq(level + fog[:3]),
+                shade.eq(shade_sum),
             ),
         ]
 
@@ -420,8 +438,9 @@ class VoxelRenderer(LiteXModule):
             NextValue(c[1], cam_cell[1]),
             NextValue(c[2], cam_cell[2]),
             NextValue(n, 0),
-            NextState("STEP"),
+            NextState("SETUP"),
         )
+        fsm.act("SETUP", NextState("STEP")) # DDA step precomputation.
         fsm.act("STEP", dda_step())
         fsm.act("READ", NextState("CHECK"))
         voxel = Signal(4)

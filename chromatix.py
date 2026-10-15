@@ -865,7 +865,9 @@ class BaseSoC(SoCMini):
                 esp32_ctrl.usb_dtr.eq(0),
                 esp32_ctrl.usb_rts.eq(0),
             ]
-            if not with_app:
+            # Voxel game: no ESP32 UART/USB link (logic/timing: the GW5A-25 is nearly full).
+            with_app_link = with_app and not with_voxel
+            if not with_app_link:
                 self.comb += esp32_ctrl.usb_rxd.eq(1)
             else:
                 esp32_uart_pads = Record([("tx", 1), ("rx", 1)])
@@ -881,7 +883,7 @@ class BaseSoC(SoCMini):
             cdc_phy = CDCStreamPHY()
             self.cdc_rx = stream.ClockDomainCrossing([("data", 8)], cd_from="phy", cd_to="sys")
             self.cdc_tx = stream.ClockDomainCrossing([("data", 8)], cd_from="sys", cd_to="phy")
-            if not with_app:
+            if not with_app_link:
                 cdc_phy.source = self.cdc_rx.source
                 cdc_phy.sink   = self.cdc_tx.sink
             else:
@@ -935,7 +937,7 @@ class BaseSoC(SoCMini):
                 usb_dev.cdc_source.connect(self.cdc_rx.sink),
                 self.cdc_tx.source.connect(usb_dev.cdc_sink),
             ]
-        if with_app:
+        if with_app and not with_voxel:
             # Host 1200 baud touch (CDC line coding), DTR (debug session end).
             usb_touch = Signal()
             self.sync.phy += usb_touch.eq(usb_dev.ctrl_uart.dte_rate == 1200)
