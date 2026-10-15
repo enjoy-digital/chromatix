@@ -151,6 +151,32 @@ Played on the hardware with `chromatic.py sequence` (buttons) and UVC captures, 
 Measured: ~53-55 fps walking/turning on the ground (window columns streamed as the player moves),
 ~33 fps flying high (long rays through the air: 2 cycles per DDA step).
 
+## Augustin game (firmware only, same bitstream)
+
+`firmware/augustin`: a game for a kid on the same `--with-voxel` bitstream (no gateware change),
+sharing the renderer model, HALs and syscalls of `firmware/voxel`. AUGUSTIN is built in giant
+colored bricks (AUGU on a log shelf, STIN below, 5x7 letters 2 bricks thick), to destroy:
+
+- Tools (A: next, B: use, held: repeat): punch (1 brick), big hammer (3x3x3, screen shake), TNT
+  (placed, flashing fuse 2.5s, sphere of radius 3, chain reactions, the player hops).
+- Unsupported bricks fall (flood fill from the bricks resting on the ground/shelf/TNT, one cell per
+  45ms tick), a brick falling on the player bonks and pops. Broken bricks sparkle (rainbow block,
+  300ms).
+- Surprises hidden in bricks (world byte bits 7:4): boing (the player is launched), prout; gold
+  bricks: bonus counter.
+- HUD: letters with remaining bricks bars, tool, time, gold. Banners over the 3D view (full rows
+  written after the render): "CASSE TOUT !", then "BRAVO AUGUSTIN !" with the time (record), confetti
+  bricks, and the name rebuilds itself.
+- Procedural sounds (tones with slides/vibrato + noise, melodies).
+
+```bash
+make -C firmware/augustin BUILD_DIR=../../build_voxel
+./scripts/chromatic.py --serial /dev/ttyACM0 run firmware/augustin/augustin.bin  # --args win: test
+make -C firmware/augustin -f Makefile.host && firmware/augustin/augustin_host     # PC
+```
+
+<img src="images/augustin_chromatic.png" width="320" alt="Augustin game on the Chromatic (intro), captured over UVC">
+
 ## Known issues / next
 
 - Flying high: ~33 fps (see above), next: 2 rays in flight in the renderer (the DDA waits for the

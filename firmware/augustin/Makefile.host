@@ -1,0 +1,27 @@
+# ChromatiX Augustin game, host build (SDL2 emulation of the Chromatic: 160x144 LCD, buttons, audio).
+#   make -f Makefile.host
+#   ./augustin_host
+
+include sources.mak
+
+CC      ?= gcc
+CFLAGS  += -O2 -g -Wall -Wextra -Wno-unused-parameter $(AUGUSTIN_CFLAGS) $(shell sdl2-config --cflags)
+LDLIBS  += $(shell sdl2-config --libs) -lm
+OBJDIR   = build_host
+OBJS     = $(addprefix $(OBJDIR)/, $(addsuffix .o, $(AUGUSTIN_SRCS) hal_sdl))
+
+augustin_host: $(OBJS)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+vpath %.c . ../voxel
+
+$(OBJDIR)/%.o: %.c *.h ../voxel/*.h sources.mak Makefile.host | $(OBJDIR)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR):
+	mkdir -p $@
+
+clean:
+	rm -rf $(OBJDIR) augustin_host
+
+.PHONY: clean

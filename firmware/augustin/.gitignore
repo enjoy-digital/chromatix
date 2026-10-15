@@ -1,0 +1,9 @@
+build_host/
+augustin_host
+build/
+*.o
+*.d
+*.elf
+*.elf.map
+*.bin
+snap_*.bmp
