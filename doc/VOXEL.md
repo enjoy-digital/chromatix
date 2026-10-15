@@ -60,7 +60,8 @@ Formats (`vr.h`):
 | Camera | cell (X/Z mod 256, Y 0-31) + fraction (Q8), fwd/right/down vectors (Q14, fwd unit and orthogonal to right/down: t is the view depth) |
 | t | Q12, 24-bit, saturated (`0xffffff`: never) |
 | Pixel | `(color << 3) \| shade`, shade = min(7, face + max(0, t - fog_start) >> fog_shift), faces: top 0, Z 1, X 2, bottom 3 |
-| Sky | `sky_base \| clamp(4 - (dy >> 12), 0, 7)` |
+| Selection | edges where the face position (Q8) is within `min(127, (t >> sel_shift) + 1)` of the face border: constant width on the screen (sel_shift 10: ~2 pixels) |
+| Sky | `sky_base \| clamp((16 - (dy >> 10) + bayer2x2[y&1][x&1]) >> 2, 0, 7)` (ordered dither of a 4x finer gradient) |
 | Rays end | after t_far, out of the window `[origin, origin + 31]` (X/Z), out of the world height, after 64 steps: sky |
 
 Palette (`art.c`): 32 colors x 8 shades (shades 0-3: darker faces, 4-7: fog toward the horizon
@@ -72,7 +73,7 @@ color), color 31: sky gradient (zenith to horizon), 28-30: UI. Textures are gene
 ./chromatix.py --gowin-path ~/tools/gowin_1.9.12.04/IDE --with-voxel --build --output-dir build_voxel
 ./scripts/chromatix_flash.py flash build_voxel/gateware/chromatic.fs
 make -C firmware/voxel BUILD_DIR=../../build_voxel
-./scripts/chromatic.py --serial /dev/ttyACM0 run firmware/voxel/voxel.bin   # --args "seed=42", "sw"
+./scripts/chromatic.py --serial /dev/ttyACM0 run firmware/voxel/voxel.bin   # --args "seed=42 time=400 sw"
 ./scripts/chromatic.py capture voxel.png
 ```
 
@@ -90,7 +91,7 @@ firmware/voxel/voxel_host` (keys: arrows, X: A, Z: B, Enter: Start, Backspace: S
 | Select + D-pad | look up/down, strafe |
 | A | place the hotbar block |
 | B | break the targeted block |
-| Start | jump (swim up in water; fly: up) |
+| Start | jump (swim up in water; fly: up), walking into a 1 cell step jumps automatically |
 | Start twice | fly on/off |
 | Select + Start | fly: down |
 | Select + A / B | next/previous hotbar block |
@@ -134,7 +135,28 @@ What it took to fit (lessons):
 - The DDA step selection (nearest boundary, next cell, window/height checks) is precomputed in
   registers during the world RAM read cycle (was the critical path).
 
+## Playtest (over UVC, virtual buttons)
+
+Played on the hardware with `chromatic.py sequence` (buttons) and UVC captures, fixes:
+
+| Found | Fix |
+|---|---|
+| Fly on/off: the press after a double press toggled again (fly off when holding Start to go up) | a toggle starts a new double press |
+| Stuck at every 1 cell step (D-pad only: Start + Up needed) | auto-jump when walking into a 1 cell step |
+| Selected block edges: 1/16 of a block, thick black bars close to the block | edges width scaled by the distance (~2 pixels at any distance, renderer) |
+| Sky: 3 visible bands (8 levels) | dithered 4x finer gradient (renderer) |
+| Nights black (unplayable) | ~1/2 brightness, moonlight blue, lighter night sky/fog; `time=` argument (seconds into the day) to test |
+| Looking up/down too fast | slower pitch (280/1024 turn/s) |
+
+Measured: ~53-55 fps walking/turning on the ground (window columns streamed as the player moves),
+~33 fps flying high (long rays through the air: 2 cycles per DDA step).
+
 ## Known issues / next
+
+- Flying high: ~33 fps (see above), next: 2 rays in flight in the renderer (the DDA waits for the
+  world RAM 1 cycle out of 2). The window edges (32x32 around the camera) can be seen looking down
+  from high up (not fogged at that distance).
+- The hotbar is dimmed at night (block colors share the day/night palette).
 
 - View distance: the 32x32x32 window, placed up to 8 cells ahead of the camera (fog hides its edges);
   world height 32.

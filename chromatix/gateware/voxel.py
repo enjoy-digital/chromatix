@@ -15,7 +15,8 @@ Bit exact with the reference model (firmware/voxel/vr.c, see vr.h for the format
 - 3D DDA (Amanatides & Woo), 2 cycles per step (world RAM read), up to 64 steps: the ray ends
   (sky) after t_far, out of the window (X/Z) or of the world height (Y).
 - Hit: position on the face (t*d >> 18 + fraction), texel (texture RAM read), transparent texels
-  continue the ray, shade = face level + fog, selected block edges/crosshair.
+  continue the ray, shade = face level + fog, selected block edges (width (t >> shift) + 1: ~1
+  pixel at any distance), crosshair. Sky: 2x2 ordered dither of a 4x finer gradient.
 
 Memories (bus, 32-bit words, reads for checks): world window (4096 words: 32x32x32 voxels, 4-bit),
 textures (1024 words: 16 textures of 16x16 8-bit texels), block textures (16 words: top/side/
@@ -105,6 +106,7 @@ class VoxelRenderer(LiteXModule):
             CSRField("select",       size=8, description="Selected block edges color."),
             CSRField("cross_enable", size=1, description="Crosshair enable."),
             CSRField("cross",        size=8, description="Crosshair color."),
+            CSRField("select_shift", size=5, description="Selected block edges width: (t >> shift) + 1 (Q8)."),
         ])
         self.status = CSRStatus(fields=[
             CSRField("busy", size=1, description="Render in progress."),
@@ -270,6 +272,8 @@ class VoxelRenderer(LiteXModule):
 
         # Hit: position on the face, texture coordinates, texture.
         pos  = [Signal(8, name=f"pos{i}") for i in range(3)]
+        pu   = Signal(8)
+        pw   = Signal(8)
         u    = Signal(4)
         w    = Signal(4)
         tsel = Signal(4)
@@ -279,14 +283,27 @@ class VoxelRenderer(LiteXModule):
             [pos[i].eq(cam_frac[i] + prod[i][18:26]) for i in range(3)],
             btex.eq(blocks[hit_v]),
             Case(hit_a, {
-                0: [u.eq(pos[2][4:]), w.eq(15 - pos[1][4:]), lvl.eq(FACE_X), tsel.eq(btex[4:8])],
-                2: [u.eq(pos[0][4:]), w.eq(15 - pos[1][4:]), lvl.eq(FACE_Z), tsel.eq(btex[4:8])],
+                0: [pu.eq(pos[2]), pw.eq(pos[1]), lvl.eq(FACE_X), tsel.eq(btex[4:8])],
+                2: [pu.eq(pos[0]), pw.eq(pos[1]), lvl.eq(FACE_Z), tsel.eq(btex[4:8])],
                 "default": If(d[1] < 0,
-                    u.eq(pos[0][4:]), w.eq(pos[2][4:]), lvl.eq(FACE_TOP), tsel.eq(btex[0:4]),
+                    pu.eq(pos[0]), pw.eq(pos[2]), lvl.eq(FACE_TOP), tsel.eq(btex[0:4]),
                 ).Else(
-                    u.eq(pos[0][4:]), w.eq(pos[2][4:]), lvl.eq(FACE_BOTTOM), tsel.eq(btex[8:12]),
+                    pu.eq(pos[0]), pw.eq(pos[2]), lvl.eq(FACE_BOTTOM), tsel.eq(btex[8:12]),
                 )
             }),
+            u.eq(pu[4:]),
+            w.eq(Mux(hit_a == 1, pw[4:], 15 - pw[4:])),
+        ]
+
+        # Selected block edges width (Q8): (t >> shift) + 1, <= 127 (registered in HIT0).
+        edge_t   = Signal(24)
+        edge_w   = Signal(7)
+        edge_pu  = Signal(9) # Sums in their own signals (Verilog comparison widths).
+        edge_pw  = Signal(9)
+        self.comb += [
+            edge_t.eq(hit_t >> self.colors.fields.select_shift),
+            edge_pu.eq(pu + edge_w),
+            edge_pw.eq(pw + edge_w),
         ]
 
         # Shade: face level + fog.
@@ -310,9 +327,15 @@ class VoxelRenderer(LiteXModule):
             ),
         ]
 
-        # Sky.
-        sky = Signal((5, True))
-        self.comb += sky.eq(4 - (d[1] >> 12))
+        # Sky: 2x2 ordered dither (Bayer 0 2 / 3 1) of a 4x finer gradient.
+        sky_fine = Signal((8, True))
+        sky      = Signal((6, True))
+        bayer    = Signal(2)
+        self.comb += [
+            Case(Cat(x[0], y[0]), {0: bayer.eq(0), 1: bayer.eq(2), 2: bayer.eq(3), 3: bayer.eq(1)}),
+            sky_fine.eq(16 - (d[1] >> 10) + bayer),
+            sky.eq(sky_fine >> 2),
+        ]
 
         # Crosshair.
         cross = Signal()
@@ -455,6 +478,7 @@ class VoxelRenderer(LiteXModule):
         )
         # Hit: products t*d (position on the face).
         fsm.act("HIT0",
+            NextValue(edge_w, Mux(edge_t >= 126, 127, edge_t + 1)),
             NextState("HIT1"),
         )
         # Texture coordinates, selection, texture read.
@@ -465,7 +489,7 @@ class VoxelRenderer(LiteXModule):
             NextValue(highlight, self.select.fields.enable &
                 (c[0] == self.select.fields.x) & (c[1] == self.select.fields.y) &
                 (c[2] == self.select.fields.z) &
-                ((u == 0) | (u == 15) | (w == 0) | (w == 15))),
+                ((pu < edge_w) | (edge_pu > 255) | (pw < edge_w) | (edge_pw > 255))),
             NextState("HIT2"),
         )
         fsm.act("HIT2", NextState("TEXEL"))

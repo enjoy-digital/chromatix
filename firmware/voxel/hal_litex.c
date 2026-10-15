@@ -301,7 +301,8 @@ static void vr_render_hw(const struct vr_camera *cam)
 	voxel_colors_write(
 		(uint32_t)cam->sel_index   << CSR_VOXEL_COLORS_SELECT_OFFSET |
 		(uint32_t)cam->cross_en    << CSR_VOXEL_COLORS_CROSS_ENABLE_OFFSET |
-		(uint32_t)cam->cross_index << CSR_VOXEL_COLORS_CROSS_OFFSET);
+		(uint32_t)cam->cross_index << CSR_VOXEL_COLORS_CROSS_OFFSET |
+		(uint32_t)(cam->sel_shift & 31) << CSR_VOXEL_COLORS_SELECT_SHIFT_OFFSET);
 	/* The renderer uses the line buffers: CPU line writes only before/after. */
 	/* Line buffers copied in order: the renderer continues the CPU's sequence (VR_HEIGHT lines: a
 	   multiple of FB_SLOTS, so the CPU's next slot is unchanged). */

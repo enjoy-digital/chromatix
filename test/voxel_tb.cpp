@@ -71,7 +71,7 @@ int main(int argc, char **argv)
 		FOG_START = cam.fog_start;
 		FOG       = (cam.fog_shift & 31) | cam.sky_base << 5;
 		SELECT    = cam.sel_en | cam.sel_x << 1 | cam.sel_y << 9 | (uint32_t)cam.sel_z << 17;
-		COLORS    = cam.sel_index | cam.cross_en << 8 | cam.cross_index << 9;
+		COLORS    = cam.sel_index | cam.cross_en << 8 | cam.cross_index << 9 | (cam.sel_shift & 31) << 17;
 
 		/* Render (start pulse), lines captured from the line buffer writes/copy requests. */
 		static uint8_t slots[4][VR_WIDTH], image[VR_HEIGHT][VR_WIDTH];

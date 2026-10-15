@@ -13,7 +13,9 @@
 //
 // Fixed point: camera fraction Q8, ray vectors Q14 (forward . right = forward . down = 0, |forward|
 // = 1: t is the view depth), t Q12 (24-bit, VR_TINF: never). Pixel: (color << 3) | shade, shade =
-// min(7, face level + (max(t - fog_start, 0) >> fog_shift)), sky: sky_base | clamp(4 - (dy >> 12), 0, 7).
+// min(7, face level + (max(t - fog_start, 0) >> fog_shift)), sky: sky_base | clamp((16 - (dy >> 10) +
+// bayer2x2) >> 2, 0, 7) (ordered dither). Selected block edges: face position within w = min(127,
+// (t >> sel_shift) + 1) (Q8) of the face border (~constant width on the screen).
 
 #ifndef VR_H
 #define VR_H
@@ -45,6 +47,7 @@ struct vr_camera {
 	uint8_t  fog_shift;     /* Fog: +1 shade every 2^fog_shift (Q12) after fog_start. */
 	uint8_t  sky_base;      /* Sky palette base (8 levels). */
 	uint8_t  sel_en, sel_x, sel_y, sel_z, sel_index;  /* Selected block (edges highlighted). */
+	uint8_t  sel_shift;                               /* Edges width: (t >> sel_shift) + 1 (Q8). */
 	uint8_t  cross_en, cross_index;                   /* Crosshair. */
 };
 

@@ -156,10 +156,12 @@ static uint16_t rgb555(unsigned r, unsigned g, unsigned b)
 void art_palette(int daylight)
 {
 	static const uint8_t zenith_day[3]  = { 92, 140, 236}, horizon_day[3]   = {178, 212, 248};
-	static const uint8_t zenith_night[3] = {  4,   6,  20}, horizon_night[3] = { 22,  28,  54};
+	static const uint8_t zenith_night[3] = { 10,  14,  40}, horizon_night[3] = { 40,  52,  96};
 	uint16_t palette[256];
 	unsigned zenith[3], horizon[3];
-	unsigned light = 64 + daylight*192/256; /* Blocks brightness (night: 1/4). */
+	/* Blocks brightness: night ~1/2, moonlight blue. */
+	unsigned light   = 120 + daylight*136/256;
+	unsigned light_b = light + (256 - light)/3;
 
 	for (int i = 0; i < 3; i++) {
 		zenith[i]  = mix(zenith_night[i],  zenith_day[i],  daylight);
@@ -176,7 +178,7 @@ void art_palette(int daylight)
 					rgb[i] = colors[c][i]; /* UI. */
 				} else {
 					/* Faces darker with the shade (face levels 0-3), then fog toward the horizon color. */
-					unsigned v   = colors[c][i]*light >> 8;
+					unsigned v   = colors[c][i]*(i == 2 ? light_b : light) >> 8;
 					unsigned dim = s < 4 ? 256 - s*28 : 256 - 3*28;
 					unsigned fog = s <= 3 ? 0 : (s - 3)*64;
 					rgb[i] = mix(v*dim >> 8, horizon[i], fog > 256 ? 256 : fog);

@@ -78,19 +78,24 @@ uint8_t vr_pixel(const struct vr_scene *scene, const struct vr_camera *cam, int 
 		unsigned pos[3];
 		for (int b = 0; b < 3; b++)
 			pos[b] = (unsigned)(frac[b] + (int32_t)(((int64_t)t*d[b]) >> 18)) & 0xff;
-		unsigned u, w, level, texture, blocktex = scene->blocks[v];
+		unsigned u, w, pu, pw, level, texture, blocktex = scene->blocks[v];
 		if (a == 0) {
-			u = pos[2] >> 4; w = 15 - (pos[1] >> 4); level = FACE_X; texture = (blocktex >> 4) & 0xf;
+			pu = pos[2]; pw = pos[1]; level = FACE_X; texture = (blocktex >> 4) & 0xf;
 		} else if (a == 2) {
-			u = pos[0] >> 4; w = 15 - (pos[1] >> 4); level = FACE_Z; texture = (blocktex >> 4) & 0xf;
+			pu = pos[0]; pw = pos[1]; level = FACE_Z; texture = (blocktex >> 4) & 0xf;
 		} else if (step[1] < 0) {
-			u = pos[0] >> 4; w = pos[2] >> 4; level = FACE_TOP; texture = blocktex & 0xf;
+			pu = pos[0]; pw = pos[2]; level = FACE_TOP; texture = blocktex & 0xf;
 		} else {
-			u = pos[0] >> 4; w = pos[2] >> 4; level = FACE_BOTTOM; texture = (blocktex >> 8) & 0xf;
+			pu = pos[0]; pw = pos[2]; level = FACE_BOTTOM; texture = (blocktex >> 8) & 0xf;
 		}
-		if (cam->sel_en && c[0] == cam->sel_x && c[1] == cam->sel_y && c[2] == cam->sel_z &&
-		    (u == 0 || u == 15 || w == 0 || w == 15))
-			return cam->sel_index;
+		u = pu >> 4;
+		w = (a == 1) ? pw >> 4 : 15 - (pw >> 4);
+		if (cam->sel_en && c[0] == cam->sel_x && c[1] == cam->sel_y && c[2] == cam->sel_z) {
+			uint32_t ew = (t >> (cam->sel_shift & 31)) + 1;
+			ew = ew > 127 ? 127 : ew;
+			if (pu < ew || pu + ew > 255 || pw < ew || pw + ew > 255)
+				return cam->sel_index;
+		}
 		unsigned color = texel(scene, texture, u, w) & 0x1f;
 		if (color == 0)
 			continue; /* Transparent texel (leaves, glass). */
@@ -98,8 +103,9 @@ uint8_t vr_pixel(const struct vr_scene *scene, const struct vr_camera *cam, int 
 		return (color << 3) | (shade > 7 ? 7 : shade);
 	}
 
-	/* Sky. */
-	int level = 4 - (d[1] >> 12);
+	/* Sky (2x2 ordered dither of a 4x finer gradient). */
+	static const int bayer[4] = {0, 2, 3, 1};
+	int level = (16 - (d[1] >> 10) + bayer[(y & 1)*2 + (x & 1)]) >> 2;
 	return cam->sky_base | (level < 0 ? 0 : level > 7 ? 7 : level);
 }
 

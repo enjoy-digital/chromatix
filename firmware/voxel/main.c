@@ -25,6 +25,7 @@
 #define WALK_SPEED   1100 /* Q8/s. */
 #define FLY_SPEED    2000
 #define TURN_SPEED   420  /* Angles/s. */
+#define LOOK_SPEED   280
 #define PITCH_MAX    220
 #define GRAVITY      5120 /* Q8/s^2. */
 #define JUMP_SPEED   1850
@@ -207,7 +208,7 @@ static int daylight_at(uint32_t ms)
 
 int main(void)
 {
-	uint32_t seed = 1234;
+	uint32_t seed = 1234, time_offset = 0;
 	uint32_t last, prev_buttons = 0, start_ms = 0, repeat_ms = 0, fps_ms, fps_frames = 0;
 	int      daylight = 256;
 	const char *args;
@@ -216,6 +217,8 @@ int main(void)
 	printf("ChromatiX voxel\n");
 	if ((args = hal_args()) && strstr(args, "seed="))
 		seed = strtoul(strstr(args, "seed=") + 5, NULL, 0);
+	if (args && strstr(args, "time="))
+		time_offset = strtoul(strstr(args, "time=") + 5, NULL, 0)*1000; /* Seconds into the day. */
 	trig_init();
 	art_init();
 	sound_init();
@@ -238,8 +241,8 @@ int main(void)
 		/* Turn/look. */
 		if (!sel && (buttons & (1 << HAL_BTN_LEFT)))  player.yaw -= TURN_SPEED*dt/1000;
 		if (!sel && (buttons & (1 << HAL_BTN_RIGHT))) player.yaw += TURN_SPEED*dt/1000;
-		if (sel && (buttons & (1 << HAL_BTN_UP)))     player.pitch += TURN_SPEED*dt/1000;
-		if (sel && (buttons & (1 << HAL_BTN_DOWN)))   player.pitch -= TURN_SPEED*dt/1000;
+		if (sel && (buttons & (1 << HAL_BTN_UP)))     player.pitch += LOOK_SPEED*dt/1000;
+		if (sel && (buttons & (1 << HAL_BTN_DOWN)))   player.pitch -= LOOK_SPEED*dt/1000;
 		player.yaw  &= ANGLES - 1;
 		player.pitch = player.pitch > PITCH_MAX ? PITCH_MAX : player.pitch < -PITCH_MAX ? -PITCH_MAX : player.pitch;
 
@@ -255,8 +258,16 @@ int main(void)
 			speed /= 2;
 		int32_t dx = (forward*s + strafe*c)*speed >> 14;
 		int32_t dz = (forward*c - strafe*s)*speed >> 14;
-		int moved = move_axis(0, dx);
-		moved    |= move_axis(2, dz);
+		int moved_x = move_axis(0, dx);
+		int moved_z = move_axis(2, dz);
+		int moved   = moved_x | moved_z;
+		/* Auto-jump: walking into a 1 cell step (free above it). */
+		if (!player.fly && player.on_ground && (!moved_x || !moved_z) &&
+		    !collides(player.x + (dx > 0 ? 64 : dx < 0 ? -64 : 0), player.y + 256 + 8,
+		              player.z + (dz > 0 ? 64 : dz < 0 ? -64 : 0))) {
+			player.vy = JUMP_SPEED;
+			player.on_ground = 0;
+		}
 		if (player.on_ground && (dx || dz) && moved) {
 			player.walked += (dx < 0 ? -dx : dx) + (dz < 0 ? -dz : dz);
 			if (player.walked > 160) {
@@ -272,8 +283,9 @@ int main(void)
 			if (now - start_ms < 300) {
 				player.fly ^= 1;
 				player.vy   = 0;
-			}
-			start_ms = now;
+				start_ms    = 0; /* The next press starts a new double press. */
+			} else
+				start_ms = now;
 		}
 		player.in_water = world_get(player.x >> 8, (player.y + 128) >> 8, player.z >> 8) == BLOCK_WATER;
 		if (player.fly) {
@@ -363,11 +375,12 @@ int main(void)
 			cam.sel_en = 1;
 			cam.sel_x  = pick.x; cam.sel_y = pick.y; cam.sel_z = pick.z;
 			cam.sel_index = COLOR_BLACK << 3;
+			cam.sel_shift = 10; /* ~2 pixels: pixel angle 0.00875 (Q14 143) -> ~2^-11 Q8 per Q12 of t. */
 		}
 		prev_buttons = buttons;
 
 		/* Day/night. */
-		int light = daylight_at(now);
+		int light = daylight_at(now + time_offset);
 		if (light != daylight && (light - daylight > 3 || daylight - light > 3 || light == 0 || light == 256)) {
 			daylight = light;
 			art_palette(daylight);

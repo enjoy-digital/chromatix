@@ -33,7 +33,7 @@ class VRCamera(ctypes.Structure):
         ("t_far", ctypes.c_uint32), ("fog_start", ctypes.c_uint32),
         ("fog_shift", ctypes.c_uint8), ("sky_base", ctypes.c_uint8),
         ("sel_en", ctypes.c_uint8), ("sel_x", ctypes.c_uint8), ("sel_y", ctypes.c_uint8),
-        ("sel_z", ctypes.c_uint8), ("sel_index", ctypes.c_uint8),
+        ("sel_z", ctypes.c_uint8), ("sel_index", ctypes.c_uint8), ("sel_shift", ctypes.c_uint8),
         ("cross_en", ctypes.c_uint8), ("cross_index", ctypes.c_uint8),
     ]
 
@@ -107,7 +107,7 @@ def make_camera(yaw, pitch, pos, window=(0, 0), select=None, scale=143):
         down  = [(q(sp*s)*scale) >> 14, -(q(cp)*scale >> 14), (q(sp*c)*scale) >> 14],
         ox = window[0], oz = window[1],
         t_far = 26 << 12, fog_start = 10 << 12, fog_shift = 13, sky_base = 31 << 3,
-        sel_en = 0, sel_x = 0, sel_y = 0, sel_z = 0, sel_index = 29 << 3,
+        sel_en = 0, sel_x = 0, sel_y = 0, sel_z = 0, sel_index = 29 << 3, sel_shift = 11,
         cross_en = 1, cross_index = 28 << 3,
     )
     if select is not None:
@@ -143,7 +143,7 @@ def gateware_rows(scene, cam, first, count, div_bits=2):
         yield from csr(dut.fog_start, cam["fog_start"])
         yield from csr(dut.fog,       cam["fog_shift"] | cam["sky_base"] << 5)
         yield from csr(dut.select,    cam["sel_en"] | cam["sel_x"] << 1 | cam["sel_y"] << 9 | cam["sel_z"] << 17)
-        yield from csr(dut.colors,    cam["sel_index"] | cam["cross_en"] << 8 | cam["cross_index"] << 9)
+        yield from csr(dut.colors,    cam["sel_index"] | cam["cross_en"] << 8 | cam["cross_index"] << 9 | cam["sel_shift"] << 17)
         yield from csr(dut.control,   1 | 2 << 1)
         yield
         while (yield dut.status.fields.busy):
@@ -276,6 +276,7 @@ def test_voxel_verilog_frames(tmp_path):
             (0.6, -0.3, (16.5, 14.6, 16.3), {}),
             (0.0,  0.0, (16.0, 13.0,  4.0), {}),
             (2.4, -1.1, (10.3, 16.2, 20.7), {"select": (10, 12, 18)}),
+            (0.3, -0.6, (16.5, 13.4, 16.5), {"select": (16, 11, 17)}),
             (-2.0, 0.2, (255.5, 15.2, 1.4), {"window": (240, 241)}),
             (1.0,  0.9, (16.5, 20.5, 16.5), {})]):
         cam = make_camera(yaw, pitch, pos, **kw)
